@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>回收站</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='trash-page.js', v='20260316-monitor-trash') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel trash-hero">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">回收站</p>
+        <h2>先放进回收站，再决定是否真的删掉。</h2>
+        <p class="story-dek">恢复放在前面，永久删除留在最后一步。这样误删不会立刻把研究记录清空。</p>
+      </div>
+      <aside class="stock-hero-aside">
+        <article class="mini-fact">
+          <span class="mini-label">当前条目</span>
+          <strong><span data-trash-filtered-count>{{ trash_stats.filtered_count }}</span> / <span data-trash-total-count>{{ trash_stats.total_count }}</span></strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">研究笔记 / 资料</span>
+          <strong><span data-trash-note-count>{{ trash_stats.note_count }}</span> / <span data-trash-file-count>{{ trash_stats.file_count }}</span></strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">转录 / 分组</span>
+          <strong><span data-trash-transcript-count>{{ trash_stats.transcript_count }}</span> / <span data-trash-group-count>{{ trash_stats.group_count }}</span></strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">Monitor / 信息监控</span>
+          <strong><span data-trash-report-count>{{ trash_stats.monitor_report_count }}</span> / <span data-trash-signal-report-count>{{ trash_stats.signal_report_count }}</span></strong>
+        </article>
+      </aside>
+    </section>
+
+    <main class="stock-layout trash-layout">
+      <section class="stock-main trash-main">
+        <section class="panel search-filter-panel">
+          <form class="stack-form search-form" action="{{ url_for('trash_page') }}" method="get">
+            <div class="search-input-row">
+              <input name="q" type="search" value="{{ trash_filters.query }}" placeholder="按标题股票或标筛回收站">
+              <button class="button button-primary" type="submit">筛选</button>
+            </div>
+
+            <div class="search-filter-grid">
+              <label class="form-field">
+                <span class="field-label">内容类型</span>
+                <select name="item_type">
+                  {% for option in trash_kind_options %}
+                    <option value="{{ option.value }}" {% if option.value == trash_filters.item_type %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field">
+                <span class="field-label">股票</span>
+                <select name="symbol">
+                  <option value="">全部股票</option>
+                  {% for stock in stock_options %}
+                    <option value="{{ stock.symbol }}" {% if stock.symbol == trash_filters.symbol %}selected{% endif %}>{{ stock.symbol }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field">
+                <span class="field-label">标签</span>
+                <input name="tag" type="text" value="{{ trash_filters.tag }}" placeholder="例：访谈 / 管理层">
+              </label>
+            </div>
+          </form>
+
+          {% if popular_tags %}
+            <div class="search-tag-bar">
+              {% for tag in popular_tags %}
+                <a class="detail-chip detail-chip-link" href="{{ url_for('trash_page', q=trash_filters.query, item_type=trash_filters.item_type, symbol=trash_filters.symbol, tag=tag.value) }}">#{{ tag.value }} · {{ tag.count }}</a>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel search-results-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">可恢复内容</p>
+              <h3>回收站条目</h3>
+              <p class="section-caption">恢复会回到原来的模块位置；永久删除时才会真正清理本地文件和云端资源。</p>
+            </div>
+            <span class="summary-count" data-trash-filtered-count>{{ trash_stats.filtered_count }}</span>
+          </div>
+
+          <div class="search-result-list" data-trash-result-list {% if not trash_items %}hidden{% endif %}>
+            {% for item in trash_items %}
+              <article class="search-result-card search-result-{{ item.item_type }}" data-trash-card data-trash-id="{{ item.id }}" data-trash-item-type="{{ item.item_type }}">
+                <div class="record-card-head">
+                  <div>
+                    <div class="card-inline-meta">
+                      <span class="meta-chip">{{ item.kind_label }}</span>
+                      {% if item.display_symbol %}
+                        <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=item.display_symbol) }}">{{ item.display_symbol }}</a>
+                      {% endif %}
+                      <span class="section-caption">删除于 {{ item.display_deleted_at }}</span>
+                    </div>
+                    <h4>{{ item.display_title }}</h4>
+                    <p class="section-caption">{{ item.kind_description }}</p>
+                  </div>
+                  <div class="card-link-row">
+                    <form action="{{ url_for('restore_trash_item', trash_id=item.id) }}" method="post" data-trash-restore-form data-trash-id="{{ item.id }}">
+                      <input type="hidden" name="next_url" value="{{ url_for('trash_page', q=trash_filters.query, item_type=trash_filters.item_type, symbol=trash_filters.symbol, tag=trash_filters.tag) }}">
+                      <button class="button button-primary button-compact" type="submit">恢复</button>
+                    </form>
+                    <form
+                      action="{{ url_for('permanently_delete_trash_item', trash_id=item.id) }}"
+                      method="post"
+                      data-trash-delete-form
+                      data-trash-id="{{ item.id }}"
+                      data-confirm-delete
+                      data-confirm-message="永久删除这个回收站条目吗？这一步会真正清理记录，之后将无法恢复。"
+                    >
+                      <input type="hidden" name="next_url" value="{{ url_for('trash_page', q=trash_filters.query, item_type=trash_filters.item_type, symbol=trash_filters.symbol, tag=trash_filters.tag) }}">
+                      <button class="danger-button danger-button-compact" type="submit">永久删除</button>
+                    </form>
+                  </div>
+                </div>
+
+                {% if item.tags %}
+                  <div class="chip-row item-tag-row">
+                    {% for tag in item.tags %}
+                      <a class="detail-chip detail-chip-link" href="{{ url_for('trash_page', q=trash_filters.query, item_type=trash_filters.item_type, symbol=item.display_symbol or trash_filters.symbol, tag=tag) }}">#{{ tag }}</a>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </div>
+
+          <div class="empty-card" data-trash-empty-state {% if trash_items %}hidden{% endif %}>
+            <p class="empty-title">回收站现在是空的</p>
+              <p>这是件好事。后面即使误删内容，也会先进入这里，而不是直接消失。</p>
+          </div>
+        </section>
+      </section>
+
+      <aside class="stock-sidebar trash-sidebar">
+        <section class="panel side-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">使用原则</p>
+              <h3>删除流程</h3>
+            </div>
+          </div>
+          <ul class="briefing-list">
+            <li>删除笔记、资料、会议转录和分组时，会先进入回收站。</li>
+            <li>恢复后会尽量回到原来的股票或模块，不需要手工重新整理。</li>
+            <li>只有在这里点“永久删除”，才会真正清理本地文件和云端附件。</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

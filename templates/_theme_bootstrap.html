@@ -1,0 +1,10 @@
+<script>
+  (function () {
+    try {
+      var savedTheme = window.localStorage.getItem("workspace-theme") || "cloud-blue";
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    } catch (error) {
+      document.documentElement.setAttribute("data-theme", "cloud-blue");
+    }
+  })();
+</script>

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ file_entry.original_name }} - 文件预览</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-detail-hero panel preview-hero">
+      <div class="stock-detail-copy">
+        <p class="eyebrow">文件预览</p>
+        <h2>{{ file_entry.original_name }}</h2>
+        <p class="story-dek">
+          这里提供文件的在线预览。文字文件会展示正文；图片文件会把说明放在上方，原图放在下方，方便你在同页里回看。
+        </p>
+      </div>
+
+      <aside class="stock-detail-actions">
+        <a class="button button-primary" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">返回 {{ stock.symbol }}</a>
+        <a class="button button-secondary" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=file_entry.id) }}">下载文件</a>
+        <div class="detail-stat-grid">
+          <article class="mini-fact">
+            <span class="mini-label">股票</span>
+            <strong>{{ stock.symbol }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">上传时间</span>
+            <strong>{{ file_entry.display_uploaded_at }}</strong>
+          </article>
+        </div>
+      </aside>
+    </section>
+
+    <main class="stock-detail-layout preview-layout">
+      <section class="stock-detail-main">
+        <section class="panel preview-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">{% if file_entry.is_image_previewable %}图片与说明{% else %}文字{% endif %}</p>
+              <h3>在线预览</h3>
+            </div>
+            {% if is_truncated %}
+              <span class="meta-chip">内容已截断</span>
+            {% endif %}
+          </div>
+
+          <div class="file-preview-body">
+            {% if file_entry.is_image_previewable and preview_note_html %}
+              <div class="file-preview-copy rich-output">
+                {{ preview_note_html | safe }}
+              </div>
+            {% endif %}
+
+            {% if file_entry.is_image_previewable %}
+              <div class="file-preview-media">
+                <img class="file-preview-image" src="{{ image_url }}" alt="{{ file_entry.original_name }}">
+              </div>
+            {% elif file_entry.is_text_previewable %}
+              <pre class="text-preview">{{ preview_text }}</pre>
+            {% endif %}
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

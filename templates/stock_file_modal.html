@@ -1,0 +1,40 @@
+<article class="reader-sheet reader-sheet-file">
+  <div class="reader-sheet-head">
+    <div class="reader-sheet-head-copy">
+      <p class="eyebrow">文件预览</p>
+      <h3>{{ file_entry.original_name }}</h3>
+      <p class="reader-sheet-meta-line">{{ file_entry.display_uploaded_at }}</p>
+    </div>
+    <button class="icon-button reader-sheet-close" type="button" aria-label="关闭预览" data-reader-close>×</button>
+  </div>
+  <div class="card-link-row reader-sheet-support">
+    <span class="meta-chip">{{ stock_symbol }}</span>
+    {% if file_entry.is_image_previewable %}
+      <span class="meta-chip">图片预览</span>
+    {% elif file_entry.is_text_previewable %}
+      <span class="meta-chip">文字预览</span>
+    {% endif %}
+    <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock_symbol, file_id=file_entry.id) }}">下载文件</a>
+    {% if is_truncated %}
+      <span class="meta-chip">内容已截断</span>
+    {% endif %}
+  </div>
+  <div class="reader-section-marker"><span>{% if file_entry.is_image_previewable %}说明与内容{% else %}正文{% endif %}</span></div>
+  <div class="reader-sheet-stage file-preview-body">
+    {% if file_entry.is_image_previewable and preview_note_html %}
+      <div class="reader-sheet-body reader-sheet-prose file-preview-copy rich-output">
+        {{ preview_note_html | safe }}
+      </div>
+    {% endif %}
+
+    {% if file_entry.is_image_previewable %}
+      <div class="file-preview-media">
+        <img class="file-preview-image" src="{{ image_url }}" alt="{{ file_entry.original_name }}">
+      </div>
+    {% elif file_entry.is_text_previewable %}
+      <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
+        <pre class="text-preview">{{ preview_text }}</pre>
+      </div>
+    {% endif %}
+  </div>
+</article>

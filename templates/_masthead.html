@@ -1,0 +1,215 @@
+{% set page_titles = {
+  "archive": "报告归档",
+  "monitor": "Monitor",
+  "signals": "信息监控",
+  "stocks": "股票工作台",
+  "transcripts": "语音转录",
+  "exports": "导出",
+  "ai": "AI",
+  "calendar": "活动日历",
+  "search": "全局搜索",
+  "trash": "回收站",
+} %}
+{% set nav_items = [
+  {"key": "archive", "label": "报告归档", "short": "报", "href": url_for("index")},
+  {"key": "monitor", "label": "Monitor", "short": "监", "href": url_for("monitor_page")},
+  {"key": "signals", "label": "信息监控", "short": "信", "href": url_for("signal_monitor_page")},
+  {"key": "stocks", "label": "股票工作台", "short": "股", "href": url_for("stocks_workspace")},
+  {"key": "transcripts", "label": "语音转录", "short": "录", "href": url_for("transcripts_page")},
+  {"key": "exports", "label": "导出", "short": "导", "href": url_for("export_center_page")},
+  {"key": "ai", "label": "AI", "short": "AI", "href": url_for("ai_workspace")},
+  {"key": "search", "label": "全局搜索", "short": "搜", "href": url_for("global_search")},
+  {"key": "trash", "label": "回收站", "short": "回", "href": url_for("trash_page")},
+] %}
+{% set theme_options = [
+  {"key": "cloud-blue", "label": "默认", "caption": "云岸淡蓝，晨雾、海风和柔白纸面。", "swatches": ["#edf3ff", "#fbfdff", "#cfdcff"]},
+  {"key": "summer-sunset", "label": "夏日日落橘", "caption": "浅橙、暖白和一点晚霞金。", "swatches": ["#fff1de", "#fffaf4", "#ffd7a8"]},
+  {"key": "westlake-snow", "label": "西湖雪日白", "caption": "冷白、雾蓝和轻银灰。", "swatches": ["#f7fbff", "#ffffff", "#d7e4f2"]},
+  {"key": "spring-moss", "label": "春色新绿", "caption": "薄雾青绿与安静纸白。", "swatches": ["#eef8f1", "#fbfdf9", "#c7e3cb"]},
+  {"key": "plum-rain", "label": "梅雨青岚", "caption": "潮湿青灰和柔蓝空气。", "swatches": ["#edf4f8", "#fbfcfd", "#cad9e3"]},
+  {"key": "starlit-nebula", "label": "星云静夜", "caption": "深蓝边缘、银紫星雾和安静纸白。", "swatches": ["#eef2ff", "#fbfcff", "#cfcff8"]},
+  {"key": "autumn-amber", "label": "秋山暖茶", "caption": "茶棕、栗金和轻暖米纸。", "swatches": ["#fbf0e3", "#fffaf2", "#d8b78b"]},
+] %}
+{% set current_page_title = page_titles.get(active_page, "报告归档") %}
+
+<aside class="workspace-rail" aria-label="功能索引">
+  <div class="workspace-rail-shell">
+    <div class="workspace-rail-toolbar">
+      <button
+        class="workspace-rail-toggle"
+        type="button"
+        aria-expanded="true"
+        aria-label="折叠功能区"
+        title="折叠功能区"
+        data-workspace-rail-toggle
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 5L8 12L15 19"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="workspace-rail-scroll" id="workspace-rail-scroll" data-preserve-scroll-shell>
+      <nav class="workspace-rail-nav" aria-label="主导航">
+        {% for item in nav_items %}
+          <a
+            class="workspace-rail-link {% if active_page == item.key %}is-active{% endif %}"
+            href="{{ item.href }}"
+            {% if active_page == item.key %}aria-current="page"{% endif %}
+            title="{{ item.label }}"
+          >
+            <span class="workspace-rail-glyph" aria-hidden="true">{{ item.short }}</span>
+            <span class="workspace-rail-label">{{ item.label }}</span>
+          </a>
+        {% endfor %}
+      </nav>
+    </div>
+  </div>
+</aside>
+
+<header class="masthead">
+  <div class="masthead-top">
+    <div class="masthead-brand">
+      <span class="brand-label">研究归档</span>
+      <h1>股票每日分析</h1>
+    </div>
+    <div class="masthead-theme" data-theme-switcher>
+      <button
+        class="theme-launch"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-label="切换网页配色方案"
+        data-theme-toggle
+      >
+        <span class="theme-launch-dot" aria-hidden="true"></span>
+        <span class="theme-launch-inline-label">配色</span>
+        <strong data-theme-current-label>默认</strong>
+        <span class="theme-launch-caption" data-theme-current-caption>云岸淡蓝，晨雾、海风和柔白纸面。</span>
+      </button>
+
+      <div class="theme-switcher-panel" role="dialog" aria-label="选择网页配色方案" data-theme-panel hidden>
+        <div class="theme-switcher-head">
+          <div>
+            <p class="eyebrow">全站配色</p>
+            <h3>换一种空气和纸面</h3>
+            <p class="section-caption">保留现在这套留白和阅读感，只替网页换一种光线、纸面和边缘气氛。</p>
+          </div>
+          <button class="icon-button" type="button" aria-label="关闭配色面板" data-theme-close>×</button>
+        </div>
+
+        <div class="theme-switcher-grid">
+          {% for option in theme_options %}
+            <button
+              class="theme-card"
+              type="button"
+              data-theme-option="{{ option.key }}"
+              data-theme-label="{{ option.label }}"
+              data-theme-caption="{{ option.caption }}"
+            >
+              <span class="theme-card-swatches">
+                {% for swatch in option.swatches %}
+                  <span style="--theme-swatch: {{ swatch }}"></span>
+                {% endfor %}
+              </span>
+              <span class="theme-card-copy">
+                <strong>{{ option.label }}</strong>
+                <span>{{ option.caption }}</span>
+              </span>
+            </button>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    <div class="masthead-tools">
+      <a
+        class="masthead-calendar-button {% if active_page == 'calendar' %}is-active{% endif %}"
+        href="{{ url_for('stocks_calendar') }}"
+        title="活动日历"
+        aria-label="打开活动日历"
+        data-calendar-launch
+        data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 3V6"></path>
+          <path d="M17 3V6"></path>
+          <rect x="4" y="5" width="16" height="15" rx="3"></rect>
+          <path d="M4 9H20"></path>
+        </svg>
+        <span>日历</span>
+      </a>
+      <form class="masthead-search" action="{{ url_for('global_search') }}" method="get">
+        <input name="q" type="search" placeholder="搜索报告、笔记、文件、转录">
+        <button type="submit">搜索</button>
+      </form>
+      <a class="masthead-utility-button" href="{{ url_for('download_workspace_backup') }}" title="下载当前网页与资料备份">
+        备份
+      </a>
+    </div>
+  </div>
+  <div class="masthead-bottom">
+    <div class="masthead-context">
+      <span class="masthead-context-label">当前工作区</span>
+      <strong>{{ current_page_title }}</strong>
+    </div>
+    <div class="masthead-meta">
+      <span>{{ nav_reports_count }} 篇报告</span>
+      <span>{{ nav_stock_count }} 只股票 | {{ nav_favorites_count }} 只自选 | {{ nav_group_count }} 个分组 | {{ nav_transcript_count }} 个转录任务 | {{ nav_trash_count }} 个回收站条目</span>
+    </div>
+  </div>
+  <nav class="masthead-nav masthead-nav--fallback" aria-label="主导航">
+    {% for item in nav_items %}
+      <a
+        class="masthead-link {% if active_page == item.key %}is-active{% endif %}"
+        href="{{ item.href }}"
+        {% if active_page == item.key %}aria-current="page"{% endif %}
+      >
+        {{ item.label }}
+      </a>
+    {% endfor %}
+  </nav>
+</header>
+
+<div class="calendar-overlay" data-calendar-overlay hidden>
+  <div class="calendar-overlay-backdrop" data-calendar-close></div>
+  <div class="calendar-overlay-dialog" role="dialog" aria-modal="true" aria-label="活动日历弹窗">
+    <div class="calendar-overlay-content" data-calendar-content></div>
+  </div>
+</div>
+
+<div class="confirm-overlay" data-confirm-overlay hidden>
+  <div class="confirm-overlay-backdrop" data-confirm-close></div>
+  <div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="确认弹窗">
+    <div class="confirm-dialog-head">
+      <div>
+        <p class="eyebrow">确认操作</p>
+        <h3>确认继续执行这个操作吗？</h3>
+      </div>
+      <button class="icon-button" type="button" aria-label="关闭确认弹窗" data-confirm-close>X</button>
+    </div>
+    <p class="confirm-copy" data-confirm-message>请再次确认。</p>
+    <div class="confirm-actions">
+      <button class="button button-secondary" type="button" data-confirm-close>取消</button>
+      <button class="danger-button" type="button" data-confirm-accept>确认</button>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='calendar-modal.js', v='20260316-modalfix1') }}" defer></script>
+<script src="{{ url_for('static', filename='confirm-modal.js', v='20260315-confirmfix') }}" defer></script>
+<script src="{{ url_for('static', filename='flash-messages.js') }}" defer></script>
+<script src="{{ url_for('static', filename='theme-switcher.js', v='20260317-theme1') }}" defer></script>
+<script src="{{ url_for('static', filename='workspace-rail.js', v='20260317-railfold') }}" defer></script>
+
+{% with flashes = get_flashed_messages(with_categories=true) %}
+  {% if flashes %}
+    <div class="flash-stack" role="status" aria-live="polite">
+      {% for category, message in flashes %}
+        <div class="flash-message flash-{{ category }}" data-flash-message data-flash-kind="{{ category }}">
+          <div class="flash-body">{{ message }}</div>
+          <button class="flash-close" type="button" aria-label="关闭提示" data-flash-close>X</button>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}

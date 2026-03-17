@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>股票每日分析</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='report-sources.js', v='20260316-source-toggle') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="feature-layout">
+      <article class="featured-story">
+        <div class="story-heading">
+          <p class="eyebrow">封面报告</p>
+          {% if active_report %}
+            <p class="story-date">{{ active_report.report_date }}</p>
+            <h2>{{ active_report.title }}</h2>
+            <p class="story-dek">{{ active_report.summary }}</p>
+          {% else %}
+            <p class="story-date">等待第一份报告</p>
+            <h2>把每天的监测结论沉淀成一份可持续回看的研究档案。</h2>
+            <p class="story-dek">把 Markdown 放进 <span class="inline-path">{{ reports_dir }}</span>，这里就会自动成为当天的封面阅读区。</p>
+          {% endif %}
+        </div>
+
+        <div class="story-actions">
+          {% if active_report %}
+            <a class="button button-primary" href="{{ url_for('raw_report', filename=active_report.filename) }}" target="_blank" rel="noreferrer">查看原 Markdown</a>
+          {% endif %}
+          <a class="button button-secondary" href="#report-library">浏览档案</a>
+          <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">打开股票工作台</a>
+        </div>
+
+        <div class="story-footer">
+          <article class="mini-fact">
+            <span class="mini-label">源目录</span>
+            <strong>{{ reports_dir }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">排序方式</span>
+            <strong>按文件名中的日期倒序</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">联动区域</span>
+            <strong>股票页、转录页、AI 工作台</strong>
+          </article>
+        </div>
+      </article>
+
+      <aside class="briefing-column">
+        <article class="briefing-card">
+          <p class="eyebrow">首页节奏</p>
+          <h3>封面聚焦，档案收拢</h3>
+          <p>首页优先展示最新内容，档案区只保留紧凑索引，不把页面拖得过长。</p>
+        </article>
+        <article class="briefing-card">
+          <p class="eyebrow">研究工作台</p>
+          <h3>首页与个股页分工清楚</h3>
+          <p>首页看最新和归档，个股页负责笔记、资料、转录和时间线，阅读路径会更轻。</p>
+          <a class="text-link" href="{{ url_for('stocks_workspace') }}">进入股票工作台</a>
+        </article>
+        <article class="briefing-card">
+          <p class="eyebrow">访问方式</p>
+          <h3>{{ "局域网访问已开启" if lan_url else "当前仅本机访问" }}</h3>
+          <div class="briefing-links">
+            <a href="{{ local_url }}">{{ local_url }}</a>
+            {% if lan_url %}
+              <a href="{{ lan_url }}">{{ lan_url }}</a>
+            {% endif %}
+          </div>
+        </article>
+      </aside>
+    </section>
+
+    <main class="editorial-layout">
+      <aside class="archive-column" id="report-library">
+        <section class="panel archive-panel">
+          <div class="section-header archive-panel-head">
+            <div>
+              <p class="eyebrow">报告档案</p>
+              <h3>紧凑资料栏</h3>
+            </div>
+            <span class="section-caption">{{ reports|length }} 份，最新在上</span>
+          </div>
+
+          <div class="archive-overview">
+            <article class="archive-stat">
+              <span class="archive-stat-label">最新一篇</span>
+              <strong>{{ reports[0].report_date if reports else "等待新报告" }}</strong>
+            </article>
+            <article class="archive-stat">
+              <span class="archive-stat-label">展示策略</span>
+              <strong>列表紧凑，正文完整</strong>
+            </article>
+            <article class="archive-stat">
+              <span class="archive-stat-label">阅读方式</span>
+              <strong>左侧选档，中间精读</strong>
+            </article>
+          </div>
+
+          {% if reports %}
+            <div class="report-list-shell" id="report-library-shell" data-preserve-scroll-shell>
+              <nav class="report-list" aria-label="报告列表">
+                {% for report in reports %}
+                  <a
+                    class="report-link {% if active_report and report.filename == active_report.filename %}is-active{% endif %}"
+                    href="{{ url_for('index', report=report.filename) }}"
+                    title="{{ report.title }}"
+                    data-preserve-scroll-link
+                  >
+                    <span class="report-stamp">
+                      <span class="report-date">{{ report.report_date }}</span>
+                      {% if loop.first %}
+                        <span class="report-badge">最新</span>
+                      {% elif active_report and report.filename == active_report.filename %}
+                        <span class="report-badge is-active">当前</span>
+                      {% endif %}
+                    </span>
+                    <span class="report-copy">
+                      <span class="report-title">{{ report.title }}</span>
+                      <span class="report-summary">{{ report.summary or "打开查看完整正文" }}</span>
+                    </span>
+                    <span class="report-meta">
+                      <span class="report-filename" title="{{ report.filename }}">{{ report.filename }}</span>
+                    </span>
+                  </a>
+                {% endfor %}
+              </nav>
+            </div>
+          {% else %}
+            <div class="empty-card">
+              <p class="empty-title">还没有报告</p>
+              <p>把新的 <code>.md</code> 文件放到 <code>{{ reports_dir }}</code>，刷新后就会出现在这里。</p>
+            </div>
+          {% endif %}
+        </section>
+      </aside>
+
+      <section class="reading-column">
+        <section class="panel article-panel">
+          {% if active_report %}
+            <div class="article-header">
+              <div class="article-heading">
+                <p class="eyebrow">正文阅读</p>
+                <h2>{{ active_report.title }}</h2>
+                <p class="article-subtitle">当前阅读的是归档后的 Markdown 报告。首页负责内容陈列，个股页负责研究整理，阅读路径会更清晰。</p>
+              </div>
+              <div class="article-tools">
+                <span class="meta-chip">日期 {{ active_report.report_date }}</span>
+                <span class="meta-chip">更新 {{ active_report.updated_at }}</span>
+                <span class="meta-chip">{{ active_report.filename }}</span>
+                <a class="button button-ghost" href="{{ url_for('raw_report', filename=active_report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
+              </div>
+            </div>
+
+            <article class="markdown-body">
+              {{ active_report.html|safe }}
+            </article>
+          {% else %}
+            <div class="empty-state">
+              <p class="eyebrow">准就绪</p>
+              <h2>你的第一份报告会出现在这里。</h2>
+              <p>当前界面已经完成了档案区、正文区和功能扩展区的布局。把 Markdown 放进 <code>{{ reports_dir }}</code> 后刷新即可。</p>
+            </div>
+          {% endif %}
+        </section>
+      </section>
+
+      <aside class="utility-column">
+        <section class="panel utility-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">访问入口</p>
+              <h3>访问与状态</h3>
+            </div>
+          </div>
+          <div class="access-list">
+            <div class="access-item">
+              <span class="access-label">本机</span>
+              <a href="{{ local_url }}">{{ local_url }}</a>
+            </div>
+            {% if lan_url %}
+              <div class="access-item">
+                <span class="access-label">局域网</span>
+                <a href="{{ lan_url }}">{{ lan_url }}</a>
+              </div>
+            {% endif %}
+            <div class="access-item">
+              <span class="access-label">源目录</span>
+              <span class="access-path">{{ reports_dir }}</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel roadmap-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">后续模块</p>
+              <h3>功能预留区</h3>
+            </div>
+            <span class="section-caption">布局已预留</span>
+          </div>
+          <div class="module-grid">
+            <article class="module-card is-live">
+              <span class="module-state">已启用</span>
+              <h4>报告档案</h4>
+              <p>当前的 Markdown 阅读和归档区域。</p>
+            </article>
+            <article class="module-card is-live">
+              <span class="module-state">已启用</span>
+              <h4>股票工作台</h4>
+              <p>分组、自选、历史笔记、研究文件和会议转录都已接通。</p>
+            </article>
+            <article class="module-card">
+              <span class="module-state">下一步</span>
+              <h4>多日报告对比</h4>
+              <p>支持摘要对比、趋势变化和连续观察。</p>
+            </article>
+            <article class="module-card">
+              <span class="module-state">下一步</span>
+              <h4>提醒与推送</h4>
+              <p>后续可以接入邮件、微信、Telegram 或桌面提醒。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel notes-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">设说明</p>
+              <h3>设基准</h3>
+            </div>
+          </div>
+          <div class="notes-copy">
+            <p>这版首页继续参考 Apple Newsroom 的内容层级和留白，但归档栏更像专业投研工具里的文档抽屉，把扫描效率放在第一位。</p>
+            <p>所以每条报告现在只显示最关键的几项信息，长内容交给中间正文区，避免页面因为归档过长一直向下拖。</p>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

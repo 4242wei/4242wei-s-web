@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>语音转录工作台</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260316-readerrefresh1') }}" defer></script>
+  <script src="{{ url_for('static', filename='transcript-page.js', v='20260316-stockcheck') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel transcript-hero transcript-hero-refined">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">语音转录</p>
+        <h2>先看内容，再决定怎么整理它。</h2>
+        <p class="story-dek">
+          已完成内容优先展示，任务队列和系统参数放到后面。新建转录收进页内弹窗，阅读路径会更专注。
+        </p>
+        <div class="story-actions">
+          <button class="button button-primary" type="button" data-compose-open>新建转录</button>
+          {% if transcript_stats.active_count %}
+            <form action="{{ url_for('sync_active_transcripts') }}" method="post" data-preserve-scroll data-transcript-sync-form>
+              <input type="hidden" name="next_url" value="{{ url_for('transcripts_page') }}">
+              <button class="button button-secondary" type="submit">轮询进行中任务</button>
+            </form>
+          {% endif %}
+          <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">返回股票页</a>
+          <span class="button button-ghost button-static" data-transcript-total-label>当前已存 {{ transcript_stats.total_count }} 条转录任务</span>
+        </div>
+      </div>
+
+      <aside class="stock-hero-aside transcript-hero-aside">
+        <article class="mini-fact">
+          <span class="mini-label">已完成转录</span>
+          <strong data-transcript-completed-count>{{ completed_transcripts|length }} 条</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">队列任务</span>
+          <strong data-transcript-queue-count>{{ queue_transcripts|length }} 条</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">已关联股票</span>
+          <strong data-transcript-linked-count>{{ transcript_stats.linked_count }} 只</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">接入状态</span>
+          <strong>{% if tingwu_status.is_ready %}已配置{% else %}待配置{% endif %}</strong>
+        </article>
+      </aside>
+    </section>
+
+    <main class="transcript-hub">
+      <section class="panel record-section transcript-library-panel" id="transcript-library">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">已完成内容</p>
+            <h3>优先阅读的会议转录</h3>
+            <p class="section-caption">转录完成后会先进入这里。每条内容都能折叠展开，方便在当前页快速浏览，再决定要不要打开大阅读窗。</p>
+          </div>
+          <span class="summary-count" data-transcript-completed-count>{{ completed_transcripts|length }}</span>
+        </div>
+
+        {% if completed_transcripts %}
+          <div class="transcript-featured-list" data-transcript-completed-list>
+            {% for transcript in completed_transcripts %}
+              <details
+                class="expander transcript-content-expander"
+                data-transcript-card
+                data-transcript-id="{{ transcript.id }}"
+                data-transcript-group="completed"
+                data-transcript-linked="{{ 'true' if transcript.linked_symbols else 'false' }}"
+              >
+                <summary class="expander-summary transcript-content-summary">
+                  <div>
+                    <div class="card-inline-meta transcript-card-meta-row">
+                      <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                      <span class="meta-chip">{{ transcript.media_kind_label }}</span>
+                      {% for linked_symbol in transcript.linked_symbols %}
+                        <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=linked_symbol) }}">{{ linked_symbol }}</a>
+                      {% endfor %}
+                      <span class="section-caption">{{ transcript.meeting_date_label }}</span>
+                    </div>
+                    <h3>{{ transcript.display_title }}</h3>
+                    <p class="section-caption">上传于 {{ transcript.display_created_at }} · {{ transcript.original_name }}</p>
+                  </div>
+                  <div class="expander-meta">
+                    <span class="summary-count">内容</span>
+                    <span class="expander-toggle">
+                      <span class="expander-closed-label">展开</span>
+                      <span class="expander-open-label">收起</span>
+                    </span>
+                  </div>
+                </summary>
+
+                <div class="expander-body transcript-content-body">
+                  {% if transcript.tags %}
+                    <div class="chip-row item-tag-row">
+                      {% for tag in transcript.tags %}
+                        <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=transcript.linked_search_symbol, tag=tag) if transcript.linked_search_symbol else url_for('global_search', tag=tag) }}">#{{ tag }}</a>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  {% if transcript.feature_chips %}
+                    <div class="card-inline-meta transcript-feature-chip-row">
+                      {% for chip in transcript.feature_chips %}
+                        <span class="meta-chip">{{ chip }}</span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  <div class="card-link-row transcript-card-actions">
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      data-reader-template="transcript-reader-{{ transcript.id }}"
+                      data-reader-open
+                    >
+                      放大阅读
+                    </button>
+                    <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                    <form
+                      action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
+                      method="post"
+                      data-preserve-scroll
+                      data-transcript-delete-form
+                      data-confirm-delete
+                      data-confirm-message="把这条转录任务移入回收站吗？源文件和记录都会先保留。"
+                    >
+                      <input type="hidden" name="next_url" value="{{ url_for('transcripts_page') }}">
+                      <button class="danger-button danger-button-compact" type="submit">删除</button>
+                    </form>
+                  </div>
+
+                  {% if transcript.last_error %}
+                    <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+                  {% endif %}
+
+                  <div class="transcript-inline-body rich-output">
+                    {{ transcript.reader_content_html | safe }}
+                  </div>
+                </div>
+              </details>
+
+              <template id="transcript-reader-{{ transcript.id }}">
+                <article class="reader-sheet reader-sheet-transcript">
+                  <div class="reader-sheet-head">
+                    <div class="reader-sheet-head-copy">
+                      <p class="eyebrow">会议转录</p>
+                      <h3>{{ transcript.display_title }}</h3>
+                      <p class="reader-sheet-meta-line">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+                    </div>
+                    <button class="icon-button reader-sheet-close" type="button" aria-label="关闭转录详情" data-reader-close>×</button>
+                  </div>
+
+                  <div class="card-inline-meta reader-sheet-support">
+                    <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                    <span class="meta-chip">{{ transcript.original_name }}</span>
+                    <span class="meta-chip">云状态 {{ transcript.provider_status_label }}</span>
+                    {% if transcript.linked_symbols %}
+                      <span class="meta-chip">关联股票 {{ transcript.linked_symbols_label }}</span>
+                    {% endif %}
+                  </div>
+
+                  {% if transcript.feature_chips %}
+                    <div class="card-inline-meta">
+                      {% for chip in transcript.feature_chips %}
+                        <span class="meta-chip">{{ chip }}</span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  {% if transcript.tags %}
+                    <div class="chip-row item-tag-row">
+                      {% for tag in transcript.tags %}
+                        <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=transcript.linked_search_symbol, tag=tag) if transcript.linked_search_symbol else url_for('global_search', tag=tag) }}">#{{ tag }}</a>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  <p class="field-help">{{ transcript.source_status_label }}{% if transcript.source_status_detail %} · {{ transcript.source_status_detail }}{% endif %}</p>
+                  {% if transcript.last_error %}
+                    <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+                  {% endif %}
+                  {% if transcript.has_remote_task %}
+                    <div class="card-inline-meta">
+                      <span class="meta-chip">TaskId {{ transcript.provider_task_id }}</span>
+                      <span class="meta-chip">提交时间 {{ transcript.display_submitted_at }}</span>
+                      <span class="meta-chip">最近同步 {{ transcript.display_last_synced_at }}</span>
+                    </div>
+                  {% endif %}
+
+                  <div class="reader-section-marker"><span>正文</span></div>
+                  <div class="reader-sheet-stage">
+                    <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
+                  </div>
+                  <div class="card-link-row reader-sheet-footer">
+                    <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                  </div>
+                </article>
+              </template>
+            {% endfor %}
+          </div>
+          <div class="empty-card transcript-empty-primary" data-transcript-completed-empty hidden>
+            <p class="empty-title">这里以后会优先展示已完成的转录内容。</p>
+            <p>当前已经没有可读的转录。你可以先新建一条任务，等它完成后，这里会继续显示整理后的正文。</p>
+          </div>
+        {% else %}
+          <div class="empty-card transcript-empty-primary" data-transcript-completed-empty>
+            <p class="empty-title">这里以后会优先展示已完成的转录内容。</p>
+            <p>现在还没有可阅读的转录。你可以先新建一条任务，等它完成后，这里就会变成主阅读区。</p>
+            <div class="story-actions">
+              <button class="button button-primary" type="button" data-compose-open>新建转录</button>
+            </div>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="panel record-section transcript-queue-panel" id="transcript-list">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">任务队列</p>
+            <h3>待提交、进行中与异常任务</h3>
+            <p class="section-caption">这里集中处理状态刷新、重新提交和排查问题。已完成内容会自动上移到上面的阅读区。</p>
+          </div>
+          <div class="expander-meta">
+            <span class="summary-count" data-transcript-queue-count>{{ queue_transcripts|length }}</span>
+            <button class="button button-secondary button-compact" type="button" data-compose-open>新建转录</button>
+          </div>
+        </div>
+
+        {% if queue_transcripts %}
+          <div class="record-stack" data-transcript-queue-list>
+            {% for transcript in queue_transcripts %}
+              <article
+                class="record-card transcript-record-card"
+                data-transcript-card
+                data-transcript-id="{{ transcript.id }}"
+                data-transcript-group="queue"
+                data-transcript-linked="{{ 'true' if transcript.linked_symbols else 'false' }}"
+              >
+                <div class="record-card-head">
+                  <div>
+                    <div class="card-inline-meta transcript-card-meta-row">
+                      <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                      <span class="meta-chip">{{ transcript.media_kind_label }}</span>
+                      {% for linked_symbol in transcript.linked_symbols %}
+                        <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=linked_symbol) }}">{{ linked_symbol }}</a>
+                      {% endfor %}
+                    </div>
+                    <h4>{{ transcript.display_title }}</h4>
+                    <p class="section-caption">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+                  </div>
+                  <div class="card-link-row">
+                    {% if transcript.can_submit and tingwu_status.is_ready %}
+                      <form action="{{ url_for('submit_transcript_job', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                        <input type="hidden" name="next_url" value="{{ url_for('transcripts_page') }}">
+                        <button class="button button-primary button-compact" type="submit">提交到听悟</button>
+                      </form>
+                    {% elif transcript.can_sync %}
+                      <form action="{{ url_for('sync_transcript_job', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                        <input type="hidden" name="next_url" value="{{ url_for('transcripts_page') }}">
+                        <button class="button button-primary button-compact" type="submit">刷新状态</button>
+                      </form>
+                    {% endif %}
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      data-reader-template="transcript-reader-{{ transcript.id }}"
+                      data-reader-open
+                    >
+                      查看详情
+                    </button>
+                    <form
+                      action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
+                      method="post"
+                      data-preserve-scroll
+                      data-transcript-delete-form
+                      data-confirm-delete
+                      data-confirm-message="把这条转录任务移入回收站吗？源文件和记录都会先保留。"
+                    >
+                      <input type="hidden" name="next_url" value="{{ url_for('transcripts_page') }}">
+                      <button class="danger-button danger-button-compact" type="submit">删除</button>
+                    </form>
+                  </div>
+                </div>
+
+                <div class="card-inline-meta">
+                  <span class="meta-chip">{{ transcript.original_name }}</span>
+                  <span class="meta-chip">诨 {{ transcript.source_language_label }}</span>
+                  <span class="meta-chip">输出 {{ transcript.output_level_label }}</span>
+                  <span class="meta-chip">云状态 {{ transcript.provider_status_label }}</span>
+                  <span class="meta-chip">{{ transcript.source_status_label }}</span>
+                </div>
+
+                {% if transcript.tags %}
+                  <div class="chip-row item-tag-row">
+                    {% for tag in transcript.tags %}
+                      <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=transcript.linked_search_symbol, tag=tag) if transcript.linked_search_symbol else url_for('global_search', tag=tag) }}">#{{ tag }}</a>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+
+                <p class="card-preview-copy">{{ transcript.summary_excerpt }}</p>
+                {% if transcript.last_error %}
+                  <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+                {% endif %}
+
+                <div class="card-link-row">
+                  <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                  <span class="section-caption">{{ transcript.source_status_detail }}</span>
+                </div>
+
+                <template id="transcript-reader-{{ transcript.id }}">
+                  <article class="reader-sheet reader-sheet-transcript">
+                    <div class="reader-sheet-head">
+                      <div class="reader-sheet-head-copy">
+                        <p class="eyebrow">会载</p>
+                        <h3>{{ transcript.display_title }}</h3>
+                        <p class="reader-sheet-meta-line">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+                      </div>
+                      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭载详情" data-reader-close>×</button>
+                    </div>
+
+                    <div class="card-inline-meta reader-sheet-support">
+                      <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                      <span class="meta-chip">{{ transcript.original_name }}</span>
+                      <span class="meta-chip">云状态 {{ transcript.provider_status_label }}</span>
+                      {% if transcript.linked_symbols %}
+                        <span class="meta-chip">关联股票 {{ transcript.linked_symbols_label }}</span>
+                      {% endif %}
+                    </div>
+
+                    {% if transcript.feature_chips %}
+                      <div class="card-inline-meta">
+                        {% for chip in transcript.feature_chips %}
+                          <span class="meta-chip">{{ chip }}</span>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+
+                    {% if transcript.tags %}
+                      <div class="chip-row item-tag-row">
+                        {% for tag in transcript.tags %}
+                          <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=transcript.linked_search_symbol, tag=tag) if transcript.linked_search_symbol else url_for('global_search', tag=tag) }}">#{{ tag }}</a>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+
+                    <p class="field-help">{{ transcript.source_status_label }}{% if transcript.source_status_detail %} · {{ transcript.source_status_detail }}{% endif %}</p>
+                    {% if transcript.last_error %}
+                      <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+                    {% endif %}
+                    {% if transcript.has_remote_task %}
+                      <div class="card-inline-meta">
+                        <span class="meta-chip">TaskId {{ transcript.provider_task_id }}</span>
+                        <span class="meta-chip">提交时间 {{ transcript.display_submitted_at }}</span>
+                        <span class="meta-chip">最近同步 {{ transcript.display_last_synced_at }}</span>
+                      </div>
+                    {% endif %}
+
+                    {% if not transcript.has_transcript_content %}
+                      <div class="transcript-placeholder reader-sheet-placeholder">
+                        <p>{{ transcript.summary_excerpt }}</p>
+                      </div>
+                    {% endif %}
+
+                    <div class="reader-section-marker"><span>正文</span></div>
+                    <div class="reader-sheet-stage">
+                      <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
+                    </div>
+                    <div class="card-link-row reader-sheet-footer">
+                      <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                    </div>
+                  </article>
+                </template>
+              </article>
+            {% endfor %}
+          </div>
+          <div class="empty-inline" data-transcript-queue-empty hidden>
+            <p>当前没有待处理任务。新的上传任务会先出现在这里，完成后再自动上移到上面的阅读区。</p>
+          </div>
+        {% else %}
+          <div class="empty-inline" data-transcript-queue-empty>
+            <p>当前没有待处理任务。新的上传任务会先出现在这里，完成后再自动上移到上面的阅读区。</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="panel transcript-system-panel">
+        <details class="expander transcript-system-expander">
+          <summary class="expander-summary">
+            <div>
+              <p class="eyebrow">底层信息</p>
+              <h3>系统接入状与参数说明</h3>
+              <p class="section-caption">这部分平时不用频繁看，所以默认收起；只在排查或调参数时再展开即可。</p>
+            </div>
+            <div class="expander-meta">
+              <span class="summary-count">高级</span>
+              <span class="expander-toggle">
+                <span class="expander-closed-label">展开</span>
+                <span class="expander-open-label">收起</span>
+              </span>
+            </div>
+          </summary>
+
+          <div class="expander-body">
+            <div class="transcript-system-grid">
+              <section class="panel side-panel integration-status-panel transcript-system-card">
+                <div class="section-header">
+                  <div>
+                    <p class="eyebrow">接入状态</p>
+                    <h3>听悟与 OSS</h3>
+                  </div>
+                </div>
+
+                <div class="detail-side-stats">
+                  <article class="mini-fact">
+                    <span class="mini-label">Endpoint</span>
+                    <strong>{{ tingwu_status.endpoint }}</strong>
+                  </article>
+                  <article class="mini-fact">
+                    <span class="mini-label">Region</span>
+                    <strong>{{ tingwu_status.region_id }}</strong>
+                  </article>
+                  <article class="mini-fact">
+                    <span class="mini-label">API 版本</span>
+                    <strong>{{ tingwu_status.api_version }}</strong>
+                  </article>
+                  <article class="mini-fact">
+                    <span class="mini-label">OSS Bucket</span>
+                    <strong>{{ oss_status.bucket_name }}</strong>
+                  </article>
+                  <article class="mini-fact">
+                    <span class="mini-label">任务</span>
+                    <strong>{{ transcript_stats.active_count }} 个进行中</strong>
+                  </article>
+                </div>
+
+                <div class="integration-checklist">
+                  {% for env_name in tingwu_status.required_variables %}
+                    <div class="integration-check-item {% if env_name not in tingwu_status.missing_variables %}is-ready{% endif %}">
+                      <span>{{ env_name }}</span>
+                      <strong>{% if env_name in tingwu_status.missing_variables %}待配置{% else %}已配置{% endif %}</strong>
+                    </div>
+                  {% endfor %}
+                  <div class="integration-check-item {% if oss_status.bridge_ready %}is-ready{% endif %}">
+                    <span>OSS 自动上传</span>
+                    <strong>{% if oss_status.bridge_ready %}已就绪{% else %}不可用{% endif %}</strong>
+                  </div>
+                </div>
+                {% if oss_status.error_message %}
+                  <p class="field-help">{{ oss_status.error_message }}</p>
+                {% endif %}
+              </section>
+
+              <section class="panel side-panel transcript-system-card">
+                <div class="section-header">
+                  <div>
+                    <p class="eyebrow">能力映射</p>
+                    <h3>已经准好的功能</h3>
+                  </div>
+                </div>
+                <div class="module-grid transcript-capability-grid">
+                  {% for card in capability_cards %}
+                    <article class="module-card is-live">
+                      <span class="module-state">{{ card.eyebrow }}</span>
+                      <h4>{{ card.title }}</h4>
+                      <p>{{ card.copy }}</p>
+                    </article>
+                  {% endfor %}
+                </div>
+              </section>
+
+              <section class="panel side-panel transcript-system-card transcript-system-card-full">
+                <div class="section-header">
+                  <div>
+                    <p class="eyebrow">接入提醒</p>
+                    <h3>参数和流程</h3>
+                  </div>
+                </div>
+                <ul class="briefing-list">
+                  {% for item in transcript_requirement_notes %}
+                    <li>{{ item }}</li>
+                  {% endfor %}
+                </ul>
+              </section>
+            </div>
+          </div>
+        </details>
+      </section>
+    </main>
+  </div>
+
+  <div class="compose-overlay" data-compose-overlay hidden>
+    <div class="compose-overlay-backdrop" data-compose-close></div>
+    <div class="compose-dialog" role="dialog" aria-modal="true" aria-label="新建转录">
+      <div class="compose-dialog-shell panel">
+        <div class="reader-sheet-head compose-dialog-head">
+          <div>
+            <p class="eyebrow">新建任务</p>
+            <h3>上传会议文件并预设转录参数</h3>
+            <p class="section-caption">参数都保留着，但现在放进了弹窗里，只有你真正要新建任务时才会出现。</p>
+          </div>
+          <button class="icon-button" type="button" aria-label="关闭新建转录弹窗" data-compose-close>X</button>
+        </div>
+
+        <form
+          class="stack-form transcript-form"
+          action="{{ url_for('create_transcript_job') }}"
+          method="post"
+          enctype="multipart/form-data"
+          data-preserve-scroll
+          data-transcript-form
+          data-known-stock-symbols="{% for stock in stock_options %}{{ stock.symbol }}{% if not loop.last %};{% endif %}{% endfor %}"
+        >
+          <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
+
+          <div class="transcript-form-grid">
+            <label class="form-field">
+              <span class="field-label">任务标题</span>
+              <input name="transcript_title" type="text" placeholder="例：FTAI 管理层电话会 / 专家访谈 / 客户会议">
+            </label>
+            <label class="form-field">
+              <span class="field-label">会议日期</span>
+              <input name="meeting_date" type="date" value="{{ today_date }}">
+            </label>
+          </div>
+
+          <label class="form-field">
+            <span class="field-label">标签</span>
+            <input name="transcript_tags" type="text" placeholder="例：电话会, 管理层, 催化剂, 风险">
+          </label>
+
+          <div class="transcript-form-grid">
+            <label class="form-field">
+              <span class="field-label">上传音频或视频</span>
+              <input name="transcript_media" type="file" accept=".mp3,.wav,.m4a,.wma,.aac,.ogg,.amr,.flac,.aiff,.mp4,.wmv,.m4v,.flv,.rmvb,.dat,.mov,.mkv,.webm,.avi,.mpeg,.3gp">
+              <span class="field-help">{{ supported_format_hint }}</span>
+            </label>
+            <label class="form-field">
+              <span class="field-label">公网文件地址（高级选项）</span>
+              <input name="file_url_hint" type="url" placeholder="一般不用填。只有你想指定现成的 OSS / CDN / https 文件地址时再填">
+              <span class="field-help">默认会自动把本地文件上传到 OSS，并生成听悟可访问的临时地址。</span>
+            </label>
+          </div>
+
+          <div class="transcript-form-grid">
+            <label class="form-field">
+              <span class="field-label">音频语言</span>
+              <select name="source_language">
+                {% for option in source_language_options %}
+                  <option value="{{ option.value }}" {% if option.value == 'cn' %}selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="form-field">
+              <span class="field-label">输出级别</span>
+              <select name="output_level">
+                {% for option in output_level_options %}
+                  <option value="{{ option.value }}" {% if option.value == '2' %}selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+
+          <div class="transcript-form-grid">
+            <label class="form-field">
+              <span class="field-label">热词表 PhraseId（可选）</span>
+              <input name="phrase_id" type="text" placeholder="如果后面配置了听悟热词表，可以把 PhraseId 放在这里">
+            </label>
+            <div class="form-field">
+              <span class="field-label">关联股票</span>
+              <label class="checkbox-field">
+                <input name="link_to_stock" type="checkbox" {% if preferred_symbol %}checked{% endif %} data-toggle-control="stock-link-fields">
+                <span>同步到个股页的“会议转录”模块</span>
+              </label>
+              <div class="field-cluster" data-toggle-group="stock-link-fields">
+                <label class="checkbox-field">
+                  <input name="link_to_multiple_stocks" type="checkbox">
+                  <span>关联到多个股票</span>
+                </label>
+                <div class="field-cluster" data-toggle-group="single-stock-field">
+                  <select name="linked_symbol">
+                    <option value="">请选择股票</option>
+                    {% for stock in stock_options %}
+                      <option value="{{ stock.symbol }}" {% if stock.symbol == preferred_symbol %}selected{% endif %}>{{ stock.symbol }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div class="field-cluster" data-toggle-group="multi-stock-fields">
+                  <input name="linked_symbols_text" type="text" value="{{ preferred_symbol }}" placeholder="例：FTAI；GE">
+                  <span class="field-help">多个股票用中文或英文分号分隔，且需要先已经存在于股票工作台里。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <section class="transcript-option-section">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">基础能力</p>
+                <h3>转录与分段</h3>
+              </div>
+            </div>
+
+            <div class="transcript-option-grid">
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="diarization_enabled" type="checkbox" checked data-toggle-control="speaker-fields">
+                  <span>按说话人分离</span>
+                </label>
+                <p class="section-caption">适合多人会、电话会、访谈录音。</p>
+                <div class="field-cluster" data-toggle-group="speaker-fields">
+                  <label class="form-field">
+                    <span class="field-label">预说话人数</span>
+                    <select name="speaker_count">
+                      {% for option in speaker_count_options %}
+                        <option value="{{ option.value }}" {% if option.value == '2' %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </div>
+              </article>
+
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="auto_chapters_enabled" type="checkbox" checked>
+                  <span>自动章节分段</span>
+                </label>
+                <p class="section-caption">更适合长会议或长访谈，后续阅读会更清楚。</p>
+              </article>
+
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="text_polish_enabled" type="checkbox" checked>
+                  <span>文字润色</span>
+                </label>
+                <p class="section-caption">适合把口语表达整理成更稳定的阅读文本。</p>
+              </article>
+
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="ppt_extraction_enabled" type="checkbox">
+                  <span>PPT 提取</span>
+                </label>
+                <p class="section-caption">如果视频里包含展示内容，后续可以尝试提取。</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="transcript-option-section">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">AI 增强</p>
+                <h3>会议提炼与摘要</h3>
+              </div>
+            </div>
+
+            <div class="transcript-option-grid transcript-option-grid-wide">
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="meeting_assistance_enabled" type="checkbox" checked data-toggle-control="meeting-assistance-fields">
+                  <span>会提炼</span>
+                </label>
+                <p class="section-caption">把行动项和重点信息提炼出来，后面接 API 时会直接映射。</p>
+                <div class="field-cluster option-check-grid" data-toggle-group="meeting-assistance-fields">
+                  {% for option in meeting_assistance_options %}
+                    <label class="checkbox-field">
+                      <input name="meeting_assistance_types" type="checkbox" value="{{ option.value }}" checked>
+                      <span>{{ option.label }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </article>
+
+              <article class="transcript-option-card">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="summarization_enabled" type="checkbox" checked data-toggle-control="summarization-fields">
+                  <span>摘要输出</span>
+                </label>
+                <p class="section-caption">适合会后先看总结，也方便后续继续扩展成研究模板。</p>
+                <div class="field-cluster option-check-grid" data-toggle-group="summarization-fields">
+                  {% for option in summarization_options %}
+                    <label class="checkbox-field">
+                      <input name="summarization_types" type="checkbox" value="{{ option.value }}" {% if option.value == 'Paragraph' %}checked{% endif %}>
+                      <span>{{ option.label }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </article>
+
+              <article class="transcript-option-card transcript-option-card-full">
+                <label class="checkbox-field transcript-check-head">
+                  <input name="custom_prompt_enabled" type="checkbox" data-toggle-control="prompt-fields">
+                  <span>自定义 Prompt</span>
+                </label>
+                <p class="section-caption">如果后面你想按投研视角提取风险点、催化剂、行动项，这里已经留好了。</p>
+                <div class="field-cluster prompt-grid" data-toggle-group="prompt-fields">
+                  <label class="form-field">
+                    <span class="field-label">Prompt 名称</span>
+                    <input name="custom_prompt_name" type="text" placeholder="例：投研会议纪要">
+                  </label>
+                  <label class="form-field">
+                    <span class="field-label">Prompt 内容</span>
+                    <textarea name="custom_prompt_text" rows="5" placeholder="例：按照投资研究视角提炼结论、风险、催化剂、待验证项"></textarea>
+                  </label>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <div class="story-actions compose-dialog-actions">
+            <button class="button button-primary" type="submit">保存转录任务</button>
+            {% if tingwu_status.is_ready and oss_status.bridge_ready %}
+              <span class="section-caption">当前机器已检测到听悟和 OSS 配置。保存后会自动尝试上传源文件并提交到听悟，之后可用刷新状态或“轮询进行中任务”同步结果。</span>
+            {% elif tingwu_status.is_ready and oss_status.error_message %}
+              <span class="section-caption">听悟配置已经就绪，但 OSS 自动上传暂时不可用。你仍然可以在高级选项里填写现成的 FileUrl，或者稍后再处理接入状态。</span>
+            {% else %}
+              <span class="section-caption">如果当前机器还没读到完整配置，也可以先保存任务，后面再继续提交。</span>
+            {% endif %}
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="reader-overlay" data-reader-overlay hidden>
+    <div class="reader-overlay-backdrop" data-reader-close></div>
+    <div class="reader-dialog" role="dialog" aria-modal="true" aria-label="会议转录详情">
+      <div class="reader-dialog-content" data-reader-content></div>
+    </div>
+  </div>
+</body>
+</html>

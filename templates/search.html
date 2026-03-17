@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>全局搜索</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel search-hero">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">全局搜索</p>
+        <h2>在一条结果流里搜索报告、笔记、资料和转录。</h2>
+        <p class="story-dek">先用关键词定位，再用类型、股票和标签收窄范围。它更像研究工作台里的统一入口，不是零散地搜。</p>
+      </div>
+      <aside class="stock-hero-aside">
+        <article class="mini-fact">
+          <span class="mini-label">结果总数</span>
+          <strong>{{ result_count }} 条</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">研究笔</span>
+          <strong>{{ result_counts.get('note', 0) }} 条</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">研究资料</span>
+          <strong>{{ result_counts.get('file', 0) }} 条</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">会载 / 日报</span>
+          <strong>{{ result_counts.get('transcript', 0) + result_counts.get('report', 0) }} 条</strong>
+        </article>
+      </aside>
+    </section>
+
+    <main class="stock-layout search-layout">
+      <section class="stock-main search-main">
+        <section class="panel search-filter-panel">
+          <form class="stack-form search-form" action="{{ url_for('global_search') }}" method="get">
+            <div class="search-input-row">
+              <input name="q" type="search" value="{{ query }}" placeholder="搜索 FTAI、管理层、估值、风险、会议、访谈等关键词">
+              <button class="button button-primary" type="submit">搜索</button>
+            </div>
+
+            <div class="search-filter-grid">
+              <label class="form-field">
+                <span class="field-label">内类型</span>
+                <select name="kind">
+                  {% for option in kind_options %}
+                    <option value="{{ option.value }}" {% if option.value == selected_kind %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field">
+                <span class="field-label">股票</span>
+                <select name="symbol">
+                  <option value="">全部股票</option>
+                  {% for stock in stock_options %}
+                    <option value="{{ stock.symbol }}" {% if stock.symbol == selected_symbol %}selected{% endif %}>{{ stock.symbol }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field">
+                <span class="field-label">标</span>
+                <input name="tag" type="text" value="{{ selected_tag }}" placeholder="例：访谈 / 风险 / 管理层">
+              </label>
+            </div>
+          </form>
+
+          {% if popular_tags %}
+            <div class="search-tag-bar">
+              {% for tag in popular_tags %}
+                <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', q=query, kind=selected_kind, symbol=selected_symbol, tag=tag.value) }}">#{{ tag.value }} · {{ tag.count }}</a>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel search-results-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">结果流</p>
+              <h3>统一搜索结果</h3>
+              <p class="section-caption">结果按时间倒序排列，适合先快速定位，再回到原页面深入处理。</p>
+            </div>
+            <span class="summary-count">{{ result_count }}</span>
+          </div>
+
+          {% if results %}
+            <div class="search-result-list">
+              {% for item in results %}
+                <article class="search-result-card search-result-{{ item.kind_tone }}">
+                  <div class="record-card-head">
+                    <div>
+                      <div class="card-inline-meta">
+                        <span class="meta-chip">{{ item.kind_label }}</span>
+                        {% if item.symbols %}
+                          {% for linked_symbol in item.symbols %}
+                            <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=linked_symbol) }}">{{ linked_symbol }}</a>
+                          {% endfor %}
+                        {% elif item.symbol %}
+                          <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=item.symbol) }}">{{ item.symbol }}</a>
+                        {% endif %}
+                        <span class="section-caption">{{ item.display_time }}</span>
+                      </div>
+                      <h4>{{ item.title }}</h4>
+                    </div>
+                    <div class="card-link-row">
+                      <a class="button button-secondary button-compact" href="{{ item.url }}">打开内</a>
+                      {% if item.secondary_url %}
+                        <a class="text-link" href="{{ item.secondary_url }}">{{ item.secondary_label }}</a>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <p class="card-preview-copy">{{ item.summary }}</p>
+                  {% if item.tags %}
+                    <div class="chip-row item-tag-row">
+                      {% for tag in item.tags %}
+                        <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', q=query, kind=selected_kind, symbol=item.symbol or selected_symbol, tag=tag) }}">#{{ tag }}</a>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-card">
+              <p class="empty-title">暂时没有匹配结果</p>
+              <p>可以先试试更短的关键词，或只保留股票 / 标签筛选，回看你已经积累的研究内容。</p>
+            </div>
+          {% endif %}
+        </section>
+      </section>
+
+      <aside class="stock-sidebar search-sidebar">
+        <section class="panel side-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">搜索建</p>
+              <h3>推荐的用法</h3>
+            </div>
+          </div>
+          <ul class="briefing-list">
+            <li>先搜股票代码，再叠加标签，例如 `FTAI + 风险`。</li>
+            <li>搜主题词时，不用太长，正文、文件说明和转录内容都会一起检索。</li>
+            <li>如果内容很多，优先用“类型 + 标签”缩窄范围，通常会比更长的关键词更快。</li>
+          </ul>
+        </section>
+
+        <section class="panel side-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">快速入口</p>
+              <h3>常用跳转</h3>
+            </div>
+          </div>
+          <div class="story-actions search-side-actions">
+            <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">股票工作台</a>
+            <a class="button button-secondary" href="{{ url_for('transcripts_page') }}">诟载</a>
+            <a class="button button-secondary" href="{{ url_for('trash_page') }}">回收站</a>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<div class="rich-toolbar">
+  <select class="rich-select" data-editor-block>
+    <option value="">段落样式</option>
+    <option value="p">正文</option>
+    <option value="h3">小标题</option>
+    <option value="blockquote">引用</option>
+  </select>
+  <select class="rich-select" data-editor-font>
+    <option value="">字体</option>
+    <option value="'Segoe UI Variable Text', 'PingFang SC', 'Microsoft YaHei UI', sans-serif">无衬线</option>
+    <option value="'Microsoft YaHei UI', 'PingFang SC', sans-serif">微软雅黑</option>
+    <option value="'SimHei', 'Microsoft YaHei UI', sans-serif">黑体</option>
+    <option value="'SimSun', 'Songti SC', serif">宋体</option>
+    <option value="'FangSong', 'STFangsong', '华文仿宋', serif">仿宋</option>
+    <option value="'KaiTi', 'STKaiti', '华文楷体', serif">楷体</option>
+    <option value="'Source Han Sans SC', 'Microsoft YaHei UI', sans-serif">思源黑体</option>
+    <option value="'Source Han Serif SC', 'Songti SC', serif">思源宋体</option>
+    <option value="'Noto Sans SC', 'PingFang SC', sans-serif">Noto Sans SC</option>
+    <option value="'Noto Serif SC', 'Songti SC', serif">Noto Serif SC</option>
+    <option value="Georgia, 'Times New Roman', serif">Georgia</option>
+    <option value="'Cambria', Georgia, serif">Cambria</option>
+    <option value="'Garamond', Georgia, serif">Garamond</option>
+    <option value="Arial, Helvetica, sans-serif">Arial</option>
+    <option value="'Courier New', Consolas, monospace">等宽</option>
+  </select>
+  <select class="rich-select" data-editor-font-size>
+    <option value="">字号</option>
+    <option value="12px">12</option>
+    <option value="14px">14</option>
+    <option value="16px">16</option>
+    <option value="18px">18</option>
+    <option value="22px">22</option>
+    <option value="28px">28</option>
+    <option value="36px">36</option>
+  </select>
+  <button class="rich-tool" type="button" title="加粗" aria-label="加粗" data-editor-command="bold"><strong>B</strong></button>
+  <button class="rich-tool" type="button" title="斜体" aria-label="斜体" data-editor-command="italic"><em>I</em></button>
+  <button class="rich-tool" type="button" title="下划线" aria-label="下划线" data-editor-command="underline"><u>U</u></button>
+  <button class="rich-tool" type="button" title="删除线" aria-label="删除线" data-editor-command="strikeThrough"><s>S</s></button>
+  <button class="rich-tool" type="button" title="左对齐" aria-label="左对齐" data-editor-command="justifyLeft">左</button>
+  <button class="rich-tool" type="button" title="居中" aria-label="居中" data-editor-command="justifyCenter">中</button>
+  <button class="rich-tool" type="button" title="右对齐" aria-label="右对齐" data-editor-command="justifyRight">右</button>
+  <button class="rich-tool" type="button" data-editor-command="insertUnorderedList">• 列表</button>
+  <button class="rich-tool" type="button" data-editor-command="insertOrderedList">1. 列表</button>
+  <div class="rich-color-palette">
+    <span class="rich-palette-label">字色</span>
+    <button class="rich-swatch rich-swatch-text" type="button" title="深灰" aria-label="深灰字色" data-editor-color-command="foreColor" data-editor-color-value="#1f2f49" style="--swatch:#1f2f49;"></button>
+    <button class="rich-swatch rich-swatch-text" type="button" title="蓝色" aria-label="蓝色字色" data-editor-color-command="foreColor" data-editor-color-value="#3563d6" style="--swatch:#3563d6;"></button>
+    <button class="rich-swatch rich-swatch-text" type="button" title="绿色" aria-label="绿色字色" data-editor-color-command="foreColor" data-editor-color-value="#1f7a55" style="--swatch:#1f7a55;"></button>
+    <button class="rich-swatch rich-swatch-text" type="button" title="红色" aria-label="红色字色" data-editor-color-command="foreColor" data-editor-color-value="#b24343" style="--swatch:#b24343;"></button>
+    <button class="rich-swatch rich-swatch-text" type="button" title="橙色" aria-label="橙色字色" data-editor-color-command="foreColor" data-editor-color-value="#cc7a00" style="--swatch:#cc7a00;"></button>
+    <button class="rich-swatch rich-swatch-text" type="button" title="紫色" aria-label="紫色字色" data-editor-color-command="foreColor" data-editor-color-value="#6f53c1" style="--swatch:#6f53c1;"></button>
+    <label class="rich-color-label rich-color-label-custom">
+      <span>更多</span>
+      <input type="color" value="#1f2f49" data-editor-color="foreColor">
+    </label>
+  </div>
+  <div class="rich-color-palette">
+    <span class="rich-palette-label">底色</span>
+    <button class="rich-swatch" type="button" title="浅黄" aria-label="浅黄底色" data-editor-color-command="hiliteColor" data-editor-color-value="#fff1a8" style="--swatch:#fff1a8;"></button>
+    <button class="rich-swatch" type="button" title="浅蓝" aria-label="浅蓝底色" data-editor-color-command="hiliteColor" data-editor-color-value="#dce9ff" style="--swatch:#dce9ff;"></button>
+    <button class="rich-swatch" type="button" title="浅绿" aria-label="浅绿底色" data-editor-color-command="hiliteColor" data-editor-color-value="#dff4df" style="--swatch:#dff4df;"></button>
+    <button class="rich-swatch" type="button" title="浅粉" aria-label="浅粉底色" data-editor-color-command="hiliteColor" data-editor-color-value="#ffe0ec" style="--swatch:#ffe0ec;"></button>
+    <button class="rich-swatch" type="button" title="浅橙" aria-label="浅橙底色" data-editor-color-command="hiliteColor" data-editor-color-value="#ffe3c2" style="--swatch:#ffe3c2;"></button>
+    <button class="rich-swatch" type="button" title="浅灰" aria-label="浅灰底色" data-editor-color-command="hiliteColor" data-editor-color-value="#edf1f7" style="--swatch:#edf1f7;"></button>
+    <label class="rich-color-label rich-color-label-custom">
+      <span>更多</span>
+      <input type="color" value="#fff1a8" data-editor-color="hiliteColor">
+    </label>
+  </div>
+  <label class="rich-tool rich-tool-upload" title="插入图片">
+    <span>插图</span>
+    <input type="file" accept="image/*" multiple data-editor-image-input>
+  </label>
+  <button class="rich-tool" type="button" data-editor-command="removeFormat">清除格式</button>
+</div>

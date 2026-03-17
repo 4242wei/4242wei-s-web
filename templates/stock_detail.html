@@ -1,0 +1,1024 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ stock.symbol }} - 股票工作台</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-tabs.js', v='20260316-tabsfix2') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260317-searchjump1') }}" defer></script>
+  <script src="{{ url_for('static', filename='rich-editor.js', v='20260316-richmedia') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-detail-hero panel">
+      <div class="stock-detail-copy">
+        <p class="eyebrow">股票工作台</p>
+        <h2>{{ stock.symbol }}</h2>
+        <p class="story-dek">
+          这里负责沉淀这只股票的笔记、资料、转录和活动轨迹。阅读、录入与整理被拆成更清楚的层次，长期积累也不会显乱。
+        </p>
+        <div class="chip-row">
+          {% if stock.is_favorite %}
+            <span class="detail-chip is-favorite">已加入自选</span>
+          {% endif %}
+          {% for group in stock.groups %}
+            <span class="detail-chip">{{ group.name }}</span>
+          {% endfor %}
+          {% if not stock.groups %}
+            <span class="detail-chip">暂未分组</span>
+          {% endif %}
+        </div>
+      </div>
+
+      <aside class="stock-detail-actions">
+        <form action="{{ url_for('toggle_favorite', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+          <input type="hidden" name="next_url" value="{{ return_to }}">
+          <button class="button button-primary" type="submit">
+            {% if stock.is_favorite %}移出自选{% else %}加入自选{% endif %}
+          </button>
+        </form>
+        <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">返回股票页</a>
+        <a class="button button-secondary" href="{{ url_for('transcripts_page', symbol=stock.symbol) }}">新建会议转录</a>
+        <a
+          class="button button-ghost"
+          href="{{ url_for('stocks_calendar') }}"
+          data-calendar-launch
+          data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
+        >
+          打开总日历
+        </a>
+        <div class="detail-stat-grid">
+          <article class="mini-fact">
+            <span class="mini-label">笔记</span>
+            <strong>{{ stock.note_count }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">文件</span>
+            <strong>{{ stock.file_count }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">转录</span>
+            <strong>{{ stock.transcript_count }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最近更新</span>
+            <strong>{{ stock.updated_label }}</strong>
+          </article>
+        </div>
+      </aside>
+    </section>
+
+    <main class="detail-workspace">
+      <section class="detail-content-column">
+        <nav class="panel stock-detail-index" aria-label="个股功能索引">
+          <div class="stock-detail-index-head">
+            <div>
+              <p class="eyebrow">功能索引</p>
+              <p class="section-caption">切换查看不同区块，让个股页更清楚。</p>
+            </div>
+          </div>
+          <div class="stock-detail-tabbar" role="tablist" aria-label="{{ stock.symbol }} 功能区">
+            <button class="stock-detail-tab is-active" type="button" role="tab" aria-selected="true" data-stock-detail-default data-stock-detail-panel-target="timeline">
+              <span class="stock-detail-tab-label">研究活动</span>
+              <span class="stock-detail-tab-count">{{ stock.timeline|length }}</span>
+            </button>
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="notes">
+              <span class="stock-detail-tab-label">研究笔记</span>
+              <span class="stock-detail-tab-count">{{ stock.note_count }}</span>
+            </button>
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="transcripts">
+              <span class="stock-detail-tab-label">会议转录</span>
+              <span class="stock-detail-tab-count">{{ stock.transcript_count }}</span>
+            </button>
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="files">
+              <span class="stock-detail-tab-label">研究资料</span>
+              <span class="stock-detail-tab-count">{{ stock.file_count }}</span>
+            </button>
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="reports">
+              <span class="stock-detail-tab-label">关联日报</span>
+              <span class="stock-detail-tab-count">{{ related_reports|length }}</span>
+            </button>
+          </div>
+        </nav>
+
+        <section class="panel record-section timeline-panel" id="stock-timeline" data-stock-detail-panel="timeline">
+          <details class="expander record-expander timeline-expander">
+            <summary class="expander-summary">
+              <div>
+                <p class="eyebrow">总时间轴</p>
+                <h3>{{ stock.symbol }} 的研究活动</h3>
+                <p class="section-caption">把笔记、研究资料、会议转录和关联日报合并到一条时间线上，阅读顺序会更接近真实研究过程。</p>
+              </div>
+              <div class="expander-meta">
+                <span class="summary-count">{{ stock.timeline|length }}</span>
+                <span class="expander-toggle">
+                  <span class="expander-closed-label">展开</span>
+                  <span class="expander-open-label">收起</span>
+                </span>
+              </div>
+            </summary>
+
+            <div class="expander-body record-expander-body">
+              {% if stock.timeline %}
+                <div class="timeline-list">
+                  {% for item in stock.timeline[:18] %}
+                    <article class="timeline-card timeline-card-{{ item.kind_tone }}">
+                      <div class="timeline-marker">
+                        <span class="timeline-dot"></span>
+                        <span class="timeline-line"></span>
+                      </div>
+                      <div class="timeline-body">
+                        <div class="card-inline-meta">
+                          <span class="meta-chip">{{ item.kind_label }}</span>
+                          <span class="section-caption">{{ item.display_time }}</span>
+                          {% if item.status_label %}
+                            <span class="meta-chip">{{ item.status_label }}</span>
+                          {% endif %}
+                          {% if item.file_type_label %}
+                            <span class="meta-chip">{{ item.file_type_label }}</span>
+                          {% endif %}
+                        </div>
+                        <h4>{{ item.title }}</h4>
+                        <p class="card-preview-copy">{{ item.summary }}</p>
+                        {% if item.tags %}
+                          <div class="chip-row item-tag-row">
+                            {% for tag in item.tags %}
+                              <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=stock.symbol, tag=tag) }}">#{{ tag }}</a>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+                        <div class="card-link-row">
+                          {% if item.reader_template_id %}
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="{{ item.reader_template_id }}"
+                              data-reader-open
+                            >
+                              展开内容
+                            </button>
+                          {% elif item.action_url %}
+                            <a class="button button-secondary button-compact" href="{{ item.action_url }}">{{ item.action_label }}</a>
+                          {% endif %}
+                          {% if item.download_url %}
+                            <a class="text-link" href="{{ item.download_url }}">下载源文件</a>
+                          {% endif %}
+                        </div>
+                      </div>
+                    </article>
+                  {% endfor %}
+                </div>
+                {% if stock.timeline|length > 18 %}
+                  <div class="card-link-row timeline-footer">
+                    <a class="button button-secondary button-compact" href="{{ url_for('global_search', symbol=stock.symbol) }}">查看这只股票的全部内容</a>
+                  </div>
+                {% endif %}
+              {% else %}
+                <div class="empty-inline">
+                  <p>时间轴会随着你的笔记、文件、会议转录和关联日报持续增长，后面内容变多时会非常适合回看。</p>
+                </div>
+              {% endif %}
+            </div>
+          </details>
+        </section>
+
+        <section class="panel record-section" id="notes-panel" data-stock-detail-panel="notes" hidden>
+          {% if stock.notes %}
+            <details class="expander record-expander">
+              <summary class="expander-summary">
+                <div>
+                  <p class="eyebrow">研究笔记</p>
+                  <h3>历史笔记</h3>
+                  <p class="section-caption">笔记只显示摘要，点击“阅读”会在当前页弹出完整内容。</p>
+                </div>
+                <div class="expander-meta">
+                  <span class="summary-count">{{ stock.note_count }}</span>
+                  <span class="expander-toggle">
+                    <span class="expander-closed-label">展开</span>
+                    <span class="expander-open-label">收起</span>
+                  </span>
+                </div>
+              </summary>
+
+              <div class="expander-body record-expander-body">
+                <div class="record-scroll-shell{% if stock.note_count > 6 %} is-scrollable{% endif %}">
+                  <div class="record-stack">
+                    {% for note in stock.notes %}
+                      <article class="record-card" id="note-{{ note.id }}">
+                        <div class="record-card-head">
+                          <div>
+                            <h4>{{ note.display_title }}</h4>
+                            <p class="section-caption">{{ note.display_created_at }}</p>
+                          </div>
+                          <div class="card-link-row">
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="note-reader-{{ note.id }}"
+                              data-reader-open
+                            >
+                              阅读
+                            </button>
+                            <details class="inline-editor-expander">
+                              <summary class="button button-secondary button-compact inline-editor-trigger">编辑</summary>
+                              <div class="inline-editor-body">
+                                <form
+                                  class="stack-form tool-form inline-note-edit-form"
+                                  action="{{ url_for('update_stock_note', symbol=stock.symbol, note_id=note.id) }}"
+                                  method="post"
+                                  data-preserve-scroll
+                                >
+                                  <input type="hidden" name="next_url" value="{{ return_to }}">
+                                  <label class="form-field">
+                                    <span class="field-label">笔记标题</span>
+                                    <input name="note_title" type="text" value="{{ note.title }}" placeholder="例：估值更新 / 风险观察">
+                                  </label>
+                                  <label class="form-field">
+                                    <span class="field-label">标签</span>
+                                    <input name="note_tags" type="text" value="{{ note.tags | join(', ') }}" placeholder="例：催化剂, 风险, 管理层">
+                                  </label>
+                                  <div class="form-field">
+                                    <span class="field-label">笔记内容</span>
+                                    <div class="rich-editor record-card-editor" data-rich-editor>
+                                      {% include "_rich_toolbar.html" %}
+                                      <div
+                                        class="rich-surface"
+                                        contenteditable="true"
+                                        data-editor-surface
+                                        data-placeholder="在这里编辑这条笔记"
+                                      >{{ note.content_html | safe }}</div>
+                                      <textarea name="note_content_html" hidden data-editor-html>{{ note.content_html }}</textarea>
+                                      <textarea name="note_content" hidden data-editor-text>{{ note.content_text }}</textarea>
+                                    </div>
+                                  </div>
+                                  <div class="card-link-row">
+                                    <button class="button button-primary button-compact" type="submit">保存修改</button>
+                                  </div>
+                                </form>
+                              </div>
+                            </details>
+                            <form
+                              action="{{ url_for('delete_stock_note', symbol=stock.symbol, note_id=note.id) }}"
+                              method="post"
+                              data-preserve-scroll
+                              data-confirm-delete
+                              data-confirm-message="把这条笔记移入回收站吗？你后面仍然可以恢复。"
+                            >
+                              <input type="hidden" name="next_url" value="{{ return_to }}">
+                              <button class="danger-button danger-button-compact" type="submit">删除</button>
+                            </form>
+                          </div>
+                        </div>
+
+                        {% if note.source_file_name_display %}
+                          <div class="card-inline-meta">
+                            <span class="meta-chip">关联文件</span>
+                            {% if note.source_file %}
+                              <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=note.source_file.id) }}">{{ note.source_file_name_display }}</a>
+                            {% else %}
+                              <span class="section-caption">{{ note.source_file_name_display }}</span>
+                            {% endif %}
+                          </div>
+                        {% endif %}
+
+                        {% if note.tags %}
+                          <div class="chip-row item-tag-row">
+                            {% for tag in note.tags %}
+                              <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=stock.symbol, tag=tag) }}">#{{ tag }}</a>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+
+                        <p class="card-preview-copy">{{ note.summary_excerpt or "点击阅读查看完整内容。" }}</p>
+
+                        <template id="note-reader-{{ note.id }}">
+                          <article class="reader-sheet reader-sheet-note">
+                            <div class="reader-sheet-head">
+                              <div class="reader-sheet-head-copy">
+                                <p class="eyebrow">笔记</p>
+                                <h3>{{ note.display_title }}</h3>
+                                <p class="reader-sheet-meta-line">{{ note.display_created_at }}</p>
+                              </div>
+                              <button class="icon-button reader-sheet-close" type="button" aria-label="关闭笔记" data-reader-close>×</button>
+                            </div>
+                            {% if note.source_file_name_display %}
+                              <div class="card-inline-meta reader-sheet-support">
+                                <span class="meta-chip">关联文件</span>
+                                {% if note.source_file %}
+                                  <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=note.source_file.id) }}">{{ note.source_file_name_display }}</a>
+                                {% else %}
+                                  <span class="section-caption">{{ note.source_file_name_display }}</span>
+                                {% endif %}
+                              </div>
+                            {% endif %}
+                            <div class="reader-section-marker"><span>正文</span></div>
+                            <div class="reader-sheet-stage">
+                              <div class="reader-sheet-body reader-sheet-prose rich-output">{{ note.content_html | safe }}</div>
+                            </div>
+                          </article>
+                        </template>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </details>
+          {% else %}
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">研究笔</p>
+                <h3>历史笔</h3>
+                  <p class="section-caption">笔记只显示摘要，点击“阅读”会在当前页弹出完整内容。</p>
+              </div>
+              <span class="summary-count">{{ stock.note_count }}</span>
+            </div>
+            <div class="empty-inline">
+              <p>这里还没有历史笔记。你可以先在下方写下核心观点、变化点和下一步计划。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel record-section" id="transcripts-panel" data-stock-detail-panel="transcripts" hidden>
+          {% if stock.transcripts %}
+            <details class="expander record-expander">
+              <summary class="expander-summary">
+                <div>
+                  <p class="eyebrow">会载</p>
+                <h3>音频会议</h3>
+                <p class="section-caption">关联到 {{ stock.symbol }} 的会议转录会收在这里，点击阅读会在当前页弹出完整内容。</p>
+                </div>
+                <div class="expander-meta">
+                  <span class="summary-count">{{ stock.transcript_count }}</span>
+                  <span class="expander-toggle">
+                    <span class="expander-closed-label">展开</span>
+                    <span class="expander-open-label">收起</span>
+                  </span>
+                </div>
+              </summary>
+
+              <div class="expander-body record-expander-body">
+                <div class="record-scroll-shell{% if stock.transcript_count > 5 %} is-scrollable{% endif %}">
+                  <div class="record-stack">
+                    {% for transcript in stock.transcripts %}
+                      <article class="record-card transcript-record-card" id="transcript-{{ transcript.id }}">
+                        <div class="record-card-head">
+                          <div>
+                            <div class="card-inline-meta transcript-card-meta-row">
+                              <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                              <span class="meta-chip">{{ transcript.media_kind_label }}</span>
+                              {% for linked_symbol in transcript.linked_symbols %}
+                                <a class="meta-chip text-link" href="{{ url_for('stock_detail', symbol=linked_symbol) }}">{{ linked_symbol }}</a>
+                              {% endfor %}
+                            </div>
+                            <h4>{{ transcript.display_title }}</h4>
+                            <p class="section-caption">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+                          </div>
+                          <div class="card-link-row">
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="stock-transcript-reader-{{ transcript.id }}"
+                              data-reader-open
+                            >
+                              阅
+                            </button>
+                            <form
+                              action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
+                              method="post"
+                              data-preserve-scroll
+                              data-confirm-delete
+                              data-confirm-message="把这条会议转录移入回收站吗？源文件和任务记录都会先保留。"
+                            >
+                              <input type="hidden" name="next_url" value="{{ return_to }}">
+                              <button class="danger-button danger-button-compact" type="submit">删除</button>
+                            </form>
+                          </div>
+                        </div>
+
+                          {% if transcript.feature_chips %}
+                            <div class="card-inline-meta">
+                              <span class="meta-chip">云状态 {{ transcript.provider_status_label }}</span>
+                              <span class="meta-chip">{{ transcript.source_status_label }}</span>
+                              {% for chip in transcript.feature_chips %}
+                                <span class="meta-chip">{{ chip }}</span>
+                              {% endfor %}
+                            </div>
+                          {% endif %}
+
+                        {% if transcript.tags %}
+                          <div class="chip-row item-tag-row">
+                            {% for tag in transcript.tags %}
+                              <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=stock.symbol, tag=tag) }}">#{{ tag }}</a>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+
+                        <p class="card-preview-copy">{{ transcript.summary_excerpt }}</p>
+                        {% if transcript.last_error %}
+                          <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+                        {% endif %}
+
+                        <div class="card-link-row">
+                          <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                          <a class="text-link" href="{{ url_for('transcripts_page', symbol=stock.symbol) }}">前往转录页</a>
+                        </div>
+
+                        <template id="stock-transcript-reader-{{ transcript.id }}">
+                          <article class="reader-sheet reader-sheet-transcript">
+                            <div class="reader-sheet-head">
+                              <div class="reader-sheet-head-copy">
+                                <p class="eyebrow">会载</p>
+                                <h3>{{ transcript.display_title }}</h3>
+                                <p class="reader-sheet-meta-line">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+                              </div>
+                              <button class="icon-button reader-sheet-close" type="button" aria-label="关闭会载" data-reader-close>×</button>
+                            </div>
+
+                            <div class="card-inline-meta reader-sheet-support">
+                              <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+                              <span class="meta-chip">{{ transcript.original_name }}</span>
+                              <span class="meta-chip">{{ transcript.media_kind_label }}</span>
+                              {% if transcript.linked_symbols %}
+                                <span class="meta-chip">关联股票 {{ transcript.linked_symbols_label }}</span>
+                              {% endif %}
+                            </div>
+
+                            {% if transcript.feature_chips %}
+                              <div class="card-inline-meta">
+                                <span class="meta-chip">云状态 {{ transcript.provider_status_label }}</span>
+                                <span class="meta-chip">{{ transcript.source_status_label }}</span>
+                                {% for chip in transcript.feature_chips %}
+                                  <span class="meta-chip">{{ chip }}</span>
+                                {% endfor %}
+                              </div>
+                            {% endif %}
+
+                            <p class="field-help">{{ transcript.source_status_label }}{% if transcript.source_status_detail %} · {{ transcript.source_status_detail }}{% endif %}</p>
+
+                            {% if not transcript.has_transcript_content %}
+                              <div class="transcript-placeholder reader-sheet-placeholder">
+                                <p>{{ transcript.summary_excerpt }}</p>
+                              </div>
+                            {% endif %}
+
+                            <div class="reader-section-marker"><span>正文</span></div>
+                            <div class="reader-sheet-stage">
+                              <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
+                            </div>
+                            <div class="card-link-row reader-sheet-footer">
+                              <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                            </div>
+                          </article>
+                        </template>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </details>
+          {% else %}
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">会载</p>
+                <h3>音频会议</h3>
+                <p class="section-caption">后面你把会议录音、电话会或访谈音频关联到 {{ stock.symbol }} 后，这里会自动同步显示。</p>
+              </div>
+              <span class="summary-count">{{ stock.transcript_count }}</span>
+            </div>
+            <div class="empty-inline">
+              <p>这里还没有会议转录。你可以先去转录页上传文件，并勾选关联到 {{ stock.symbol }}。</p>
+              <div class="card-link-row">
+                <a class="button button-secondary button-compact" href="{{ url_for('transcripts_page', symbol=stock.symbol) }}">去新建会议转录</a>
+              </div>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel record-section" id="files-panel" data-stock-detail-panel="files" hidden>
+          {% if stock.files %}
+            <details class="expander record-expander">
+              <summary class="expander-summary">
+                <div>
+                  <p class="eyebrow">研究资料</p>
+                  <h3>文件与研究</h3>
+                  <p class="section-caption">文件保留下载入口；文字和图片文件都可以在当前页直接预览。</p>
+                </div>
+                <div class="expander-meta">
+                  <span class="summary-count">{{ stock.file_count }}</span>
+                  <span class="expander-toggle">
+                    <span class="expander-closed-label">展开</span>
+                    <span class="expander-open-label">收起</span>
+                  </span>
+                </div>
+              </summary>
+
+              <div class="expander-body record-expander-body">
+                <div class="record-scroll-shell{% if stock.file_count > 5 %} is-scrollable{% endif %}">
+                  <div class="record-stack">
+                    {% for file in stock.files %}
+                      <article class="record-card" id="file-{{ file.id }}">
+                        <div class="record-card-head">
+                          <div>
+                            <h4>{{ file.original_name }}</h4>
+                            <p class="section-caption">{{ file.display_uploaded_at }}</p>
+                          </div>
+                          <form
+                            action="{{ url_for('delete_stock_file', symbol=stock.symbol, file_id=file.id) }}"
+                            method="post"
+                            data-preserve-scroll
+                            data-confirm-delete
+                            data-confirm-message="把这个文件移入回收站吗？文件和说明都会先保留。"
+                          >
+                            <input type="hidden" name="next_url" value="{{ return_to }}">
+                            <button class="danger-button danger-button-compact" type="submit">删除</button>
+                          </form>
+                        </div>
+
+                        <p class="card-preview-copy">{{ file.summary_excerpt }}</p>
+
+                        <div class="card-inline-meta">
+                          {% if file.extract_text %}
+                            <span class="meta-chip">已启用文字抽取</span>
+                          {% endif %}
+                          {% if file.has_linked_note %}
+                            <span class="meta-chip">已生成关联笔记：{{ file.linked_note_title or "已保存" }}</span>
+                          {% endif %}
+                        </div>
+
+                        {% if file.tags %}
+                          <div class="chip-row item-tag-row">
+                            {% for tag in file.tags %}
+                              <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=stock.symbol, tag=tag) }}">#{{ tag }}</a>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+
+                        <div class="card-link-row">
+                          {% if file.is_previewable %}
+                            <a
+                              class="button button-secondary button-compact"
+                              href="{{ url_for('preview_stock_file_fragment', symbol=stock.symbol, file_id=file.id) }}"
+                              data-reader-url
+                            >
+                              {{ file.preview_label }}
+                            </a>
+                          {% endif %}
+                          <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=file.id) }}">下载文件</a>
+                        </div>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </details>
+          {% else %}
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">研究资料</p>
+                <h3>文件与研究</h3>
+                <p class="section-caption">文件保留下载入口；文字和图片文件都可以在当前页直接预览。</p>
+              </div>
+              <span class="summary-count">{{ stock.file_count }}</span>
+            </div>
+            <div class="empty-inline">
+              <p>这里还没有研究资料。你可以在右侧上传 PDF、Word、文字文件或图片，并选择是否抽取文字进入笔记。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel record-section" id="related-reports" data-stock-detail-panel="reports" hidden>
+          {% if related_reports %}
+            <details class="expander record-expander">
+              <summary class="expander-summary">
+                <div>
+                  <p class="eyebrow">关联日报</p>
+                  <h3>Markdown 报告</h3>
+                  <p class="section-caption">这里会自动聚合同股票相关的历史日报，方便交叉阅读。</p>
+                </div>
+                <div class="expander-meta">
+                  <span class="summary-count">{{ related_reports|length }}</span>
+                  <span class="expander-toggle">
+                    <span class="expander-closed-label">展开</span>
+                    <span class="expander-open-label">收起</span>
+                  </span>
+                </div>
+              </summary>
+
+              <div class="expander-body record-expander-body">
+                <div class="record-scroll-shell{% if related_reports|length > 6 %} is-scrollable{% endif %}">
+                  <div class="linked-report-list">
+                    {% for report in related_reports %}
+                      <a class="linked-report-card" href="{{ url_for('index', report=report.filename) }}">
+                        <span class="report-date">{{ report.report_date }}</span>
+                        <strong>{{ report.title }}</strong>
+                        <span class="report-summary">{{ report.summary }}</span>
+                      </a>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </details>
+          {% else %}
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">关联日报</p>
+                <h3>Markdown 报告</h3>
+                  <p class="section-caption">这里会自动聚合同股票相关的历史日报，方便交叉阅读。</p>
+              </div>
+              <span class="summary-count">{{ related_reports|length }}</span>
+            </div>
+            <div class="empty-inline">
+              <p>暂时还没有匹配到和 {{ stock.symbol }} 直接相关的 Markdown 日报。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="detail-studio detail-studio-inline">
+          <section class="panel detail-studio-header">
+            <div class="section-header detail-studio-heading">
+              <div>
+                <p class="eyebrow">研究工作区</p>
+                <h3>写笔记与整理资料</h3>
+                <p class="section-caption">把常用输入工具直接接在主内容后面，回看完信息就能顺手记录，不再隔着一大段空白。</p>
+              </div>
+            </div>
+          </section>
+
+          <div class="detail-studio-grid">
+            <section class="panel tool-panel detail-composer-panel">
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">写笔记</p>
+                  <h3>新建研究笔</h3>
+                  <p class="section-caption">支持字体、常用文字色、底色、对齐、列表和引用，录入时更接近日常文档编辑。</p>
+                </div>
+              </div>
+              <form class="stack-form tool-form" action="{{ url_for('add_stock_note', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                <input type="hidden" name="next_url" value="{{ return_to }}">
+                <label class="form-field">
+                  <span class="field-label">笔记标题</span>
+                  <input name="note_title" type="text" placeholder="例：估值更新 / 交易计划 / 风险观察">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">标签</span>
+                  <input name="note_tags" type="text" placeholder="例：催化剂, 风险, 管理层">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">记录日期</span>
+                  <input name="note_record_date" type="date" value="{{ today_date }}">
+                </label>
+
+                <div class="form-field">
+                  <span class="field-label">笔记内容</span>
+                  <div class="rich-editor" data-rich-editor>
+                    {% include "_rich_toolbar.html" %}
+                    <div
+                      class="rich-surface"
+                      contenteditable="true"
+                      data-editor-surface
+                      data-placeholder="在这里输入笔记。你可以直接加粗、斜体、下划线，改字体和颜色。"
+                    ></div>
+                    <textarea name="note_content_html" hidden data-editor-html></textarea>
+                    <textarea name="note_content" hidden data-editor-text></textarea>
+                  </div>
+                </div>
+
+                <button class="button button-primary" type="submit">保存笔记</button>
+              </form>
+            </section>
+
+            <section class="panel tool-panel detail-composer-panel">
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">上传资料</p>
+                  <h3>文件与评论</h3>
+                  <p class="section-caption">既可以保存原文件，也可以把可读取文字抽进笔记，并把你的评论放在最前面。</p>
+                </div>
+              </div>
+              <form class="stack-form tool-form" action="{{ url_for('upload_stock_file', symbol=stock.symbol) }}" method="post" enctype="multipart/form-data" data-preserve-scroll>
+                <input type="hidden" name="next_url" value="{{ return_to }}">
+                <label class="form-field">
+                  <span class="field-label">文件说明</span>
+                  <input name="file_description" type="text" placeholder="例：管理层会 / 同行对比 / 截图整理">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">标签</span>
+                  <input name="file_tags" type="text" placeholder="例：访谈, 供需, 财报">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">记录日期</span>
+                  <input name="file_record_date" type="date" value="{{ today_date }}">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">评论标题</span>
+                  <input name="file_note_title" type="text" placeholder="如果要顺手生成一条笔记，可以在这里写标题">
+                </label>
+
+                <div class="form-field">
+                  <span class="field-label">我的评论</span>
+                  <div class="rich-editor" data-rich-editor>
+                    {% include "_rich_toolbar.html" %}
+                    <div
+                      class="rich-surface"
+                      contenteditable="true"
+                      data-editor-surface
+                      data-placeholder="在这里写你对文件的评论。勾选抽取文字后，你的评论会保留在最上方。"
+                    ></div>
+                    <textarea name="file_note_content_html" hidden data-editor-html></textarea>
+                    <textarea name="file_note_content" hidden data-editor-text></textarea>
+                  </div>
+                </div>
+
+                <label class="checkbox-field">
+                  <input name="extract_text_to_note" type="checkbox">
+                  <span>勾选抽取文字进入笔记</span>
+                </label>
+                <p class="field-help">支持常见文档文件，如 PDF、DOCX。若无法读取，会保留文件并提示该类型无法抽取文字。</p>
+
+                <label class="form-field">
+                  <span class="field-label">选择文件</span>
+                  <input name="research_file" type="file">
+                </label>
+
+                <button class="button button-primary" type="submit">上传资料</button>
+              </form>
+            </section>
+          </div>
+        </section>
+      </section>
+
+      <aside class="detail-rail-column">
+        <section class="panel tool-panel">
+          <div class="section-header">
+            <div>
+                <p class="eyebrow">快信息</p>
+                <h3>概览与分组</h3>
+                <p class="section-caption">右侧只保留速览信息和近期活动，录入工具放到下方更顺手。</p>
+            </div>
+          </div>
+          <div class="detail-side-stats">
+            <article class="mini-fact">
+              <span class="mini-label">创建时间</span>
+              <strong>{{ stock.created_label }}</strong>
+            </article>
+            <article class="mini-fact">
+              <span class="mini-label">笔数量</span>
+              <strong>{{ stock.note_count }}</strong>
+            </article>
+            <article class="mini-fact">
+              <span class="mini-label">文件数量</span>
+              <strong>{{ stock.file_count }}</strong>
+            </article>
+            <article class="mini-fact">
+              <span class="mini-label">转录数量</span>
+              <strong>{{ stock.transcript_count }}</strong>
+            </article>
+          </div>
+
+          {% if available_groups %}
+            <form class="stack-form compact-form tool-form" action="{{ url_for('add_stock_to_group', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+              <input type="hidden" name="next_url" value="{{ return_to }}">
+              <label class="form-field">
+                <span class="field-label">加入分组</span>
+                <select name="group_id">
+                  {% for group in available_groups %}
+                    <option value="{{ group.id }}">{{ group.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button class="button button-secondary" type="submit">加入选中分组</button>
+            </form>
+          {% endif %}
+
+          <div class="membership-list">
+            {% if stock.groups %}
+              {% for group in stock.groups %}
+                <div class="membership-item">{{ group.name }}</div>
+              {% endfor %}
+            {% else %}
+              <div class="empty-inline">
+                <p>这只股票还没有加入任何自定义分组。</p>
+              </div>
+            {% endif %}
+          </div>
+
+          <div class="tag-summary-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">标签系统</p>
+                <h3>当前研究标签</h3>
+              </div>
+            </div>
+            {% if stock.tag_summary %}
+              <div class="chip-row">
+                {% for tag in stock.tag_summary %}
+                  <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', symbol=stock.symbol, tag=tag.value) }}">#{{ tag.value }} · {{ tag.count }}</a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-inline">
+                <p>你给笔记、资料或会议转录打上标签后，这里会自动汇总。</p>
+              </div>
+            {% endif %}
+          </div>
+        </section>
+
+        <section class="panel tool-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">活动日历</p>
+              <h3>个股小窗</h3>
+              <p class="section-caption">用日期视角回看这只股票哪天有笔记或文件活动，也能直接切到任意年月。</p>
+            </div>
+          </div>
+          <section class="mini-calendar-card" id="stock-activity-calendar">
+            <div class="mini-calendar-toolbar">
+              <div>
+                <p class="eyebrow">当前视图</p>
+                <h4>{{ stock_calendar.month_label }}</h4>
+              </div>
+              <div class="mini-calendar-nav">
+                <a
+                  class="icon-button"
+                  href="{{ url_for('stock_detail', symbol=stock.symbol, stock_month=stock_calendar.previous_month_key) }}"
+                  aria-label="上一个月"
+                  data-preserve-scroll-link
+                >
+                  <
+                </a>
+                <form
+                  class="calendar-jump-form calendar-jump-form-mini"
+                  action="{{ url_for('stock_detail', symbol=stock.symbol) }}"
+                  method="get"
+                  data-preserve-scroll
+                  data-auto-submit
+                >
+                  <label class="calendar-select-field">
+                    <span>年份</span>
+                    <select name="stock_year">
+                      {% for year in stock_calendar.available_years %}
+                        <option value="{{ year }}" {% if year == stock_calendar.selected_year %}selected{% endif %}>{{ year }} 年</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="calendar-select-field">
+                    <span>月份</span>
+                    <select name="stock_month_number">
+                      {% for option in stock_calendar.month_options %}
+                        <option value="{{ option.value }}" {% if option.value == stock_calendar.selected_month_number %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </form>
+                <a
+                  class="button button-ghost button-compact"
+                  href="{{ url_for('stock_detail', symbol=stock.symbol, stock_month=stock_calendar.current_month_key) }}"
+                  data-preserve-scroll-link
+                >
+                  本月
+                </a>
+                <a
+                  class="icon-button"
+                  href="{{ url_for('stock_detail', symbol=stock.symbol, stock_month=stock_calendar.next_month_key) }}"
+                  aria-label="下一个月"
+                  data-preserve-scroll-link
+                >
+                  >
+                </a>
+              </div>
+            </div>
+
+            <div class="mini-calendar-grid">
+              {% for weekday in stock_calendar.weekday_labels %}
+                <span class="mini-calendar-weekday">{{ weekday[:2] }}</span>
+              {% endfor %}
+
+              {% for week in stock_calendar.calendar_weeks %}
+                {% for day in week %}
+                  <a
+                    class="mini-calendar-day{% if not day.is_current_month %} is-outside{% endif %}{% if day.is_selected %} is-selected{% endif %}{% if day.is_today %} is-today{% endif %}"
+                    href="{{ url_for('stock_detail', symbol=stock.symbol, stock_month=stock_calendar.month_key, stock_date=day.date) }}"
+                    data-preserve-scroll-link
+                  >
+                    <span class="mini-calendar-day-number">{{ day.day_number }}</span>
+                    {% if day.summary %}
+                      <span class="mini-calendar-day-total">{{ day.summary.total_count }}</span>
+                    {% endif %}
+                  </a>
+                {% endfor %}
+              {% endfor %}
+            </div>
+
+            <div class="calendar-metrics-grid calendar-metrics-grid-mini">
+              <article class="mini-fact">
+                <span class="mini-label">当月文件</span>
+                <strong>{{ stock_calendar.month_stats.file_count }}</strong>
+              </article>
+              <article class="mini-fact">
+                <span class="mini-label">本年文件</span>
+                <strong>{{ stock_calendar.year_stats.file_count }}</strong>
+              </article>
+            </div>
+
+            <div class="mini-calendar-summary">
+              <p class="section-caption">{{ stock_calendar.selected_date or "未选中日期" }}</p>
+              {% if stock_calendar.selected_summary %}
+                <p class="mini-calendar-copy">
+                  这一天共记录 {{ stock_calendar.selected_summary.total_count }} 条活动，
+                  其中笔记 {{ stock_calendar.selected_summary.note_count }} 条，文件 {{ stock_calendar.selected_summary.file_count }} 个。
+                </p>
+                {% else %}
+                  <p class="mini-calendar-copy">当前选中日期没有记录到这只股票的笔记或文件活动。</p>
+                {% endif %}
+              {% if stock_calendar.selected_summary and stock_calendar.selected_summary["items"] %}
+                <div class="calendar-selected-items calendar-selected-items-mini">
+                  <div class="calendar-selected-items-head">
+                    <p class="eyebrow">当天明细</p>
+                    <p class="section-caption">默认收起，展开后可以直接跳到这条笔记或资料。</p>
+                  </div>
+                  <div class="calendar-selected-items-list">
+                    {% for item in stock_calendar.selected_summary["items"] %}
+                      <details class="calendar-item-expander">
+                        <summary class="calendar-item-summary">
+                          <div>
+                            <div class="card-inline-meta">
+                              <span class="meta-chip">{{ item.kind_label }}</span>
+                              {% if item.file_type %}
+                                <span class="meta-chip">{{ item.file_type }}</span>
+                              {% endif %}
+                            </div>
+                            <h4 class="calendar-item-title">{{ item.title }}</h4>
+                            <p class="section-caption">{{ item.display_time }}</p>
+                          </div>
+                          <span class="text-link">点击展开</span>
+                        </summary>
+                        <div class="calendar-item-body">
+                          <p class="calendar-item-copy">{{ item.summary or "这条记录暂时没有补充说明。" }}</p>
+                          <div class="card-link-row">
+                            <a class="button button-secondary button-compact" href="{{ item.detail_url }}">{{ item.detail_label or "打开详情" }}</a>
+                            {% if item.download_url %}
+                              <a class="text-link" href="{{ item.download_url }}">下载文件</a>
+                            {% endif %}
+                          </div>
+                        </div>
+                      </details>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+              <div class="calendar-type-grid calendar-type-grid-mini">
+                <article class="calendar-type-card">
+                  <p class="eyebrow">当月文件类型</p>
+                  {% if stock_calendar.month_stats.file_types %}
+                    <div class="calendar-type-list">
+                      {% for item in stock_calendar.month_stats.file_types %}
+                        <span class="calendar-type-chip">{{ item.label }} {{ item.count }}</span>
+                      {% endfor %}
+                    </div>
+                  {% else %}
+                    <p class="section-caption">当月还没有文件活动。</p>
+                  {% endif %}
+                </article>
+                <article class="calendar-type-card">
+                  <p class="eyebrow">本年文件类型</p>
+                  {% if stock_calendar.year_stats.file_types %}
+                    <div class="calendar-type-list">
+                      {% for item in stock_calendar.year_stats.file_types %}
+                        <span class="calendar-type-chip">{{ item.label }} {{ item.count }}</span>
+                      {% endfor %}
+                    </div>
+                  {% else %}
+                    <p class="section-caption">本年还没有文件活动。</p>
+                  {% endif %}
+                </article>
+              </div>
+            </div>
+
+            <a
+              class="button button-secondary"
+              href="{{ url_for('stocks_calendar') }}"
+              data-calendar-launch
+              data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
+            >
+              打开总活动日历
+            </a>
+          </section>
+        </section>
+      </aside>
+    </main>
+
+  </div>
+
+  <div class="reader-overlay" data-reader-overlay hidden>
+    <div class="reader-overlay-backdrop" data-reader-close></div>
+    <div class="reader-dialog" role="dialog" aria-modal="true" aria-label="阅读窗口">
+      <div class="reader-dialog-content" data-reader-content></div>
+    </div>
+  </div>
+</body>
+</html>

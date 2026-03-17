@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>股票工作台</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">股票工作台</p>
+        <h2>把分组、自选和研究记录收进同一座工作台。</h2>
+        <p class="story-dek">
+          先整理观察名单，再进入个股页沉淀笔记、资料和会议转录。研究路径会更清晰，也更适合长期回看。
+        </p>
+        <div class="story-actions">
+          <a class="button button-primary" href="{{ url_for('index') }}">返回报告页</a>
+          <a class="button button-secondary" href="{{ url_for('global_search') }}">全局搜索</a>
+          <a class="button button-secondary" href="{{ url_for('trash_page') }}">回收站</a>
+          <a
+            class="button button-secondary"
+            href="{{ url_for('stocks_calendar') }}"
+            data-calendar-launch
+            data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
+          >
+            打开活动日历
+          </a>
+          <span class="button button-ghost button-static">当前跟踪 {{ total_symbols }} 只股票</span>
+        </div>
+      </div>
+
+      <aside class="stock-hero-aside">
+        <article class="mini-fact">
+          <span class="mini-label">自选</span>
+          <strong>{{ favorites|length }} 只重点观察</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">分组</span>
+          <strong>{{ groups|length }} 万定义分组</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">报告目录</span>
+          <strong>{{ reports_dir }}</strong>
+        </article>
+      </aside>
+    </section>
+
+    <main class="stock-layout">
+      <section class="stock-main">
+        <section class="panel stock-favorites-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">自选区</p>
+              <h3>重点观察股票</h3>
+            </div>
+            <span class="section-caption">点击股票代码即可进入个股页。</span>
+          </div>
+
+          {% if favorites %}
+            <div class="favorite-grid">
+              {% for stock in favorites %}
+                <article class="favorite-card">
+                  <div class="favorite-card-top">
+                    <a class="favorite-symbol" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">{{ stock.symbol }}</a>
+                    <form action="{{ url_for('toggle_favorite', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                      <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                      <button class="icon-button" type="submit" aria-label="移出自选">×</button>
+                    </form>
+                  </div>
+                  <p class="favorite-meta">{{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录 · 更新于 {{ stock.updated_label }}</p>
+                  <div class="chip-row">
+                    {% for group in stock.groups[:3] %}
+                      <span class="detail-chip">{{ group.name }}</span>
+                    {% endfor %}
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-card">
+              <p class="empty-title">你的自选区还是空的</p>
+              <p>先在下方分组里添加股票，然后点星标把它加入自选区。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel stock-groups-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">分组</p>
+              <h3>自定义分组</h3>
+            </div>
+            <span class="section-caption">先看概览，需要时再展开编辑信息、补充股票和维护清单。</span>
+          </div>
+
+          {% if groups %}
+            <div class="record-scroll-shell is-scrollable group-grid-shell" id="stock-group-shell" data-preserve-scroll-shell>
+              <div class="group-grid">
+                {% for group in groups %}
+                  <details class="group-card expander group-expander" id="group-{{ group.id }}" data-preserve-open-state {% if group.is_focus %}open{% endif %}>
+                    <summary class="expander-summary group-expander-summary">
+                      <div class="group-expander-copy">
+                        <p class="eyebrow">分组 {{ loop.index }}</p>
+                        <h4>{{ group.name }}</h4>
+                        <p class="group-card-copy">{{ group.description_preview }}</p>
+                        {% if group.preview_symbols %}
+                          <div class="chip-row group-preview-row">
+                            {% for symbol in group.preview_symbols %}
+                              <span class="detail-chip">{{ symbol }}</span>
+                            {% endfor %}
+                            {% if group.more_stock_count %}
+                              <span class="detail-chip">+{{ group.more_stock_count }}</span>
+                            {% endif %}
+                          </div>
+                        {% endif %}
+                      </div>
+                      <div class="group-expander-side">
+                        <div class="expander-meta">
+                          <span class="meta-chip">{{ group.stock_count }} 只股票</span>
+                          {% if group.description %}
+                            <span class="meta-chip">已写说明</span>
+                          {% endif %}
+                        </div>
+                        <span class="expander-toggle">
+                          <span class="expander-closed-label">展开</span>
+                          <span class="expander-open-label">收起</span>
+                        </span>
+                      </div>
+                    </summary>
+
+                    <div class="expander-body group-expander-body">
+                      <div class="group-expander-grid">
+                        <section class="group-panel-slab">
+                          <div class="group-panel-head">
+                            <div>
+                              <p class="eyebrow">分组信息</p>
+                              <h5>编辑名称和说明</h5>
+                            </div>
+                            <span class="section-caption">这里负责定义这个分组为什么存在。</span>
+                          </div>
+                          <form class="stack-form compact-form" action="{{ url_for('update_stock_group', group_id=group.id) }}" method="post" data-preserve-scroll>
+                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                            <label class="form-field">
+                              <span class="field-label">分组名称</span>
+                              <input name="group_name" type="text" value="{{ group.name }}" placeholder="例：核心观察">
+                            </label>
+                            <label class="form-field">
+                              <span class="field-label">分组说明</span>
+                              <textarea name="group_description" rows="4" placeholder="写下这个分组的观察重点、阶段定义或筛选逻辑">{{ group.description }}</textarea>
+                            </label>
+                            <button class="button button-secondary" type="submit">保存分组信息</button>
+                          </form>
+                        </section>
+
+                        <section class="group-panel-slab">
+                          <div class="group-panel-head">
+                            <div>
+                              <p class="eyebrow">补充股票</p>
+                              <h5>继续加入成员</h5>
+                            </div>
+                            <span class="section-caption">一次可添加多只，也可以顺手加入自选。</span>
+                          </div>
+                          <form class="stack-form compact-form" action="{{ url_for('add_group_stocks', group_id=group.id) }}" method="post" data-preserve-scroll>
+                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                            <label class="form-field">
+                              <span class="field-label">添加股票代码</span>
+                              <input name="symbols" type="text" placeholder="AAPL, NVDA, FTAI">
+                            </label>
+                            <label class="checkbox-field">
+                              <input name="add_to_favorites" type="checkbox">
+                              <span>同时加入自选</span>
+                            </label>
+                            <button class="button button-primary" type="submit">加入分组</button>
+                          </form>
+                        </section>
+                      </div>
+
+                      <section class="group-panel-slab group-stock-slab">
+                        <div class="group-stock-section-head">
+                          <div>
+                            <p class="eyebrow">成员列表</p>
+                            <h5>{{ group.stock_count }} 只股票在这个分组里</h5>
+                          </div>
+                          <form
+                            action="{{ url_for('delete_stock_group', group_id=group.id) }}"
+                            method="post"
+                            data-preserve-scroll
+                            data-confirm-delete
+                            data-confirm-message="把这个分组移入回收站吗？股票本身不会删除，后面也可以恢复分组。"
+                          >
+                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                            <button class="danger-button danger-button-compact" type="submit">删除分组</button>
+                          </form>
+                        </div>
+
+                        {% if group.stocks %}
+                          <div class="record-scroll-shell group-stock-shell {% if group.stock_list_scrollable %}is-scrollable{% endif %}" id="group-stock-shell-{{ group.id }}" data-preserve-scroll-shell>
+                            {% for stock in group.stocks %}
+                              <div class="stock-row">
+                                <a class="stock-row-link" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">
+                                  <span class="stock-row-symbol">{{ stock.symbol }}</span>
+                                  <span class="stock-row-meta">{{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录</span>
+                                </a>
+                                <div class="stock-row-actions">
+                                  <form action="{{ url_for('toggle_favorite', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                                    <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                                    <button class="icon-button {% if stock.is_favorite %}is-active{% endif %}" type="submit" aria-label="切换自选">
+                                      {% if stock.is_favorite %}★{% else %}☆{% endif %}
+                                    </button>
+                                  </form>
+                                  <form
+                                    action="{{ url_for('remove_group_stock', group_id=group.id, symbol=stock.symbol) }}"
+                                    method="post"
+                                    data-preserve-scroll
+                                    data-confirm-delete
+                                    data-confirm-message="把 {{ stock.symbol }} 从当前分组中移除吗？"
+                                  >
+                                    <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                                    <button class="danger-button danger-button-compact" type="submit">移除</button>
+                                  </form>
+                                </div>
+                              </div>
+                            {% endfor %}
+                          </div>
+                        {% else %}
+                          <div class="empty-inline">
+                            <p>这个分组里还没有股票。你可以先在上方补充股票代码，后面再在这里维护星标和成员清单。</p>
+                          </div>
+                        {% endif %}
+                      </section>
+                    </div>
+                  </details>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-card">
+              <p class="empty-title">先创建一个分组</p>
+              <p>例如“核心观察”“高弹性”“财报前后”“航空链”“半导体”等，然后再往里面加入股票。</p>
+            </div>
+          {% endif %}
+        </section>
+      </section>
+
+      <aside class="stock-sidebar">
+        <section class="panel stock-create-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">创建分组</p>
+              <h3>新建分组</h3>
+            </div>
+          </div>
+          <form class="stack-form" action="{{ url_for('create_stock_group') }}" method="post" data-preserve-scroll>
+            <label class="form-field">
+              <span class="field-label">分组名称</span>
+              <input name="group_name" type="text" placeholder="例：核心观察">
+            </label>
+            <label class="form-field">
+              <span class="field-label">分组说明</span>
+              <textarea name="group_description" rows="4" placeholder="这个分组为什么存在，适合放什么类型的股票或策略"></textarea>
+            </label>
+            <button class="button button-primary" type="submit">创建分组</button>
+          </form>
+        </section>
+
+        <section class="panel stock-guide-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">使用方式</p>
+              <h3>如何组织研究</h3>
+            </div>
+          </div>
+          <ul class="briefing-list">
+            <li>先创建分组，用来区分策略、行业、主题或阶段观察。</li>
+            <li>在分组里输入股票代码，一次可以加入多只股票。</li>
+            <li>点进个股页后，再集中写笔记、上传文件、看活动日历。</li>
+            <li>后面如果继续增加模块，也能沿着这套结构继续扩展。</li>
+          </ul>
+        </section>
+
+        <section class="panel stock-status-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">访问地址</p>
+              <h3>当前访问方式</h3>
+            </div>
+          </div>
+          <div class="access-list">
+            <div class="access-item">
+              <span class="access-label">本机</span>
+              <a href="{{ local_url }}">{{ local_url }}</a>
+            </div>
+            {% if lan_url %}
+            <div class="access-item">
+              <span class="access-label">局域网</span>
+              <a href="{{ lan_url }}">{{ lan_url }}</a>
+            </div>
+            {% endif %}
+            <div class="access-item">
+              <span class="access-label">报告目录</span>
+              <span class="access-path">{{ reports_dir }}</span>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

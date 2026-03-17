@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>资料导出</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='export-center.js', v='20260316-range2') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="panel export-hero">
+      <div class="export-hero-copy">
+        <p class="eyebrow">导出给 GPT</p>
+        <h2>把资料按范围打包，直接带去外部模型继续整理。</h2>
+        <p class="story-dek">
+          先导出摘要包建立上下文，再按需补原始正文、日报或会议音频。这样更稳，也更方便对照原文。
+        </p>
+      </div>
+      <aside class="export-hero-stats">
+        <article class="mini-fact">
+          <span class="mini-label">常用包</span>
+          <strong>3 种</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">高级选项</span>
+          <strong>范围 / 时间 / 类型 / 深度</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">输出格式</span>
+          <strong>ZIP + Summary + Manifest</strong>
+        </article>
+      </aside>
+    </section>
+
+    <section class="panel export-shell" data-export-center-root>
+      <article class="export-panel">
+        <div class="export-panel-head">
+          <div>
+            <p class="eyebrow">快速导出</p>
+            <h3>常用资料包</h3>
+            <p class="section-caption">适合把最近资料带给 GPT Pro 做辅助阅读。</p>
+          </div>
+        </div>
+
+        <div class="ai-export-quick-grid">
+          <form class="ai-export-card" action="{{ url_for('export_ai_package') }}" method="post">
+            <input type="hidden" name="package_kind" value="weekly">
+            <input type="hidden" name="next_url" value="{{ current_export_url }}">
+            <input type="hidden" name="include_original_files" value="1">
+            <input type="hidden" name="include_source_media" value="1">
+            <input type="hidden" name="content_mode" value="summary_plus_raw">
+            <div class="ai-export-card-copy">
+              <strong>本周资料包</strong>
+              <span>近 7 天的日报、笔记、研究资料和会议转录</span>
+            </div>
+            <button class="button button-secondary button-compact" type="submit">导出本周包</button>
+          </form>
+
+          <form class="ai-export-card" action="{{ url_for('export_ai_package') }}" method="post">
+            <input type="hidden" name="package_kind" value="stock_full">
+            <input type="hidden" name="next_url" value="{{ current_export_url }}">
+            <input type="hidden" name="include_original_files" value="1">
+            <input type="hidden" name="content_mode" value="summary_plus_raw">
+            <label class="form-field">
+              <span class="field-label">某只股票全量研究</span>
+              <select name="symbol">
+                {% for option in stock_options %}
+                  <option value="{{ option.symbol }}" {% if option.symbol == default_export_symbol %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button class="button button-secondary button-compact" type="submit">导出完整包</button>
+          </form>
+
+          <form class="ai-export-card" action="{{ url_for('export_ai_package') }}" method="post">
+            <input type="hidden" name="package_kind" value="stock_transcripts_week">
+            <input type="hidden" name="next_url" value="{{ current_export_url }}">
+            <input type="hidden" name="include_source_media" value="1">
+            <input type="hidden" name="content_mode" value="summary_plus_raw">
+            <label class="form-field">
+              <span class="field-label">某只股票近 7 天转录</span>
+              <select name="symbol">
+                {% for option in stock_options %}
+                  <option value="{{ option.symbol }}" {% if option.symbol == default_export_symbol %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button class="button button-secondary button-compact" type="submit">导出转录包</button>
+          </form>
+        </div>
+      </article>
+
+      <article class="export-panel export-panel-advanced">
+        <div class="export-panel-head">
+          <div>
+            <p class="eyebrow">高级导出</p>
+            <h3>自定义资料包</h3>
+            <p class="section-caption">按全站或单股、时间方式、内容类型和导出深度自由组合。</p>
+          </div>
+        </div>
+
+        <form class="ai-export-advanced-form" action="{{ url_for('export_ai_package') }}" method="post">
+          <input type="hidden" name="package_kind" value="custom">
+          <input type="hidden" name="next_url" value="{{ current_export_url }}">
+
+          <div class="ai-export-options-grid">
+            <label class="form-field">
+              <span class="field-label">导出范围</span>
+              <select name="export_scope" data-ai-export-scope>
+                <option value="all_stocks">全站资料</option>
+                <option value="single_stock">指定股票</option>
+              </select>
+            </label>
+
+            <label class="form-field" data-ai-export-symbol-field>
+              <span class="field-label">股票</span>
+              <select name="symbol" data-ai-export-symbol>
+                {% for option in stock_options %}
+                  <option value="{{ option.symbol }}" {% if option.symbol == default_export_symbol %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+
+            <div class="ai-export-time-mode">
+              <span class="field-label">时间方式</span>
+              <div class="ai-export-mode-switch">
+                <label class="ai-export-mode-pill">
+                  <input type="radio" name="date_scope" value="recent" checked data-ai-export-date-mode>
+                  <span>最近一段时间</span>
+                </label>
+                <label class="ai-export-mode-pill">
+                  <input type="radio" name="date_scope" value="range" data-ai-export-date-mode>
+                  <span>起日期区间</span>
+                </label>
+                <label class="ai-export-mode-pill">
+                  <input type="radio" name="date_scope" value="all" data-ai-export-date-mode>
+                  <span>全部时间</span>
+                </label>
+              </div>
+            </div>
+
+            <label class="form-field" data-ai-export-days-field>
+              <span class="field-label">最近天数</span>
+              <input type="number" name="days" min="1" max="90" value="7" data-ai-export-days>
+            </label>
+          </div>
+
+          <div class="ai-export-date-range-grid" data-ai-export-range-group hidden>
+            <label class="form-field" data-ai-export-start-date-field>
+              <span class="field-label">起日期</span>
+              <input type="date" name="start_date" value="{{ default_export_start_date }}" data-ai-export-start-date>
+            </label>
+
+            <label class="form-field" data-ai-export-end-date-field>
+              <span class="field-label">终日期</span>
+              <input type="date" name="end_date" value="{{ default_export_end_date }}" data-ai-export-end-date>
+            </label>
+          </div>
+
+          <div class="ai-export-choice-row">
+            <span class="field-label">包含内</span>
+            <div class="ai-inline-checks">
+              <label><input type="checkbox" name="include_reports" value="1" checked data-ai-export-type="reports"> 日报</label>
+              <label><input type="checkbox" name="include_notes" value="1" checked data-ai-export-type="notes"> 笔记</label>
+              <label><input type="checkbox" name="include_files" value="1" checked data-ai-export-type="files"> 研究资料</label>
+              <label><input type="checkbox" name="include_transcripts" value="1" checked data-ai-export-type="transcripts"> 会议转录</label>
+            </div>
+          </div>
+
+          <div class="ai-export-options-grid">
+            <label class="form-field">
+              <span class="field-label">导出深度</span>
+              <select name="content_mode" data-ai-export-content-mode>
+                <option value="summary_plus_raw">摘要 + 原始正文</option>
+                <option value="summary_only">只导出摘要和目录</option>
+              </select>
+            </label>
+
+            <div class="ai-export-choice-stack">
+              <span class="field-label">附加原件</span>
+              <div class="ai-inline-checks">
+                <label><input type="checkbox" name="include_original_files" value="1" checked data-ai-export-original-files> 附研究原文件</label>
+                <label><input type="checkbox" name="include_source_media" value="1" checked data-ai-export-source-media> 附会议音频/视频</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="ai-export-advanced-actions">
+            <p class="section-caption">推荐顺序：先用 summary 包建立上下文，再按问题补关键原文或音频。</p>
+            <button class="button button-primary" type="submit" data-ai-export-submit>生成自定义导出包</button>
+          </div>
+        </form>
+      </article>
+    </section>
+  </div>
+</body>
+</html>

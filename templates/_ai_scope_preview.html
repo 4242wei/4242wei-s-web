@@ -1,0 +1,179 @@
+<section
+  class="ai-scope-preview"
+  data-ai-scope-preview-root
+  data-preview-month="{{ scope_preview.month_key }}"
+  data-selected-date="{{ scope_preview.selected_date or '' }}"
+>
+  <div class="ai-scope-preview-head">
+    <div>
+      <p class="eyebrow">范围预览</p>
+      <h4>{{ scope_preview.month_label }}</h4>
+      <p class="section-caption">
+        {% if scope_preview.range_scope_active %}
+          蓝色表示已纳入当前时间范围，点某一天会切到橙色聚焦，再点一次同一天会恢复整个范围。
+        {% else %}
+          当前没有限定时间窗口，右侧默认显示本月资料；点某一天可以切到单天查看。
+        {% endif %}
+      </p>
+    </div>
+    <div class="ai-scope-preview-controls">
+      <div class="calendar-jump-form calendar-jump-form-mini">
+        <label class="calendar-select-field">
+          <span>年份</span>
+          <select data-ai-preview-year>
+            {% for year in scope_preview.available_years %}
+              <option value="{{ year }}" {% if year == scope_preview.selected_year %}selected{% endif %}>{{ year }} 年</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="calendar-select-field">
+          <span>月份</span>
+          <select data-ai-preview-month-number>
+            {% for option in scope_preview.month_options %}
+              <option value="{{ option.value }}" {% if option.value == scope_preview.selected_month_number %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <div class="calendar-nav-actions">
+        <button class="icon-button" type="button" data-ai-preview-month-link="{{ scope_preview.previous_month_key }}" aria-label="上一月"><</button>
+        <button class="button button-ghost" type="button" data-ai-preview-month-link="{{ scope_preview.current_month_key }}">本月</button>
+        <button class="icon-button" type="button" data-ai-preview-month-link="{{ scope_preview.next_month_key }}" aria-label="下一月">></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="ai-scope-preview-body">
+    <div class="ai-scope-preview-main">
+      <div class="calendar-weekday-row">
+        <span>周一</span>
+        <span>周二</span>
+        <span>周三</span>
+        <span>周四</span>
+        <span>周五</span>
+        <span>周六</span>
+        <span>周日</span>
+      </div>
+
+      <div class="ai-scope-preview-grid">
+        {% for week in scope_preview.calendar_weeks %}
+          {% for day in week %}
+            <button
+              class="calendar-day-card ai-scope-day-card{% if not day.is_current_month %} is-outside{% endif %}{% if day.is_in_range %} is-in-range{% endif %}{% if day.is_selected %} is-focus{% endif %}"
+              type="button"
+              data-ai-preview-date="{{ day.date }}"
+              data-ai-preview-month="{{ day.date[:7] }}"
+              data-ai-preview-selected="{{ '1' if day.is_selected else '0' }}"
+              data-ai-preview-in-range="{{ '1' if day.is_in_range else '0' }}"
+            >
+              <strong>{{ day.day_number }}</strong>
+              {% if day.summary %}
+                <span>{{ day.summary.total_count }} 条资料</span>
+              {% else %}
+                <span>无资料</span>
+              {% endif %}
+            </button>
+          {% endfor %}
+        {% endfor %}
+      </div>
+    </div>
+
+    <aside class="ai-scope-preview-side">
+      <section class="panel side-panel ai-scope-side-panel">
+        <div class="ai-scope-side-head">
+          <div>
+            <p class="eyebrow">{{ scope_preview.detail_eyebrow }}</p>
+            <h4>{{ scope_preview.detail_heading }}</h4>
+            <p class="section-caption">{{ scope_preview.detail_description }}</p>
+          </div>
+          {% if scope_preview.selected_date %}
+            <button class="button button-ghost button-compact" type="button" data-ai-preview-clear-day>
+              查看整个范围
+            </button>
+          {% endif %}
+        </div>
+
+        <div class="ai-scope-side-metrics">
+          <article>
+            <span>总数</span>
+            <strong>{{ scope_preview.detail_totals.total_count }}</strong>
+          </article>
+          <article>
+            <span>涉及股票</span>
+            <strong>{{ scope_preview.detail_totals.stock_count }}</strong>
+          </article>
+          <article>
+            <span>活跃日期</span>
+            <strong>{{ scope_preview.detail_totals.days_count }}</strong>
+          </article>
+          <article>
+            <span>结构</span>
+            <strong>{{ scope_preview.detail_totals.structure_label }}</strong>
+          </article>
+        </div>
+
+        <div class="ai-scope-kind-chips ai-scope-kind-filters">
+          {% for item in scope_preview.content_kind_options %}
+            <label class="ai-scope-kind-toggle {% if item.checked %}is-checked{% endif %}">
+              <input
+                type="checkbox"
+                value="{{ item.key }}"
+                data-ai-content-kind-toggle
+                {% if item.checked %}checked{% endif %}
+              >
+              <span>{{ item.label }} {{ item.count }}</span>
+            </label>
+          {% endfor %}
+        </div>
+
+        <div class="ai-scope-preview-groups">
+          {% if scope_preview.detail_groups %}
+            {% for group in scope_preview.detail_groups %}
+              <details class="ai-scope-group" {% if group.default_open %}open{% endif %}>
+                <summary class="ai-scope-group-summary">
+                  <div>
+                    <span class="meta-chip">{{ group.label }}</span>
+                    <strong>{{ group.count }} 条</strong>
+                  </div>
+                  <span class="section-caption">展开 / 收起</span>
+                </summary>
+                <div class="ai-scope-preview-items">
+                  {% for item in group['items'] %}
+                    <article class="ai-scope-preview-item">
+                      <div class="ai-scope-preview-item-meta">
+                        <span class="meta-chip">{{ item.kind_label }}</span>
+                        {% if item.symbol %}
+                          <span class="meta-chip">{{ item.symbol }}</span>
+                        {% endif %}
+                        {% if item.file_type %}
+                          <span class="meta-chip">{{ item.file_type }}</span>
+                        {% endif %}
+                      </div>
+                      <strong>{{ item.title }}</strong>
+                      <p class="section-caption">{{ item.display_time }}</p>
+                      {% if item.summary %}
+                        <p>{{ item.summary }}</p>
+                      {% endif %}
+                      <div class="ai-scope-preview-item-actions">
+                        <a href="{{ item.detail_url }}" class="button button-ghost button-compact">{{ item.detail_label }}</a>
+                        {% if item.download_url %}
+                          <a href="{{ item.download_url }}" class="button button-ghost button-compact">下载文件</a>
+                        {% endif %}
+                      </div>
+                    </article>
+                  {% endfor %}
+                </div>
+              </details>
+            {% endfor %}
+          {% else %}
+            <div class="calendar-day-side-empty">
+              <div class="empty-inline">
+                <p>当前范围内还没有可用资料。可以先放宽股票范围，或调整时间窗口。</p>
+              </div>
+            </div>
+          {% endif %}
+        </div>
+      </section>
+    </aside>
+  </div>
+</section>

@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 研究助手</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <script src="{{ url_for('static', filename='ai-chat.js') }}?v=20260316-scope3" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="panel ai-hero">
+      <div class="ai-hero-copy">
+        <p class="eyebrow">AI 研究助手</p>
+        <h2>像和 GPT 对话一样提问，但答案会优先来自你的网页资料库。</h2>
+        <p class="story-dek">
+          后端会先整理报告、个股笔记、研究资料和会议转录，再把当前范围内的知识正文交给只读模式的 Codex。它更适合回看时间线、找遗漏、做阶段对比，不会修改网页文件。
+        </p>
+      </div>
+      <div class="ai-hero-scope">
+        <article class="ai-scope-card ai-scope-card-hero" data-ai-scope-summary-card>
+          <div class="ai-scope-card-head">
+            <div>
+              <p class="eyebrow">知识范围</p>
+              <h4 data-ai-scope-headline>{{ ai_scope_summary.headline }}</h4>
+            </div>
+            <button class="button button-ghost button-compact" type="button" data-ai-scope-open>
+              设置范围
+            </button>
+          </div>
+          <p class="section-caption" data-ai-scope-description>{{ ai_scope_summary.description }}</p>
+          <div class="ai-scope-summary-chips">
+            <span class="meta-chip" data-ai-scope-stock-label>{{ ai_scope_summary.stock_label }}</span>
+            <span class="meta-chip" data-ai-scope-time-label>{{ ai_scope_summary.time_label }}</span>
+            <span class="meta-chip" data-ai-scope-content-label>{{ ai_scope_summary.content_label }}</span>
+          </div>
+          <div class="ai-scope-summary-metrics">
+            {% for metric in ai_scope_summary.metrics %}
+              <article class="ai-scope-metric" data-ai-scope-metric="{{ metric.label }}">
+                <span>{{ metric.label }}</span>
+                <strong>{{ metric.value }}</strong>
+              </article>
+            {% endfor %}
+          </div>
+          <div class="ai-scope-summary-actions">
+            <button
+              class="button button-ghost button-compact"
+              type="button"
+              data-ai-scope-reset
+              {% if not ai_scope_summary.has_filters %}hidden{% endif %}
+            >
+              恢全站
+            </button>
+            {% if pending_message and active_session %}
+              <form action="{{ url_for('stop_ai_message', message_id=pending_message.id) }}" method="post">
+                <input type="hidden" name="session_id" value="{{ active_session.id }}">
+                <button class="danger-button danger-button-compact" type="submit">停生成</button>
+              </form>
+            {% endif %}
+          </div>
+        </article>
+      </div>
+      <aside class="ai-hero-stats">
+        <article class="mini-fact">
+          <span class="mini-label">历史对话</span>
+          <strong>{{ chat_sessions|length }} 个</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">知识模式</span>
+          <strong>网页资料只读</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">本地 Codex</span>
+          <strong>{{ "已就绪" if codex_ready else "未检测到" }}</strong>
+        </article>
+      </aside>
+    </section>
+
+    <section
+      class="panel ai-shell"
+      data-ai-shell
+      data-ai-chat-root
+      data-ai-scope-preview-url="{{ url_for('ai_scope_preview') }}"
+      data-ai-scope-save-url="{{ url_for('save_ai_scope') }}"
+      {% if active_session %}
+      data-ai-session-id="{{ active_session.id }}"
+      data-ai-poll-url="{{ url_for('ai_session_status', session_id=active_session.id) }}"
+      {% endif %}
+      data-ai-poll-interval="{{ poll_interval_ms }}"
+    >
+      <aside class="ai-sidebar" data-ai-sidebar>
+        <div class="ai-sidebar-head">
+          <button class="ai-sidebar-toggle" type="button" data-ai-sidebar-toggle aria-expanded="true">
+            <span class="ai-sidebar-toggle-icon">≡</span>
+            <span class="ai-sidebar-toggle-label">收起历史</span>
+          </button>
+          <form action="{{ url_for('create_ai_session') }}" method="post">
+            <button class="button button-secondary button-compact ai-sidebar-new" type="submit">新建对话</button>
+          </form>
+        </div>
+
+        <div class="ai-sidebar-scroll">
+          <div class="ai-session-list">
+            {% for session in chat_sessions %}
+              <article class="ai-session-card {% if selected_session_id == session.id %}is-active{% endif %}">
+                <a class="ai-session-card-link" href="{{ url_for('ai_workspace', session=session.id) }}" title="{{ session.title }}">
+                  <strong>{{ session.display_title }}</strong>
+                  <div class="card-inline-meta">
+                    <span class="section-caption">{{ session.updated_label }}</span>
+                    {% if session.pending_count %}
+                      <span class="meta-chip">回答中 {{ session.pending_count }}</span>
+                    {% endif %}
+                  </div>
+                </a>
+                <div class="ai-session-card-actions">
+                  <button
+                    class="button button-ghost button-compact"
+                    type="button"
+                    data-ai-session-rename-toggle
+                    data-ai-target="rename-{{ session.id }}"
+                  >
+                    命名
+                  </button>
+                  <form
+                    action="{{ url_for('delete_ai_session', session_id=session.id) }}"
+                    method="post"
+                    data-confirm-delete
+                    data-confirm-message="删除这个对话吗？删除后无法恢复。"
+                  >
+                    <input type="hidden" name="next_session_id" value="{{ active_session.id if active_session and active_session.id != session.id else '' }}">
+                    <button class="danger-button danger-button-compact" type="submit">删除</button>
+                  </form>
+                </div>
+                <form
+                  id="rename-{{ session.id }}"
+                  class="ai-session-rename-form"
+                  action="{{ url_for('rename_ai_session', session_id=session.id) }}"
+                  method="post"
+                  hidden
+                >
+                  <input type="hidden" name="next_session_id" value="{{ session.id }}">
+                  <input name="title" type="text" maxlength="120" value="{{ session.title }}" placeholder="输入新的对话名称">
+                  <button class="button button-primary button-compact" type="submit">保存</button>
+                </form>
+              </article>
+            {% endfor %}
+
+            {% if not chat_sessions %}
+              <div class="empty-inline">
+                <p>你发出第一条消息后，历史对话会自动保存在这里，方便回看和继续追问。</p>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </aside>
+
+      <section class="ai-chat-panel">
+        <div class="ai-chat-head-stack">
+          <div class="ai-chat-topbar">
+            <div class="ai-chat-topbar-main">
+              <button class="ai-topbar-sidebar-button" type="button" data-ai-sidebar-toggle aria-expanded="true">
+                历史对话
+              </button>
+              <div>
+                <p class="eyebrow">当前对话</p>
+                <h3>{{ active_session.title if active_session else "新对话" }}</h3>
+                <p class="section-caption">
+                  对话会自动带上当前知识范围。要做特定股票或某段时间的对比，可以先在顶部限定资料库。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {% if not codex_ready %}
+            <div class="ai-inline-alert is-error">
+              当前电脑没有检测到可用的 `codex` 命令，暂时无法发起本地 AI 问答。
+            </div>
+          {% elif pending_message %}
+            <div class="ai-inline-alert is-info">
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+              <strong>回答中</strong>
+              <span>如果方向不合适，可以立刻点停止生成。</span>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="ai-chat-body">
+          {% if active_session %}
+            <div class="ai-message-list" data-ai-message-list>
+              {% for message in active_session.messages %}
+                <article class="ai-message ai-message-{{ message.role }}">
+                  <div class="ai-message-bubble" data-message-status="{{ message.status }}">
+                    <div class="ai-message-meta">
+                      <span class="meta-chip">{{ "你" if message.role == "user" else "Codex" }}</span>
+                      {% if message.role == "assistant" and message.model %}
+                        <span class="meta-chip">{{ message.model }}</span>
+                      {% endif %}
+                      {% if message.role == "assistant" and message.reasoning_effort %}
+                        <span class="meta-chip">思考 {{ message.reasoning_effort }}</span>
+                      {% endif %}
+                      {% if message.status == "cancelled" %}
+                        <span class="meta-chip meta-chip-muted">已停止</span>
+                      {% elif message.status == "error" %}
+                        <span class="meta-chip meta-chip-danger">失败</span>
+                      {% endif %}
+                      <span class="section-caption">{{ message.created_at }}</span>
+                    </div>
+                    {% if message.status in ["pending", "running"] %}
+                      <div class="ai-message-content ai-thinking">
+                        <span class="thinking-dot"></span>
+                        <span class="thinking-dot"></span>
+                        <span class="thinking-dot"></span>
+                        <strong>回答中</strong>
+                      </div>
+                    {% else %}
+                      <div class="ai-message-content">{{ message.content | e }}</div>
+                    {% endif %}
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-card ai-empty-state">
+              <p class="empty-title">这里会显示你的对话记录。</p>
+              <p>适合问“最近哪些判断变了”“某段时间窗口里资料有什么矛盾”“FTAI 和 GE 在同阶段的变化差在哪”。</p>
+            </div>
+          {% endif %}
+        </div>
+
+        <form class="ai-composer" action="{{ url_for('send_ai_message') }}" method="post" data-ai-composer-form>
+          <input type="hidden" name="session_id" value="{{ selected_session_id }}">
+          <input type="hidden" name="use_stock_scope" value="{{ '1' if ai_scope_settings.use_stock_scope else '0' }}" data-ai-scope-hidden="use_stock_scope">
+          <input type="hidden" name="scope_symbols" value="{{ ai_scope_settings.symbols_text }}" data-ai-scope-hidden="scope_symbols">
+          <input type="hidden" name="scope_content_kinds" value="{{ ai_scope_settings.content_kinds_text }}" data-ai-scope-hidden="scope_content_kinds">
+          <input type="hidden" name="use_date_scope" value="{{ '1' if ai_scope_settings.use_date_scope else '0' }}" data-ai-scope-hidden="use_date_scope">
+          <input type="hidden" name="scope_start_date" value="{{ ai_scope_settings.start_date }}" data-ai-scope-hidden="scope_start_date">
+          <input type="hidden" name="scope_end_date" value="{{ ai_scope_settings.end_date }}" data-ai-scope-hidden="scope_end_date">
+          <input type="hidden" name="scope_preview_month" value="{{ ai_scope_preview.month_key }}" data-ai-scope-hidden="scope_preview_month">
+          <input type="hidden" name="scope_selected_date" value="{{ ai_scope_preview.selected_date or '' }}" data-ai-scope-hidden="scope_selected_date">
+
+          <div class="ai-composer-shell">
+            <textarea
+              name="prompt"
+              rows="5"
+              placeholder="例：只看 FTAI 和 GE 在 2026-03-10 到 2026-03-16 之间的资料，帮我比较判断发生了哪些变化。"
+              {% if pending_message or not codex_ready %}disabled{% endif %}
+            ></textarea>
+            <div class="ai-composer-toolbar">
+              <label class="form-field ai-compact-field">
+                <span class="field-label">模型</span>
+                <select name="model_slug" data-ai-model-select {% if pending_message or not codex_ready %}disabled{% endif %}>
+                  {% for model in model_catalog %}
+                    <option
+                      value="{{ model.slug }}"
+                      data-reasoning-levels='{{ model.reasoning_levels | tojson }}'
+                      data-default-reasoning="{{ model.default_reasoning }}"
+                      {% if model.slug == selected_model_slug %}selected{% endif %}
+                    >
+                      {{ model.display_name }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field ai-compact-field">
+                <span class="field-label">思考深度</span>
+                <select name="reasoning_effort" data-ai-reasoning-select {% if pending_message or not codex_ready %}disabled{% endif %}>
+                  {% for level in selected_model_reasoning_levels %}
+                    <option value="{{ level }}" {% if level == selected_reasoning_effort %}selected{% endif %}>{{ level }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field ai-compact-field">
+                <span class="field-label">回答风格</span>
+                <select name="response_style" {% if pending_message or not codex_ready %}disabled{% endif %}>
+                  {% for option in response_style_options %}
+                    <option value="{{ option }}" {% if option == selected_response_style %}selected{% endif %}>{{ option }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <div class="ai-composer-actions">
+                <button class="button button-primary" type="submit" {% if pending_message or not codex_ready %}disabled{% endif %}>
+                  发给 Codex
+                </button>
+              </div>
+            </div>
+            <p class="field-help">当前模式是只读问答。Codex 会读取当前范围内的网页知识正文，但不会修改网页文件。</p>
+          </div>
+        </form>
+      </section>
+    </section>
+
+    <div class="compose-overlay ai-scope-overlay" data-ai-scope-overlay hidden>
+      <div class="compose-overlay-backdrop"></div>
+      <div class="compose-dialog ai-scope-dialog" role="dialog" aria-modal="true" aria-label="知识范围设置">
+        <div class="compose-dialog-shell panel">
+          <div class="reader-sheet-head compose-dialog-head">
+            <div>
+              <p class="eyebrow">知识范围</p>
+              <h3>限定 AI 会读取的资料范围</h3>
+              <p class="section-caption">先定股票范围，再加时间窗口。右侧会即时显示这个范围内每天有什么内容，方便做阶段对比。</p>
+            </div>
+            <button class="button button-ghost button-compact" type="button" data-ai-scope-close>关闭</button>
+          </div>
+
+          <form class="ai-scope-form" data-ai-scope-form>
+            <input type="hidden" name="session_id" value="{{ selected_session_id }}" data-ai-scope-session-id>
+            <input type="hidden" name="symbols" value="{{ ai_scope_settings.symbols_text }}" data-ai-scope-symbols>
+            <input type="hidden" name="content_kinds" value="{{ ai_scope_settings.content_kinds_text }}" data-ai-scope-content-kinds>
+            <input type="hidden" name="preview_month" value="{{ ai_scope_preview.month_key }}" data-ai-scope-preview-month>
+            <input type="hidden" name="selected_date" value="{{ ai_scope_preview.selected_date or '' }}" data-ai-scope-selected-date>
+
+            <div class="ai-scope-grid">
+              <section class="ai-scope-panel">
+                <div class="ai-scope-section">
+                  <label class="checkbox-row">
+                    <input type="checkbox" name="use_stock_scope" value="1" {% if ai_scope_settings.use_stock_scope %}checked{% endif %}>
+                    <span>针对特定股票内容库</span>
+                  </label>
+                  <p class="section-caption">勾选后，Codex 只会读取选中股票的日报、笔记、文件和会议转录。</p>
+                  <div class="ai-scope-field-group" data-ai-scope-stock-group>
+                    <label class="form-field">
+                      <span class="field-label">筛选股票</span>
+                      <input type="text" placeholder="输入代码快速筛选" data-ai-stock-filter>
+                    </label>
+                    <div class="ai-scope-selected-stock-box" data-ai-selected-stocks></div>
+                    <div class="ai-scope-stock-grid" data-ai-scope-stock-grid>
+                      {% for option in stock_options %}
+                        <button
+                          class="ai-stock-chip {% if option.symbol in ai_scope_settings.symbols %}is-selected{% endif %}"
+                          type="button"
+                          data-ai-stock-chip
+                          data-symbol="{{ option.symbol }}"
+                        >
+                          {{ option.symbol }}
+                        </button>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="ai-scope-section">
+                  <label class="checkbox-row">
+                    <input type="checkbox" name="use_date_scope" value="1" {% if ai_scope_settings.use_date_scope %}checked{% endif %}>
+                    <span>限定资料时间窗口</span>
+                  </label>
+                  <p class="section-caption">日期选择会直接使用浏览器的小浮窗，不会再弹出整页大日历。</p>
+                  <div class="ai-scope-field-group ai-scope-date-grid" data-ai-scope-date-group>
+                    <label class="form-field">
+                      <span class="field-label">起日期</span>
+                      <input name="start_date" type="date" value="{{ ai_scope_settings.start_date }}">
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">终日期</span>
+                      <input name="end_date" type="date" value="{{ ai_scope_settings.end_date }}">
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <section class="ai-scope-panel ai-scope-preview-panel">
+                <div class="ai-scope-preview-frame" data-ai-scope-preview-frame>
+                  {% with scope_preview=ai_scope_preview %}
+                    {% include "_ai_scope_preview.html" %}
+                  {% endwith %}
+                </div>
+              </section>
+            </div>
+
+            <div class="story-actions ai-scope-actions">
+              <button class="button button-ghost" type="button" data-ai-scope-reset>恢全站范围</button>
+              <button class="button button-primary" type="submit">保存这个范围</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
