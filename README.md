@@ -114,3 +114,38 @@ http://192.168.1.8:5000
 ```
 
 Keep this program window open while the site is being used.
+
+## Colleague setup
+
+If your teammate only needs the code version of this project and should not receive your local data, API keys, OSS config, or research files:
+
+1. Clone the repository
+2. Run `start.bat`
+3. Open `http://127.0.0.1:5000`
+
+```powershell
+git clone https://github.com/4242wei/4242wei-s-web.git
+cd 4242wei-s-web
+.\start.bat
+```
+
+This repository intentionally does not upload:
+
+- `.env`
+- `.env.local`
+- `data/`
+- `uploads/`
+- `reports/`
+- `backups/`
+- `logs/`
+- `.venv/`
+
+If a teammate wants to point the site at their own Markdown report folder, they can create a local `.env.local` file and set:
+
+```text
+REPORTS_DIR=D:\their\reports\folder
+```
+
+If they want to enable Tingwu / OSS on their own machine, they should also put their own local credentials into `.env.local`.
+
+For the full code-only sharing guide, see [GITHUB_SHARE_GUIDE.md](GITHUB_SHARE_GUIDE.md).

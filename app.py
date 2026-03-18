@@ -379,6 +379,7 @@ SIGNAL_MONITOR_PROCESS_LOCK = threading.RLock()
 SIGNAL_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
 SIGNAL_MONITOR_DEFAULT_WINDOW_DAYS = 7
 SIGNAL_MONITOR_MIN_INTERVAL_HOURS = 6
+SIGNAL_MONITOR_DEFAULT_CATEGORY = "通用监控"
 SIGNAL_MONITOR_DEFAULT_SOURCES = [
     {
         "id": "semianalysis-x",
@@ -387,6 +388,7 @@ SIGNAL_MONITOR_DEFAULT_SOURCES = [
         "handle": "SemiAnalysis_",
         "profile_url": "https://x.com/SemiAnalysis_",
         "notes": "先作为大 V 言论监控的默认示例。",
+        "category": SIGNAL_MONITOR_DEFAULT_CATEGORY,
         "enabled": True,
     }
 ]
@@ -2344,6 +2346,20 @@ def resolve_monitor_result_status(meta_status: str) -> str:
     return normalized or "idle"
 
 
+def read_runtime_error_excerpt(log_path_value: str, limit: int = 600) -> str:
+    log_path = Path(str(log_path_value or "").strip()) if str(log_path_value or "").strip() else None
+    if not log_path or not log_path.exists():
+        return ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    excerpt = text[-limit:].strip()
+    return excerpt
+
+
 def sync_monitor_runtime(runtime: dict[str, Any] | None = None) -> dict[str, Any]:
     with MONITOR_PROCESS_LOCK:
         current = normalize_monitor_runtime(runtime or load_monitor_runtime())
@@ -2371,7 +2387,11 @@ def sync_monitor_runtime(runtime: dict[str, Any] | None = None) -> dict[str, Any
         else:
             current["status"] = "failed"
             current["finished_at"] = now_iso()
-            current["error"] = current["error"] or "进程提前退出，未找到完整的结果文件。"
+            current["error"] = (
+                current["error"]
+                or read_runtime_error_excerpt(current.get("stderr_path", ""))
+                or "进程提前退出，未找到完整的结果文件。"
+            )
 
         current["pid"] = 0
         current["termination_requested"] = False
@@ -2592,6 +2612,78 @@ def extract_signal_x_handle(raw_value: Any) -> str:
     return candidate[:15]
 
 
+def normalize_signal_source_category(raw_value: Any) -> str:
+    category = re.sub(r"\s+", " ", str(raw_value or "").strip())[:40]
+    return category or SIGNAL_MONITOR_DEFAULT_CATEGORY
+
+
+def infer_signal_source_category(raw_source: Any) -> str:
+    if not isinstance(raw_source, dict):
+        return SIGNAL_MONITOR_DEFAULT_CATEGORY
+
+    haystack_parts = [
+        str(raw_source.get("notes") or "").strip(),
+        str(raw_source.get("display_name") or raw_source.get("name") or "").strip(),
+        str(raw_source.get("query") or raw_source.get("profile_url") or "").strip(),
+        str(raw_source.get("handle") or "").strip(),
+    ]
+    raw_text = " ".join(part for part in haystack_parts if part)
+    lowered = raw_text.lower()
+
+    category_keywords = (
+        (
+            "硬件监控",
+            (
+                "硬件",
+                "半导体",
+                "芯片",
+                "晶圆",
+                "供应链",
+                "数据中心",
+                "hardware",
+                "semiconductor",
+                "chip",
+                "wafer",
+                "fab",
+                "gpu",
+                "cpu",
+                "ai 供应链",
+                "ai供应链",
+            ),
+        ),
+        (
+            "苹果链监控",
+            (
+                "苹果链",
+                "iphone",
+                "ipad",
+                "ios",
+                "apple",
+                "mac",
+            ),
+        ),
+        (
+            "汽车监控",
+            (
+                "汽车",
+                "智能车",
+                "整车",
+                "tesla",
+                "mobility",
+                "autonomous",
+                "ev",
+            ),
+        ),
+    )
+
+    for category_name, keywords in category_keywords:
+        for keyword in keywords:
+            if keyword in lowered or keyword in raw_text:
+                return category_name
+
+    return SIGNAL_MONITOR_DEFAULT_CATEGORY
+
+
 def normalize_signal_source(raw_source: Any, *, existing_ids: set[str] | None = None) -> dict[str, Any] | None:
     if not isinstance(raw_source, dict):
         return None
@@ -2634,6 +2726,9 @@ def normalize_signal_source(raw_source: Any, *, existing_ids: set[str] | None = 
         "profile_url": profile_url[:400],
         "query": (raw_query or display_name)[:400],
         "notes": str(raw_source.get("notes") or "").strip()[:240],
+        "category": normalize_signal_source_category(
+            raw_source.get("category") or infer_signal_source_category(raw_source)
+        ),
         "enabled": bool(raw_source.get("enabled", True)),
     }
 
@@ -2903,7 +2998,11 @@ def sync_signal_monitor_runtime(runtime: dict[str, Any] | None = None) -> dict[s
         else:
             current["status"] = "failed"
             current["finished_at"] = now_iso()
-            current["error"] = current["error"] or "进程提前退出，未找到完整的信息监控结果文件。"
+            current["error"] = (
+                current["error"]
+                or read_runtime_error_excerpt(current.get("stderr_path", ""))
+                or "进程提前退出，未找到完整的信息监控结果文件。"
+            )
 
         current["pid"] = 0
         current["termination_requested"] = False
@@ -3070,6 +3169,30 @@ def build_signal_source_cards(config: dict[str, Any], state: dict[str, Any]) -> 
     return cards
 
 
+def build_signal_source_groups(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        category_name = normalize_signal_source_category(card.get("category"))
+        if category_name not in grouped:
+            grouped[category_name] = {
+                "name": category_name,
+                "count": 0,
+                "enabled_count": 0,
+                "is_scrollable": False,
+                "items": [],
+            }
+        group = grouped[category_name]
+        group["items"].append(card)
+        group["count"] += 1
+        if card.get("enabled", True):
+            group["enabled_count"] += 1
+
+    groups = list(grouped.values())
+    for group in groups:
+        group["is_scrollable"] = len(group["items"]) >= 4
+    return groups
+
+
 def build_signal_monitor_page_context() -> dict[str, Any]:
     config = load_signal_monitor_config()
     state = load_signal_monitor_state()
@@ -3077,6 +3200,7 @@ def build_signal_monitor_page_context() -> dict[str, Any]:
     reports = collect_signal_reports()
     today_reports = collect_today_signal_reports(reports)
     latest_report = reports[0] if reports else None
+    source_cards = build_signal_source_cards(config, state)
     return {
         "signal_monitor_config": config,
         "signal_monitor_state": state,
@@ -3091,7 +3215,8 @@ def build_signal_monitor_page_context() -> dict[str, Any]:
         "signal_reports": build_signal_report_cards(reports, state),
         "signal_today_reports": today_reports,
         "signal_latest_report": latest_report,
-        "signal_sources": build_signal_source_cards(config, state),
+        "signal_sources": source_cards,
+        "signal_source_groups": build_signal_source_groups(source_cards),
         "signal_status_poll_seconds": SIGNAL_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
     }
 

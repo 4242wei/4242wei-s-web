@@ -82,7 +82,7 @@
 
       if (activeCard instanceof HTMLElement) {
         if (labelNode instanceof HTMLElement) {
-          labelNode.textContent = activeCard.getAttribute("data-theme-label") || "默认";
+          labelNode.textContent = activeCard.getAttribute("data-theme-label") || "云岸淡蓝";
         }
         if (captionNode instanceof HTMLElement) {
           captionNode.textContent = activeCard.getAttribute("data-theme-caption") || "";

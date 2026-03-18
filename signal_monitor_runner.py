@@ -874,6 +874,7 @@ def main() -> int:
     now_value = beijing_now()
     created_at = now_value.strftime("%Y-%m-%d %H:%M:%S")
     sources = build_source_windows(enabled_sources, state, now_value=now_value, default_window_days=default_window_days)
+    previous_report_path = latest_previous_report(config.output_dir)
 
     stem = build_report_stem(created_at, config.trigger)
     report_path = config.output_dir / f"{stem}.md"
@@ -939,7 +940,6 @@ def main() -> int:
 
         scanned_sources.append(source)
 
-    previous_report_path = latest_previous_report(config.output_dir)
     previous_excerpt = read_previous_report_excerpt(previous_report_path)
     prompt = build_prompt(
         sources,

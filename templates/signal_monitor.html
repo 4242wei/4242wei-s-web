@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>信息监控</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260317-theme11') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-signal-groups1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
-  <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260317-signal-v2') }}" defer></script>
+  <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260318-signal-groups1') }}" defer></script>
 </head>
 <body>
   <div class="page-shell">
@@ -89,6 +89,21 @@
                     <span class="field-label">备注（可选）</span>
                     <input type="text" placeholder="例：半导体 / AI 供应链 / 数据中心" data-signal-source-note>
                   </label>
+                  <div class="signal-category-grid">
+                    <label class="form-field">
+                      <span class="field-label">现有分类</span>
+                      <select data-signal-category-select>
+                        <option value="">默认归类（通用监控）</option>
+                        {% for group in signal_source_groups %}
+                          <option value="{{ group['name'] }}">{{ group['name'] }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">或新建分类</span>
+                      <input type="text" placeholder="例如：硬件监控" data-signal-category-input>
+                    </label>
+                  </div>
                   <label class="form-field signal-window-field">
                     <span class="field-label">默回看窗口</span>
                     <input type="number" name="default_window_days" min="1" max="30" value="{{ signal_monitor_config.default_window_days }}">
@@ -279,25 +294,47 @@
             </div>
           </div>
           <div class="signal-source-stack">
-            {% for source in signal_sources %}
-              <article class="module-card signal-source-summary">
-                <div class="card-inline-meta">
-                  <span class="meta-chip">{{ source.source_label }}</span>
-                  {% if source.handle %}
-                    <span class="meta-chip">@{{ source.handle }}</span>
-                  {% endif %}
+            {% for group in signal_source_groups %}
+              <details class="expander signal-sidebar-group-expander">
+                <summary class="expander-summary signal-sidebar-group-summary">
+                  <div>
+                    <p class="eyebrow">监控分类</p>
+                    <h3>{{ group['name'] }}</h3>
+                    <p class="section-caption">{{ group['count'] }} 个来源 · {{ group['enabled_count'] }} 个启用中</p>
+                  </div>
+                  <div class="expander-meta">
+                    <span class="summary-count">{{ group['count'] }}</span>
+                    <span class="expander-toggle">
+                      <span class="expander-closed-label">展开</span>
+                      <span class="expander-open-label">收起</span>
+                    </span>
+                  </div>
+                </summary>
+                <div class="expander-body signal-sidebar-group-body">
+                  <div class="record-scroll-shell signal-sidebar-source-shell {% if group['is_scrollable'] %}is-scrollable{% endif %}">
+                    {% for source in group['items'] %}
+                      <article class="module-card signal-source-summary">
+                        <div class="card-inline-meta">
+                          <span class="meta-chip">{{ source.source_label }}</span>
+                          {% if source.handle %}
+                            <span class="meta-chip">@{{ source.handle }}</span>
+                          {% endif %}
+                        </div>
+                        <h4>{{ source.display_name }}</h4>
+                        {% if source.profile_url %}
+                          <p class="section-caption"><a class="text-link" href="{{ source.profile_url }}" target="_blank" rel="noreferrer">{{ source.profile_url }}</a></p>
+                        {% else %}
+                          <p class="section-caption">{{ source.query }}</p>
+                        {% endif %}
+                        <p class="field-help">上次窗口：{{ source.last_window_label }}</p>
+                        {% if source.notes %}
+                          <p class="field-help">{{ source.notes }}</p>
+                        {% endif %}
+                      </article>
+                    {% endfor %}
+                  </div>
                 </div>
-                <h4>{{ source.display_name }}</h4>
-                {% if source.profile_url %}
-                  <p class="section-caption"><a class="text-link" href="{{ source.profile_url }}" target="_blank" rel="noreferrer">{{ source.profile_url }}</a></p>
-                {% else %}
-                  <p class="section-caption">{{ source.query }}</p>
-                {% endif %}
-                <p class="field-help">上窗口：{{ source.last_window_label }}</p>
-                {% if source.notes %}
-                  <p class="field-help">{{ source.notes }}</p>
-                {% endif %}
-              </article>
+              </details>
             {% endfor %}
           </div>
         </section>

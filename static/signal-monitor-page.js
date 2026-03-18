@@ -24,7 +24,7 @@
     const node = document.createElement("div");
     node.className = `flash-message flash-${kind}`;
     node.setAttribute("data-flash-message", "");
-    node.innerHTML = `<div class="flash-body"></div><button class="flash-close" type="button" aria-label="关闭提示">X</button>`;
+    node.innerHTML = "<div class=\"flash-body\"></div><button class=\"flash-close\" type=\"button\" aria-label=\"关闭提示\">X</button>";
 
     const body = node.querySelector(".flash-body");
     const close = node.querySelector(".flash-close");
@@ -194,6 +194,38 @@
     return `name:${String(source.query || source.display_name || "").trim().toLowerCase()}`;
   }
 
+  function normalizeCategoryValue(rawValue) {
+    return String(rawValue || "").trim().replace(/\s+/g, " ").slice(0, 40) || "通用监控";
+  }
+
+  function inferCategory(rawSource) {
+    const source = rawSource && typeof rawSource === "object" ? rawSource : {};
+    const rawText = [
+      String(source.notes || "").trim(),
+      String(source.display_name || source.name || "").trim(),
+      String(source.query || source.profile_url || "").trim(),
+      String(source.handle || "").trim(),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const lowered = rawText.toLowerCase();
+    const categoryKeywords = [
+      [
+        "硬件监控",
+        ["硬件", "半导体", "芯片", "晶圆", "供应链", "数据中心", "hardware", "semiconductor", "chip", "wafer", "fab", "gpu", "cpu", "ai供应链", "ai 供应链"],
+      ],
+      ["苹果链监控", ["苹果链", "iphone", "ipad", "ios", "apple", "mac"]],
+      ["汽车监控", ["汽车", "智能车", "整车", "tesla", "mobility", "autonomous", "ev"]],
+    ];
+
+    for (const [categoryName, keywords] of categoryKeywords) {
+      if (keywords.some(function (keyword) { return lowered.includes(keyword) || rawText.includes(keyword); })) {
+        return categoryName;
+      }
+    }
+    return "通用监控";
+  }
+
   function normalizeSource(rawSource, existingKeys) {
     if (!rawSource || typeof rawSource !== "object") {
       return null;
@@ -218,6 +250,7 @@
       profile_url: sourceType === "x" && handle ? `https://x.com/${handle}` : String(rawSource.profile_url || "").trim().slice(0, 400),
       query: (query || displayName).slice(0, 400),
       notes: String(rawSource.notes || "").trim().slice(0, 240),
+      category: normalizeCategoryValue(rawSource.category || inferCategory(rawSource)),
       enabled: rawSource.enabled !== false,
     };
 
@@ -233,7 +266,7 @@
     return normalized;
   }
 
-  function buildSource(rawValue, rawNotes) {
+  function buildSource(rawValue, rawNotes, rawCategory) {
     const cleanValue = String(rawValue || "").trim();
     if (!cleanValue) {
       return null;
@@ -244,6 +277,7 @@
         display_name: extractXHandle(cleanValue) || cleanValue,
         query: cleanValue,
         notes: rawNotes,
+        category: rawCategory,
       },
       new Set()
     );
@@ -283,16 +317,110 @@
     const sourceList = form.querySelector("[data-signal-source-list]");
     const sourceInput = form.querySelector("[data-signal-source-input]");
     const noteInput = form.querySelector("[data-signal-source-note]");
+    const categorySelect = form.querySelector("[data-signal-category-select]");
+    const categoryInput = form.querySelector("[data-signal-category-input]");
     const addButton = form.querySelector("[data-signal-source-add]");
     const exampleButtons = form.querySelectorAll("[data-signal-example]");
 
     let sources = parseSeedSources();
+
+    function collectCategoryNames() {
+      const categorySet = new Set();
+      sources.forEach(function (source) {
+        categorySet.add(normalizeCategoryValue(source.category));
+      });
+      return Array.from(categorySet);
+    }
+
+    function refreshCategoryControls(preferredValue) {
+      if (!(categorySelect instanceof HTMLSelectElement)) {
+        return;
+      }
+
+      const categories = collectCategoryNames();
+      const currentValue = preferredValue || categorySelect.value || "";
+      categorySelect.innerHTML = "";
+
+      const defaultOption = document.createElement("option");
+      defaultOption.value = "";
+      defaultOption.textContent = "默认归类（通用监控）";
+      categorySelect.appendChild(defaultOption);
+
+      categories.forEach(function (categoryName) {
+        const option = document.createElement("option");
+        option.value = categoryName;
+        option.textContent = categoryName;
+        categorySelect.appendChild(option);
+      });
+
+      if (currentValue && categories.includes(currentValue)) {
+        categorySelect.value = currentValue;
+      } else {
+        categorySelect.value = "";
+      }
+    }
 
     function syncHidden() {
       if (hiddenInput instanceof HTMLInputElement) {
         hiddenInput.value = JSON.stringify(sources);
       }
       setSourceCount(sources.length);
+    }
+
+    function groupSources() {
+      const groups = [];
+      const groupMap = new Map();
+
+      sources.forEach(function (source, index) {
+        const categoryName = normalizeCategoryValue(source.category);
+        if (!groupMap.has(categoryName)) {
+          const group = { name: categoryName, items: [] };
+          groupMap.set(categoryName, group);
+          groups.push(group);
+        }
+        groupMap.get(categoryName).items.push({ source: source, index: index });
+      });
+
+      return groups;
+    }
+
+    function buildSourceCardMarkup(source, index) {
+      return (
+        `<article class="module-card signal-source-card" data-signal-source-index="${index}">` +
+          `<div class="signal-source-card-head">` +
+            `<div>` +
+              `<div class="card-inline-meta">` +
+                `<span class="meta-chip">${source.source_type === "x" ? "X / Twitter" : "名称线索"}</span>` +
+                `${source.handle ? `<span class="meta-chip">@${escapeHtml(source.handle)}</span>` : ""}` +
+                `${!source.enabled ? `<span class="meta-chip">已停用</span>` : ""}` +
+              `</div>` +
+              `<h4>${escapeHtml(source.display_name || "未命名来源")}</h4>` +
+            `</div>` +
+            `<button class="danger-button danger-button-compact" type="button" data-signal-remove="${index}">移除</button>` +
+          `</div>` +
+          `<div class="signal-source-fields">` +
+            `<label class="form-field">` +
+              `<span class="field-label">显示名称</span>` +
+              `<input type="text" value="${escapeHtml(source.display_name || "")}" data-signal-field="display_name" data-signal-index="${index}">` +
+            `</label>` +
+            `<label class="form-field">` +
+              `<span class="field-label">所属分类</span>` +
+              `<input type="text" value="${escapeHtml(source.category || "通用监控")}" placeholder="例如：硬件监控" data-signal-field="category" data-signal-index="${index}">` +
+            `</label>` +
+            `<label class="form-field">` +
+              `<span class="field-label">备注</span>` +
+              `<input type="text" value="${escapeHtml(source.notes || "")}" placeholder="例如：半导体 / AI 供应链 / 舆论变化" data-signal-field="notes" data-signal-index="${index}">` +
+            `</label>` +
+          `</div>` +
+          `<div class="signal-source-card-foot">` +
+            `<span class="signal-source-url">${escapeHtml(source.profile_url || source.query)}</span>` +
+            `<label class="signal-source-toggle">` +
+              `<input type="checkbox" ${source.enabled ? "checked" : ""} data-signal-enabled="${index}">` +
+              `<span>引入监控</span>` +
+            `</label>` +
+          `</div>` +
+        `</article>`
+      );
     }
 
     function renderSources() {
@@ -305,53 +433,69 @@
       if (!sources.length) {
         const empty = document.createElement("div");
         empty.className = "empty-card signal-source-empty";
-        empty.innerHTML = "<p class=\"empty-title\">还没有监控来源</p><p>先加一个 X 地址、@handle 或名称。这里默认支持把 `SemiAnalysis` 当成第一个示例。</p>";
+        empty.innerHTML = "<p class=\"empty-title\">还没有监控来源</p><p>先加一个 X 链接、@handle 或名称。这里默认支持把 `SemiAnalysis` 当成第一个示例。</p>";
         sourceList.appendChild(empty);
+        refreshCategoryControls("");
         syncHidden();
         return;
       }
 
-      sources.forEach(function (source, index) {
-        const card = document.createElement("article");
-        card.className = "module-card signal-source-card";
-        card.setAttribute("data-signal-source-index", String(index));
-        card.innerHTML =
-          `<div class="signal-source-card-head">` +
-          `<div>` +
-          `<div class="card-inline-meta">` +
-          `<span class="meta-chip">${source.source_type === "x" ? "X / Twitter" : "名称线索"}</span>` +
-          `${source.handle ? `<span class="meta-chip">@${escapeHtml(source.handle)}</span>` : ""}` +
-          `${!source.enabled ? `<span class="meta-chip">已停用</span>` : ""}` +
-          `</div>` +
-          `<h4>${escapeHtml(source.display_name || "未命名来源")}</h4>` +
-          `</div>` +
-          `<button class="danger-button danger-button-compact" type="button" data-signal-remove="${index}">移除</button>` +
-          `</div>` +
-          `<div class="signal-source-fields">` +
-          `<label class="form-field">` +
-          `<span class="field-label">显示名称</span>` +
-          `<input type="text" value="${escapeHtml(source.display_name || "")}" data-signal-field="display_name" data-signal-index="${index}">` +
-          `</label>` +
-          `<label class="form-field">` +
-          `<span class="field-label">备注</span>` +
-          `<input type="text" value="${escapeHtml(source.notes || "")}" placeholder="例如：半导体 / AI 供应链 / 舆论变化" data-signal-field="notes" data-signal-index="${index}">` +
-          `</label>` +
-          `</div>` +
-          `<div class="signal-source-card-foot">` +
-          `<span class="signal-source-url">${escapeHtml(source.profile_url || source.query)}</span>` +
-          `<label class="signal-source-toggle">` +
-          `<input type="checkbox" ${source.enabled ? "checked" : ""} data-signal-enabled="${index}">` +
-          `<span>引入监控</span>` +
-          `</label>` +
+      groupSources().forEach(function (group) {
+        const enabledCount = group.items.filter(function (item) {
+          return item.source.enabled !== false;
+        }).length;
+
+        const details = document.createElement("details");
+        details.className = "expander signal-source-group-expander";
+        details.innerHTML =
+          `<summary class="expander-summary signal-source-group-summary">` +
+            `<div>` +
+              `<p class="eyebrow">监控分类</p>` +
+              `<h3>${escapeHtml(group.name)}</h3>` +
+              `<p class="section-caption">${group.items.length} 个来源 · ${enabledCount} 个启用中</p>` +
+            `</div>` +
+            `<div class="expander-meta">` +
+              `<span class="summary-count">${group.items.length}</span>` +
+              `<span class="expander-toggle"><span class="expander-closed-label">展开</span><span class="expander-open-label">收起</span></span>` +
+            `</div>` +
+          `</summary>` +
+          `<div class="expander-body signal-source-group-body">` +
+            `<div class="record-scroll-shell signal-source-group-shell ${group.items.length >= 4 ? "is-scrollable" : ""}"></div>` +
           `</div>`;
-        sourceList.appendChild(card);
+
+        const shell = details.querySelector(".signal-source-group-shell");
+        if (shell instanceof HTMLElement) {
+          group.items.forEach(function (item) {
+            shell.insertAdjacentHTML("beforeend", buildSourceCardMarkup(item.source, item.index));
+          });
+        }
+
+        sourceList.appendChild(details);
       });
 
+      refreshCategoryControls(categorySelect instanceof HTMLSelectElement ? categorySelect.value : "");
       syncHidden();
     }
 
-    function addSource(rawValue, rawNotes) {
-      const candidate = buildSource(rawValue, rawNotes);
+    function resolvePendingCategory(rawValue, rawNotes) {
+      const explicitCategory = categoryInput instanceof HTMLInputElement ? categoryInput.value.trim() : "";
+      if (explicitCategory) {
+        return explicitCategory;
+      }
+
+      if (categorySelect instanceof HTMLSelectElement && categorySelect.value.trim()) {
+        return categorySelect.value.trim();
+      }
+
+      return inferCategory({
+        query: rawValue,
+        display_name: extractXHandle(rawValue) || rawValue,
+        notes: rawNotes,
+      });
+    }
+
+    function addSource(rawValue, rawNotes, rawCategory) {
+      const candidate = buildSource(rawValue, rawNotes, rawCategory);
       if (!candidate) {
         return 0;
       }
@@ -379,13 +523,17 @@
       addButton.addEventListener("click", function () {
         const rawValue = sourceInput instanceof HTMLInputElement ? sourceInput.value : "";
         const rawNotes = noteInput instanceof HTMLInputElement ? noteInput.value : "";
-        if (addSource(rawValue, rawNotes)) {
+        const rawCategory = resolvePendingCategory(rawValue, rawNotes);
+        if (addSource(rawValue, rawNotes, rawCategory)) {
           if (sourceInput instanceof HTMLInputElement) {
             sourceInput.value = "";
             sourceInput.focus();
           }
           if (noteInput instanceof HTMLInputElement) {
             noteInput.value = "";
+          }
+          if (categoryInput instanceof HTMLInputElement) {
+            categoryInput.value = "";
           }
           resetConfirmFlag();
           return;
@@ -403,10 +551,15 @@
           return;
         }
         event.preventDefault();
-        if (addSource(sourceInput.value, noteInput instanceof HTMLInputElement ? noteInput.value : "")) {
+        const rawNotes = noteInput instanceof HTMLInputElement ? noteInput.value : "";
+        const rawCategory = resolvePendingCategory(sourceInput.value, rawNotes);
+        if (addSource(sourceInput.value, rawNotes, rawCategory)) {
           sourceInput.value = "";
           if (noteInput instanceof HTMLInputElement) {
             noteInput.value = "";
+          }
+          if (categoryInput instanceof HTMLInputElement) {
+            categoryInput.value = "";
           }
           resetConfirmFlag();
           return;
@@ -458,6 +611,22 @@
 
       sourceList.addEventListener("change", function (event) {
         const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+
+        const field = target.getAttribute("data-signal-field");
+        if (field === "category" && target instanceof HTMLInputElement) {
+          const index = Number.parseInt(target.getAttribute("data-signal-index") || "-1", 10);
+          if (Number.isNaN(index) || index < 0 || !sources[index]) {
+            return;
+          }
+          sources[index].category = normalizeCategoryValue(target.value || inferCategory(sources[index]));
+          renderSources();
+          resetConfirmFlag();
+          return;
+        }
+
         if (!(target instanceof HTMLInputElement)) {
           return;
         }
@@ -473,7 +642,7 @@
     exampleButtons.forEach(function (button) {
       button.addEventListener("click", function () {
         const exampleValue = button.getAttribute("data-signal-example") || "";
-        if (!addSource(exampleValue, "")) {
+        if (!addSource(exampleValue, "", resolvePendingCategory(exampleValue, ""))) {
           showFlash("error", "这个示例已经在当前监控名单里了。");
         }
         resetConfirmFlag();
