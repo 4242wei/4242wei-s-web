@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>研究导图</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap7') }}">
+  <script src="{{ url_for('static', filename='mindmap-workspace.js', v='20260324-mindmap3') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="panel ai-hero mindmap-hero">
+      <div class="ai-hero-copy">
+        <p class="eyebrow">研究导图</p>
+        <h2>资料梳理台</h2>
+        <p class="story-dek">
+          先选股票、资料类型和时间窗口，再让本地 Codex 把资料整理成一张可浏览的分叉思维图。梳理时会同时考虑时间演化、资料互补、口径冲突和上下游传导。
+        </p>
+      </div>
+      <div class="ai-hero-scope">
+        <article class="ai-scope-card ai-scope-card-hero" data-ai-scope-summary-card>
+          <div class="ai-scope-card-head">
+            <div>
+              <p class="eyebrow">当前范围</p>
+              <h4 data-ai-scope-headline>{{ mindmap_scope_summary.headline }}</h4>
+            </div>
+            <button class="button button-ghost button-compact" type="button" data-ai-scope-open>
+              设置范围
+            </button>
+          </div>
+          <p class="section-caption" data-ai-scope-description>生成导图时会读取这里定义范围内的资料，并重点整理时间轴与资料之间的互补、分歧和修正关系。</p>
+          <div class="ai-scope-summary-chips">
+            <span class="meta-chip" data-ai-scope-stock-label>{{ mindmap_scope_summary.stock_label }}</span>
+            <span class="meta-chip" data-ai-scope-time-label>{{ mindmap_scope_summary.time_label }}</span>
+            <span class="meta-chip" data-ai-scope-content-label>{{ mindmap_scope_summary.content_label }}</span>
+          </div>
+          <div class="ai-scope-summary-metrics">
+            {% for metric in mindmap_scope_summary.metrics %}
+              <article class="ai-scope-metric" data-ai-scope-metric="{{ metric.label }}">
+                <span>{{ metric.label }}</span>
+                <strong>{{ metric.value }}</strong>
+              </article>
+            {% endfor %}
+          </div>
+          <div class="ai-scope-summary-actions">
+            <button
+              class="button button-ghost button-compact"
+              type="button"
+              data-ai-scope-reset
+              {% if not mindmap_scope_summary.has_filters %}hidden{% endif %}
+            >
+              恢复全站
+            </button>
+          </div>
+        </article>
+      </div>
+      <aside class="ai-hero-stats">
+        <article class="mini-fact">
+          <span class="mini-label">历史导图</span>
+          <strong>{{ mindmap_records|length }} 张</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">结构重点</span>
+          <strong>时间轴 + 资料关系</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">本地 Codex</span>
+          <strong>{{ "已就绪" if codex_ready else "未检测到" }}</strong>
+        </article>
+      </aside>
+    </section>
+
+    <section
+      class="panel ai-shell mindmap-shell"
+      data-mindmap-root
+      data-mindmap-preview-url="{{ url_for('mindmap_scope_preview') }}"
+      data-mindmap-save-url="{{ url_for('save_ai_scope') }}"
+      {% if active_record %}
+      data-mindmap-status-url="{{ url_for('mindmap_status', record_id=active_record.id) }}"
+      {% endif %}
+      data-mindmap-poll-interval="{{ poll_interval_ms }}"
+    >
+      <aside class="ai-sidebar mindmap-sidebar">
+        <div class="ai-sidebar-head mindmap-sidebar-head">
+          <a class="button button-secondary button-compact ai-sidebar-new" href="{{ url_for('mindmap_workspace') }}">新建导图</a>
+        </div>
+        <div class="ai-sidebar-scroll">
+          <div class="ai-session-list">
+            {% for record in mindmap_records %}
+              <article class="ai-session-card mindmap-record-card {% if selected_record_id == record.id %}is-active{% endif %}">
+                <a class="ai-session-card-link" href="{{ url_for('mindmap_workspace', map=record.id) }}" title="{{ record.title }}">
+                  <strong>{{ record.title }}</strong>
+                  <div class="card-inline-meta">
+                    <span class="meta-chip meta-chip-{{ record.status_tone }}">{{ record.status_label }}</span>
+                    {% if record.node_count %}
+                      <span class="meta-chip">{{ record.node_count }} 节点</span>
+                    {% endif %}
+                    <span class="section-caption">{{ record.updated_label }}</span>
+                  </div>
+                  <p class="section-caption">{{ record.structure_label }}</p>
+                </a>
+                <div class="ai-session-card-actions">
+                  <form
+                    action="{{ url_for('delete_mindmap', record_id=record.id) }}"
+                    method="post"
+                    data-confirm-delete
+                    data-confirm-message="删除这张导图吗？删除后无法恢复。"
+                  >
+                    <button class="danger-button danger-button-compact" type="submit">删除</button>
+                  </form>
+                </div>
+              </article>
+            {% endfor %}
+
+            {% if not mindmap_records %}
+              <div class="empty-inline">
+                <p>第一次生成后，导图会留在这里，方便你持续回看和复盘资料结构。</p>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </aside>
+
+      <section class="mindmap-workspace">
+        <div class="mindmap-topbar">
+          <div>
+            <p class="eyebrow">当前工作区</p>
+            <h3>{{ active_record.title if active_record else "新导图" }}</h3>
+            <p class="section-caption">
+              点击生成后，Codex 会把当前资料范围整理成一张可浏览导图，并突出时间演化、资料互补和结论冲突。
+            </p>
+          </div>
+          {% if active_record and active_record.status in ["pending", "running"] %}
+            <form action="{{ url_for('stop_mindmap', record_id=active_record.id) }}" method="post">
+              <button class="danger-button danger-button-compact" type="submit">停生成</button>
+            </form>
+          {% endif %}
+        </div>
+
+        {% if not codex_ready %}
+          <div class="ai-inline-alert is-error">
+            当前电脑没有检测到可用的 `codex` 命令，暂时无法发起导图生成。
+          </div>
+        {% endif %}
+
+        <form class="ai-composer mindmap-composer" action="{{ url_for('generate_mindmap') }}" method="post">
+          <input type="hidden" name="use_stock_scope" value="{{ '1' if mindmap_scope_settings.use_stock_scope else '0' }}" data-ai-scope-hidden="use_stock_scope">
+          <input type="hidden" name="scope_symbols" value="{{ mindmap_scope_settings.symbols_text }}" data-ai-scope-hidden="scope_symbols">
+          <input type="hidden" name="scope_content_kinds" value="{{ mindmap_scope_settings.content_kinds_text }}" data-ai-scope-hidden="scope_content_kinds">
+          <input type="hidden" name="use_date_scope" value="{{ '1' if mindmap_scope_settings.use_date_scope else '0' }}" data-ai-scope-hidden="use_date_scope">
+          <input type="hidden" name="scope_start_date" value="{{ mindmap_scope_settings.start_date }}" data-ai-scope-hidden="scope_start_date">
+          <input type="hidden" name="scope_end_date" value="{{ mindmap_scope_settings.end_date }}" data-ai-scope-hidden="scope_end_date">
+          <input type="hidden" name="scope_preview_month" value="{{ mindmap_scope_preview.month_key }}" data-ai-scope-hidden="scope_preview_month">
+          <input type="hidden" name="scope_selected_date" value="{{ mindmap_scope_preview.selected_date or '' }}" data-ai-scope-hidden="scope_selected_date">
+
+          <div class="ai-composer-shell mindmap-composer-shell">
+            <div class="mindmap-composer-copy">
+              <strong>生成分叉思维图</strong>
+              <p class="section-caption">默认会自动判断是单股拆解、同行对比、产业链传导还是主题资料包，并强制抽出时间主线与资料关系。</p>
+            </div>
+            <div class="mindmap-composer-controls">
+              <label class="form-field ai-compact-field">
+                <span class="field-label">模型</span>
+                <select name="model_slug" data-mindmap-model-select {% if not codex_ready %}disabled{% endif %}>
+                  {% for model in model_catalog %}
+                    <option
+                      value="{{ model.slug }}"
+                      data-reasoning-levels='{{ model.reasoning_levels | tojson }}'
+                      data-default-reasoning="{{ model.default_reasoning }}"
+                      {% if model.slug == selected_model_slug %}selected{% endif %}
+                    >
+                      {{ model.display_name }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="form-field ai-compact-field">
+                <span class="field-label">思考深度</span>
+                <select name="reasoning_effort" data-mindmap-reasoning-select {% if not codex_ready %}disabled{% endif %}>
+                  {% for level in selected_model_reasoning_levels %}
+                    <option value="{{ level }}" {% if level == selected_reasoning_effort %}selected{% endif %}>{{ level }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <div class="mindmap-composer-actions">
+                <button class="button button-primary" type="submit" {% if not codex_ready %}disabled{% endif %}>
+                  生成思维图
+                </button>
+              </div>
+            </div>
+            <p class="field-help">思维图是只读整理结果，不会修改网页原始资料。</p>
+          </div>
+        </form>
+
+        {% if active_record %}
+          {% if active_record.status in ["pending", "running"] %}
+            <div class="empty-card mindmap-empty-state">
+              <p class="empty-title">导图生成中</p>
+              <p>Codex 正在整理资料结构、时间演化和互补/冲突关系。页面会自动刷新到最新结果。</p>
+            </div>
+          {% elif active_record.status == "error" %}
+            <div class="empty-card mindmap-empty-state is-error">
+              <p class="empty-title">导图生成失败</p>
+              <p>{{ active_record.error or "这次没有拿到可用的导图结果。" }}</p>
+            </div>
+          {% elif active_record.status == "cancelled" %}
+            <div class="empty-card mindmap-empty-state">
+              <p class="empty-title">导图已停止</p>
+              <p>你可以调整范围后重新生成，不会影响原始资料。</p>
+            </div>
+          {% elif active_record.map_payload %}
+            <section class="mindmap-result-shell" data-mindmap-result-shell>
+              <div class="mindmap-result-head">
+                <div>
+                  <p class="eyebrow">导图结果</p>
+                  <h4>{{ active_record.title }}</h4>
+                  <p class="section-caption">{{ active_record.summary or "当前导图已完成结构整理。" }}</p>
+                </div>
+                <div class="mindmap-result-meta">
+                  <span class="meta-chip">{{ active_record.model or selected_model_slug }}</span>
+                  <span class="meta-chip">思考 {{ active_record.reasoning_effort or selected_reasoning_effort }}</span>
+                  <span class="meta-chip">{{ active_record.node_count }} 节点</span>
+                  <span class="meta-chip">{{ active_record.max_depth }} 层</span>
+                  <span class="meta-chip">{{ {"single_stock":"单股拆解","peer_group":"同行对比","value_chain":"产业链传导","theme_bundle":"主题资料包"}.get(active_record.structure_kind, "资料导图") }}</span>
+                </div>
+              </div>
+
+              {% if active_record.scope_summary %}
+                <div class="mindmap-generated-scope">
+                  <span class="meta-chip">{{ active_record.scope_summary.stock_label }}</span>
+                  <span class="meta-chip">{{ active_record.scope_summary.time_label }}</span>
+                  <span class="meta-chip">{{ active_record.scope_summary.content_label }}</span>
+                </div>
+              {% endif %}
+
+              <div class="mindmap-view-toolbar">
+                <div class="mindmap-view-switch">
+                  <button class="button button-ghost button-compact is-active" type="button" data-mindmap-view="canvas">导图</button>
+                  <button class="button button-ghost button-compact" type="button" data-mindmap-view="outline">大纲</button>
+                </div>
+                <div class="mindmap-toolbar-actions">
+                  <span class="mindmap-pan-hint" data-mindmap-pan-hint>空白处可拖动画布</span>
+                  <button class="button button-ghost button-compact" type="button" data-mindmap-fullscreen-toggle aria-pressed="false">
+                    全屏查看
+                  </button>
+                  <div class="mindmap-zoom-controls">
+                    <button class="icon-button" type="button" data-mindmap-zoom-out aria-label="缩小">-</button>
+                    <span data-mindmap-zoom-label>100%</span>
+                    <button class="icon-button" type="button" data-mindmap-zoom-in aria-label="放大">+</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mindmap-layout">
+                <section class="panel mindmap-board" data-mindmap-board>
+                  <div class="mindmap-canvas-view" data-mindmap-view-panel="canvas">
+                    <div class="mindmap-stage-viewport" data-mindmap-stage-viewport>
+                      <div class="mindmap-stage-scaler" data-mindmap-scaler>
+                        <svg class="mindmap-links" data-mindmap-links aria-hidden="true"></svg>
+                        <div class="mindmap-stage" data-mindmap-stage></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="mindmap-outline-view" data-mindmap-view-panel="outline" hidden>
+                    <div class="mindmap-outline-shell" data-mindmap-outline></div>
+                  </div>
+                </section>
+
+                <aside class="panel mindmap-inspector">
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">节点详情</p>
+                    <h4 data-mindmap-node-title>{{ active_record.map_payload.root.label }}</h4>
+                    <p class="section-caption" data-mindmap-node-path>{{ active_record.title }}</p>
+                    <p data-mindmap-node-summary>{{ active_record.map_payload.root.summary or "这里会显示当前节点的摘要。" }}</p>
+                  </section>
+
+                  <section class="mindmap-inspector-block" data-mindmap-node-symbols-block hidden>
+                    <p class="eyebrow">关联股票</p>
+                    <div class="chip-row" data-mindmap-node-symbols></div>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">证据锚点</p>
+                    <ul class="mindmap-detail-list" data-mindmap-node-evidence></ul>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">时间演化</p>
+                    <div class="mindmap-timeline-list" data-mindmap-timeline></div>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">资料关系</p>
+                    <div class="mindmap-source-relations" data-mindmap-source-relations></div>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">导图摘要</p>
+                    <ul class="mindmap-detail-list" data-mindmap-insights></ul>
+                  </section>
+                </aside>
+              </div>
+            </section>
+
+            <script id="mindmap-payload-json" type="application/json">{{ active_record.map_payload | tojson }}</script>
+          {% endif %}
+        {% else %}
+          <div class="empty-card mindmap-empty-state">
+            <p class="empty-title">这里会显示你生成的研究导图。</p>
+            <p>适合把同行、上下游或单个公司的资料放在一个时间窗口里，快速看清判断演化、资料互补和冲突点。</p>
+          </div>
+        {% endif %}
+      </section>
+    </section>
+
+    <div class="compose-overlay ai-scope-overlay" data-ai-scope-overlay hidden>
+      <div class="compose-overlay-backdrop"></div>
+      <div class="compose-dialog ai-scope-dialog" role="dialog" aria-modal="true" aria-label="导图资料范围">
+        <div class="compose-dialog-shell panel">
+          <div class="reader-sheet-head compose-dialog-head">
+            <div>
+              <p class="eyebrow">导图范围</p>
+              <h3>限定这张导图会读取的资料</h3>
+              <p class="section-caption">股票选择、资料时间窗和右侧资料预览会沿用现有工作流，方便你直接按“同行”或“上下游”去圈资料。</p>
+            </div>
+            <button class="button button-ghost button-compact" type="button" data-ai-scope-close>关闭</button>
+          </div>
+
+          <form class="ai-scope-form" data-ai-scope-form>
+            <input type="hidden" name="symbols" value="{{ mindmap_scope_settings.symbols_text }}" data-ai-scope-symbols>
+            <input type="hidden" name="content_kinds" value="{{ mindmap_scope_settings.content_kinds_text }}" data-ai-scope-content-kinds>
+            <input type="hidden" name="preview_month" value="{{ mindmap_scope_preview.month_key }}" data-ai-scope-preview-month>
+            <input type="hidden" name="selected_date" value="{{ mindmap_scope_preview.selected_date or '' }}" data-ai-scope-selected-date>
+
+            <div class="ai-scope-grid">
+              <section class="ai-scope-panel">
+                <div class="ai-scope-section">
+                  <label class="checkbox-row">
+                    <input type="checkbox" name="use_stock_scope" value="1" {% if mindmap_scope_settings.use_stock_scope %}checked{% endif %}>
+                    <span>针对特定股票内容库</span>
+                  </label>
+                  <p class="section-caption">你可以只选一只股票，也可以把同行、上下游或同主题股票一起圈进来。</p>
+                  <div class="ai-scope-field-group" data-ai-scope-stock-group>
+                    <label class="form-field">
+                      <span class="field-label">筛选股票</span>
+                      <input type="text" placeholder="输入代码快速筛选" data-ai-stock-filter>
+                    </label>
+                    <div class="ai-scope-selected-stock-box" data-ai-selected-stocks></div>
+                    <div class="ai-scope-stock-grid" data-ai-scope-stock-grid>
+                      {% for option in stock_options %}
+                        <button
+                          class="ai-stock-chip {% if option.symbol in mindmap_scope_settings.symbols %}is-selected{% endif %}"
+                          type="button"
+                          data-ai-stock-chip
+                          data-symbol="{{ option.symbol }}"
+                        >
+                          {{ option.symbol }}
+                        </button>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="ai-scope-section">
+                  <label class="checkbox-row">
+                    <input type="checkbox" name="use_date_scope" value="1" {% if mindmap_scope_settings.use_date_scope %}checked{% endif %}>
+                    <span>限定资料时间窗口</span>
+                  </label>
+                  <p class="section-caption">导图会特别关注这个窗口里判断的演化轨迹，所以日期越清楚，时间线越稳定。</p>
+                  <div class="ai-scope-field-group ai-scope-date-grid" data-ai-scope-date-group>
+                    <label class="form-field">
+                      <span class="field-label">起日期</span>
+                      <input name="start_date" type="date" value="{{ mindmap_scope_settings.start_date }}">
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">终日期</span>
+                      <input name="end_date" type="date" value="{{ mindmap_scope_settings.end_date }}">
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <section class="ai-scope-panel ai-scope-preview-frame" data-ai-scope-preview-frame>
+                {% with scope_preview=mindmap_scope_preview %}
+                  {% include "_ai_scope_preview.html" %}
+                {% endwith %}
+              </section>
+            </div>
+
+            <div class="ai-scope-actions">
+              <button class="button button-ghost" type="button" data-ai-scope-reset>恢复全站范围</button>
+              <button class="button button-primary" type="button" data-ai-scope-apply>应用到导图</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Monitor 工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='monitor-page.js', v='20260317-monitor-status') }}" defer></script>
 </head>
@@ -16,7 +16,7 @@
     <section class="stock-hero panel monitor-hero">
       <div class="stock-hero-copy">
         <p class="eyebrow">Monitor</p>
-        <h2>手动运行监测，把最新一轮结果直接送回网页。</h2>
+        <h2>运行监测</h2>
         <p class="story-dek">
           这里接的是网页后端独立的 monitor 运行器。每次运行后会把 Markdown 结果写进
           <span class="inline-path">{{ reports_dir }}</span>，然后直接回到首页和报告页里。
@@ -263,3 +263,4 @@
   </div>
 </body>
 </html>
+

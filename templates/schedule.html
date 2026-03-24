@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日程</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <script src="{{ url_for('static', filename='schedule-page.js', v='20260319-schedule4') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
+</head>
+<body>
+  {% macro render_schedule_detail_card(item, return_url) -%}
+    <article class="record-card schedule-card schedule-card-{{ item.kind_tone }}{% if item.is_focus %} is-focus{% endif %}" id="schedule-item-{{ item.id }}">
+      <div class="record-card-head">
+        <div>
+          <div class="card-inline-meta">
+            <span class="meta-chip">{{ item.kind_label }}</span>
+            <span class="status-pill is-{{ item.status_tone }}">{{ item.status_label }}</span>
+            <span class="meta-chip">{{ item.priority_label }}</span>
+            <span class="meta-chip">{{ item.display_time }}</span>
+            {% if item.company_label %}
+              <span class="meta-chip">{{ item.company_label }}</span>
+            {% endif %}
+          </div>
+          <h4>{{ item.title }}</h4>
+        </div>
+
+        <div class="card-link-row">
+          {% if item.status != "done" %}
+            <form action="{{ url_for('update_schedule_item_status', item_id=item.id) }}" method="post">
+              <input type="hidden" name="next_url" value="{{ return_url }}#schedule-item-{{ item.id }}">
+              <input type="hidden" name="status" value="done">
+              <button class="button button-secondary button-compact" type="submit">完成</button>
+            </form>
+          {% endif %}
+
+          {% if item.status != "planned" %}
+            <form action="{{ url_for('update_schedule_item_status', item_id=item.id) }}" method="post">
+              <input type="hidden" name="next_url" value="{{ return_url }}#schedule-item-{{ item.id }}">
+              <input type="hidden" name="status" value="planned">
+              <button class="button button-secondary button-compact" type="submit">恢复待处理</button>
+            </form>
+          {% endif %}
+
+          {% if item.status != "cancelled" %}
+            <form action="{{ url_for('update_schedule_item_status', item_id=item.id) }}" method="post">
+              <input type="hidden" name="next_url" value="{{ return_url }}#schedule-item-{{ item.id }}">
+              <input type="hidden" name="status" value="cancelled">
+              <button class="button button-secondary button-compact" type="submit">取消</button>
+            </form>
+          {% endif %}
+
+          <details class="inline-editor-expander">
+            <summary class="button button-secondary button-compact inline-editor-trigger">编辑</summary>
+            <div class="inline-editor-body">
+              <form class="stack-form compact-form schedule-entry-form" action="{{ url_for('update_schedule_item', item_id=item.id) }}" method="post" data-schedule-form>
+                <input type="hidden" name="next_url" value="{{ return_url }}#schedule-item-{{ item.id }}">
+                <input type="hidden" name="status" value="{{ item.status }}">
+
+                <div class="schedule-form-grid">
+                  <label class="form-field schedule-form-field-span-2">
+                    <span class="field-label">标题</span>
+                    <input name="title" type="text" value="{{ item.title }}">
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">类型</span>
+                    <select name="kind">
+                      <option value="meeting" {% if item.kind == "meeting" %}selected{% endif %}>专家会</option>
+                      <option value="earnings" {% if item.kind == "earnings" %}selected{% endif %}>业绩期</option>
+                      <option value="task" {% if item.kind == "task" %}selected{% endif %}>待办</option>
+                      <option value="reminder" {% if item.kind == "reminder" %}selected{% endif %}>提醒</option>
+                    </select>
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">日期</span>
+                    <input name="scheduled_date" type="date" value="{{ item.scheduled_date }}">
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">优先级</span>
+                    <select name="priority">
+                      <option value="high" {% if item.priority == "high" %}selected{% endif %}>高优先</option>
+                      <option value="normal" {% if item.priority == "normal" %}selected{% endif %}>常规</option>
+                      <option value="low" {% if item.priority == "low" %}selected{% endif %}>低优先</option>
+                    </select>
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">关联股票</span>
+                    <select name="symbol">
+                      <option value="">暂不关联</option>
+                      {% for stock in stock_options %}
+                        <option value="{{ stock.symbol }}" {% if stock.symbol == item.symbol %}selected{% endif %}>{{ stock.symbol }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">公司 / 对象</span>
+                    <input name="company" type="text" value="{{ item.company }}">
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">地点 / 渠道</span>
+                    <input name="location" type="text" value="{{ item.location }}">
+                  </label>
+
+                  <label class="form-field schedule-form-field-span-2">
+                    <span class="field-label">标签</span>
+                    <input name="tags" type="text" value="{{ item.tags | join(', ') }}">
+                  </label>
+                </div>
+
+                <div class="schedule-option-row">
+                  <label class="checkbox-field">
+                    <input name="has_time_range" type="checkbox" data-schedule-time-range-toggle {% if item.has_time_range %}checked{% endif %}>
+                    <span>有特定时间段</span>
+                  </label>
+                  <label class="checkbox-field" data-schedule-all-day-row>
+                    <input name="all_day" type="checkbox" data-schedule-all-day-toggle {% if item.all_day %}checked{% endif %}>
+                    <span>设为全天事项</span>
+                  </label>
+                </div>
+
+                <div class="schedule-time-field-grid" data-schedule-time-fields {% if item.all_day or not item.has_time_range %}hidden{% endif %}>
+                  <label class="form-field">
+                    <span class="field-label">开始时间</span>
+                    <input name="start_time" type="time" value="{{ item.start_time }}">
+                  </label>
+
+                  <label class="form-field">
+                    <span class="field-label">结束时间</span>
+                    <input name="end_time" type="time" value="{{ item.end_time }}">
+                  </label>
+                </div>
+
+                <label class="form-field">
+                  <span class="field-label">备注</span>
+                  <textarea name="note" rows="4">{{ item.note }}</textarea>
+                </label>
+
+                <div class="card-link-row">
+                  <button class="button button-primary button-compact" type="submit">保存修改</button>
+                </div>
+              </form>
+            </div>
+          </details>
+
+          <form
+            action="{{ url_for('delete_schedule_item', item_id=item.id) }}"
+            method="post"
+            data-confirm-delete
+            data-confirm-message="把这条日程移入回收站吗？后面仍然可以恢复。"
+          >
+            <input type="hidden" name="next_url" value="{{ return_url }}">
+            <button class="danger-button danger-button-compact" type="submit">删除</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="chip-row schedule-chip-row">
+        {% if item.symbol %}
+          <a class="detail-chip detail-chip-link" href="{{ url_for('stock_detail', symbol=item.symbol) }}">{{ item.symbol }}</a>
+        {% endif %}
+        {% if item.location %}
+          <span class="detail-chip">{{ item.location }}</span>
+        {% endif %}
+        <span class="detail-chip">更新于 {{ item.display_updated_at }}</span>
+      </div>
+
+      {% if item.summary %}
+        <p class="card-preview-copy">{{ item.summary }}</p>
+      {% endif %}
+
+      {% if item.tags %}
+        <div class="chip-row item-tag-row">
+          {% for tag in item.tags %}
+            <a class="detail-chip detail-chip-link" href="{{ url_for('global_search', kind='schedule', symbol=item.symbol, tag=tag) }}">#{{ tag }}</a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </article>
+  {%- endmacro %}
+
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel schedule-hero">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">日程</p>
+        <h2>日程总览</h2>
+        <p class="story-dek">
+          左边的总览负责看整个月，右边的填写页负责快速录入。先一眼扫清每天排了什么，
+          再决定哪些会要补准备，哪些公司要补业绩期标记。
+        </p>
+        <div class="story-actions">
+          <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">股票工作台</a>
+          <a class="button button-secondary" href="{{ url_for('transcripts_page') }}">会议转录</a>
+          <span class="button button-ghost button-static">当前待处理 {{ schedule_open_count }} 条</span>
+        </div>
+        <div class="schedule-view-switch" aria-label="日程视图切换">
+          <a class="schedule-view-chip {% if current_schedule_view == 'board' %}is-active{% endif %}" href="{{ schedule_view_links.board }}">日程总览</a>
+          <a class="schedule-view-chip {% if current_schedule_view == 'form' %}is-active{% endif %}" href="{{ schedule_view_links.form }}">填写页面</a>
+        </div>
+      </div>
+
+      <aside class="stock-hero-aside">
+        <article class="mini-fact">
+          <span class="mini-label">今天</span>
+          <strong>{{ schedule_today_count }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">未来 7 天</span>
+          <strong>{{ schedule_week_count }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">业绩期</span>
+          <strong>{{ schedule_earnings_count }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">已过期</span>
+          <strong>{{ schedule_overdue_count }}</strong>
+        </article>
+      </aside>
+    </section>
+
+    <main class="stock-layout schedule-layout schedule-layout-{{ current_schedule_view }}">
+      <section class="stock-main schedule-main">
+        {% if current_schedule_view == "board" %}
+          <section class="panel schedule-board-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">日程总览</p>
+                <h3>{{ month_label }}</h3>
+                <p class="section-caption">每个日期格里直接显示当天事项。优先把有时间段的安排放在前面，方便你先看专家会和固定时段。</p>
+              </div>
+              <span class="summary-count">{{ schedule_month_stats.total_count }}</span>
+            </div>
+
+            <div class="calendar-toolbar calendar-toolbar-rich schedule-board-toolbar">
+              <form class="calendar-jump-form" action="{{ url_for('schedule_page') }}" method="get" data-auto-submit>
+                <input type="hidden" name="view" value="board">
+                {% if selected_schedule_date %}
+                  <input type="hidden" name="date" value="{{ selected_schedule_date }}">
+                {% endif %}
+                {% if focus_schedule_item_id %}
+                  <input type="hidden" name="focus" value="{{ focus_schedule_item_id }}">
+                {% endif %}
+                <label class="calendar-select-field">
+                  <span>年份</span>
+                  <select name="year">
+                    {% for year in available_years %}
+                      <option value="{{ year }}" {% if year == selected_year %}selected{% endif %}>{{ year }} 年</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="calendar-select-field">
+                  <span>月份</span>
+                  <select name="month_number">
+                    {% for option in month_options %}
+                      <option value="{{ option.value }}" {% if option.value == selected_month_number %}selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </form>
+
+              <div class="calendar-nav-actions">
+                <a class="icon-button" href="{{ url_for('schedule_page', view='board', month=previous_month_key) }}" aria-label="上一个月"><</a>
+                <a class="button button-ghost" href="{{ url_for('schedule_page', view='board', month=current_month_key) }}">回到本月</a>
+                <a class="icon-button" href="{{ url_for('schedule_page', view='board', month=next_month_key) }}" aria-label="下一个月">></a>
+              </div>
+            </div>
+
+            <div class="calendar-grid schedule-board-grid">
+              {% for weekday in weekday_labels %}
+                <span class="calendar-weekday">{{ weekday }}</span>
+              {% endfor %}
+
+              {% for week in calendar_weeks %}
+                {% for day in week %}
+                  <article
+                    class="calendar-day schedule-board-day{% if not day.is_current_month %} is-outside{% endif %}{% if day.is_selected %} is-selected{% endif %}{% if day.is_today %} is-today{% endif %}"
+                    data-day-url="{{ url_for('schedule_page', view='board', month=day.date[:7], date=day.date) }}#selected-day-panel"
+                    tabindex="0"
+                    role="link"
+                    aria-label="查看 {{ day.date }} 的当天安排"
+                  >
+                    <div class="schedule-board-day-top">
+                      <a class="schedule-board-day-anchor" href="{{ url_for('schedule_page', view='board', month=day.date[:7], date=day.date) }}#selected-day-panel">{{ day.day_number }}</a>
+                      {% if day.summary %}
+                        <span class="schedule-board-day-count">
+                          {% if day.summary.open_count %}
+                            {{ day.summary.open_count }} 待处理
+                          {% else %}
+                            {{ day.summary.total_count }} 条
+                          {% endif %}
+                        </span>
+                      {% else %}
+                        <span class="schedule-board-day-count is-empty">空</span>
+                      {% endif %}
+                    </div>
+
+                    <div class="schedule-board-item-list">
+                      {% if day.summary and day.summary["items"] %}
+                        {% for item in day.summary["items"][:4] %}
+                          <a
+                            class="schedule-board-item schedule-board-item-{{ item.kind_tone }}{% if item.id == focus_schedule_item_id %} is-focus{% endif %}{% if item.status != 'planned' %} is-muted{% endif %}"
+                            href="{{ url_for('schedule_page', view='board', month=day.date[:7], date=day.date, focus=item.id) }}#selected-day-panel"
+                          >
+                            <span class="schedule-board-item-time">{{ item.display_time }}</span>
+                            <strong>{{ item.title }}</strong>
+                            <span>{{ item.company_label or item.kind_label }}</span>
+                          </a>
+                        {% endfor %}
+                        {% if day.summary["items"]|length > 4 %}
+                          <a class="schedule-board-more" href="{{ url_for('schedule_page', view='board', month=day.date[:7], date=day.date) }}#selected-day-panel">+{{ day.summary["items"]|length - 4 }} 条更多</a>
+                        {% endif %}
+                      {% else %}
+                        <div class="schedule-board-empty">当天暂无安排</div>
+                      {% endif %}
+                    </div>
+                  </article>
+                {% endfor %}
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="panel schedule-detail-panel" id="selected-day-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">当天安排</p>
+                <h3>{{ selected_schedule_heading }}</h3>
+                <p class="section-caption">点上面的任意日期，下面就会切到那一天的完整详情。这里保留完成、编辑、取消和删除等操作。</p>
+              </div>
+              <span class="summary-count">{{ selected_schedule_items|length }}</span>
+            </div>
+
+            {% if selected_schedule_items %}
+              <div class="record-stack schedule-card-stack">
+                {% for item in selected_schedule_items %}
+                  {{ render_schedule_detail_card(item, page_return_url) }}
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-card">
+                <p class="empty-title">这一天还没有安排</p>
+                <p>先从上面的月历里切到别的日期，或者切到“填写页面”补上一条新事项。</p>
+              </div>
+            {% endif %}
+          </section>
+        {% else %}
+          <section class="panel schedule-capture-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">填写页面</p>
+                <h3>先记下来，再慢慢补细节</h3>
+                <p class="section-caption">至少填标题和日期就能入库；如果这是专家会或固定时间点，勾上“有特定时间段”再补上开始和结束时间。</p>
+              </div>
+            </div>
+
+            <form class="stack-form schedule-form schedule-entry-form" action="{{ url_for('create_schedule_item') }}" method="post" data-schedule-form>
+              <input type="hidden" name="next_url" value="{{ page_return_url }}">
+
+              <div class="schedule-form-grid">
+                <label class="form-field schedule-form-field-span-2">
+                  <span class="field-label">标题</span>
+                  <input name="title" type="text" placeholder="例：广和通专家会 / 英伟达业绩期 / 提醒发问题单">
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">类型</span>
+                  <select name="kind">
+                    <option value="meeting">专家会</option>
+                    <option value="earnings">业绩期</option>
+                    <option value="task">待办</option>
+                    <option value="reminder">提醒</option>
+                  </select>
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">日期</span>
+                  <input name="scheduled_date" type="date" value="{{ selected_schedule_date or today_date }}">
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">优先级</span>
+                  <select name="priority">
+                    <option value="high">高优先</option>
+                    <option value="normal" selected>常规</option>
+                    <option value="low">低优先</option>
+                  </select>
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">关联股票</span>
+                  <select name="symbol">
+                    <option value="">暂不关联</option>
+                    {% for stock in stock_options %}
+                      <option value="{{ stock.symbol }}">{{ stock.symbol }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">公司 / 对象</span>
+                  <input name="company" type="text" placeholder="例：英伟达 / 广和通 / 某位专家">
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">地点 / 渠道</span>
+                  <input name="location" type="text" placeholder="例：腾讯会议 / 电话 / 上海">
+                </label>
+
+                <label class="form-field schedule-form-field-span-2">
+                  <span class="field-label">标签</span>
+                  <input name="tags" type="text" placeholder="例：半导体, 专家会, 业绩期">
+                </label>
+              </div>
+
+              <div class="schedule-option-row">
+                <label class="checkbox-field">
+                  <input name="has_time_range" type="checkbox" data-schedule-time-range-toggle>
+                  <span>有特定时间段</span>
+                </label>
+                <label class="checkbox-field" data-schedule-all-day-row>
+                  <input name="all_day" type="checkbox" data-schedule-all-day-toggle>
+                  <span>设为全天事项</span>
+                </label>
+              </div>
+
+              <div class="schedule-time-field-grid" data-schedule-time-fields hidden>
+                <label class="form-field">
+                  <span class="field-label">开始时间</span>
+                  <input name="start_time" type="time">
+                </label>
+
+                <label class="form-field">
+                  <span class="field-label">结束时间</span>
+                  <input name="end_time" type="time">
+                </label>
+              </div>
+
+              <label class="form-field">
+                <span class="field-label">备注</span>
+                <textarea name="note" rows="5" placeholder="把待确认的问题、会前准备、重点关注公司或后续动作记在这里。"></textarea>
+              </label>
+
+              <div class="story-actions schedule-form-actions">
+                <button class="button button-primary" type="submit">加入日程</button>
+                <a class="button button-secondary" href="{{ schedule_view_links.board }}">返回总览</a>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel schedule-form-helper-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">填写提示</p>
+                <h3>建议你这样记</h3>
+              </div>
+            </div>
+            <ul class="briefing-list">
+              <li>专家会优先填标题、日期和公司；如果时间已定，勾上“有特定时间段”再补完整时间。</li>
+              <li>业绩期如果只是知道日期，可以直接设为全天；后续知道电话会时间，再回来改成具体时段。</li>
+              <li>如果只是提醒自己跟进，就用“待办”或“提醒”，这样月历里一眼能区分。</li>
+            </ul>
+          </section>
+        {% endif %}
+      </section>
+
+      <aside class="stock-sidebar schedule-sidebar">
+        <section class="panel side-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">近期待办</p>
+              <h3>接下来要盯的事</h3>
+              <p class="section-caption">不管你在总览还是填写页，这里都会把最近几条安排拎出来。</p>
+            </div>
+          </div>
+
+          {% if schedule_upcoming_cards %}
+            <div class="schedule-selected-list">
+              {% for item in schedule_upcoming_cards[:8] %}
+                <a class="schedule-selected-link" href="{{ url_for('schedule_page', view='board', month=item.scheduled_date[:7], date=item.scheduled_date, focus=item.id) }}#schedule-item-{{ item.id }}">
+                  <span class="schedule-selected-time">{{ item.scheduled_date }} · {{ item.display_time }}</span>
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ item.company_label or item.kind_label }}</span>
+                </a>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-inline">
+              <p>接下来还没有安排。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel side-panel schedule-earnings-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">业绩期窗口</p>
+              <h3>未来要盯的节点</h3>
+              <p class="section-caption">先把业绩期固定住，后面再围着它安排预沟通和专家会。</p>
+            </div>
+          </div>
+
+          {% if upcoming_earnings %}
+            <div class="schedule-selected-list">
+              {% for item in upcoming_earnings %}
+                <a class="schedule-selected-link schedule-selected-link-earnings" href="{{ url_for('schedule_page', view='board', month=item.scheduled_date[:7], date=item.scheduled_date, focus=item.id) }}#schedule-item-{{ item.id }}">
+                  <span class="schedule-selected-time">{{ item.scheduled_date }} · {{ item.display_time }}</span>
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ item.company_label or "业绩期" }}</span>
+                </a>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-inline">
+              <p>还没有录入业绩期。后面你可以先把公司节点写进去。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="panel side-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">本月快照</p>
+              <h3>{{ month_label }}</h3>
+            </div>
+          </div>
+
+          <div class="detail-side-stats">
+            <article class="mini-fact">
+              <span class="mini-label">总条目</span>
+              <strong>{{ schedule_month_stats.total_count }}</strong>
+            </article>
+            <article class="mini-fact">
+              <span class="mini-label">待处理</span>
+              <strong>{{ schedule_month_stats.open_count }}</strong>
+            </article>
+            <article class="mini-fact">
+              <span class="mini-label">业绩期</span>
+              <strong>{{ schedule_month_stats.earnings_count }}</strong>
+            </article>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

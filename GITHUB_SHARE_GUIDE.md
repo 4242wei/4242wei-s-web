@@ -1,10 +1,24 @@
-# GitHub 共享说明
+# GitHub Share Guide
 
-这个仓库已经按“只上传代码，不上传你的本地资料和密钥”的方式整理。
+This repository is now organized as a code-only web project.
 
-## 不会上传的内容
+It is meant to share the website structure and source code without sharing the original machine's private local research assets.
 
-以下内容默认不会进入 GitHub：
+## What Should Go To Git
+
+Safe to keep in Git:
+
+- Flask backend code
+- `templates/`
+- `static/`
+- `docs/`
+- `requirements.txt`
+- `start.bat`
+- `.env.example`
+
+## What Must Stay Local
+
+These paths are intentionally local-only and should not be committed:
 
 - `.env`
 - `.env.local`
@@ -13,65 +27,65 @@
 - `reports/`
 - `backups/`
 - `logs/`
+- `output/`
 - `.venv/`
 
-这意味着下面这些都不会被共享出去：
+That means Git will not carry:
 
-- 你的阿里云 / 听悟 / OSS 密钥
-- 你本地的研究资料
-- 语音转录源文件
-- AI 会话记录
-- 监控结果和运行日志
+- private research reports
+- meeting / call transcript source files
+- AI chat history
+- mindmap history
+- stock workspace local data
+- API credentials
+- local screenshots, logs, and temporary outputs
 
-## 同事最简单的使用方式
+## Recommended Update Flow
 
-推荐让同事直接按下面流程使用：
-
-1. 从 GitHub 拉代码
-2. 在自己的电脑上准备自己的本地目录和密钥
-3. 直接运行 `start.bat`
+If you want to sync the latest website structure to Git:
 
 ```powershell
-git clone https://github.com/4242wei/4242wei-s-web.git
-cd 4242wei-s-web
-.\start.bat
+git status
+git add .
+git commit -m "Prepare code-only web release"
+git push origin main
 ```
 
-启动后打开：
+Because the ignore rules already exclude local data paths, a normal `git add .` should only pick up the shareable project structure.
+
+## What Another User Gets
+
+After cloning, another user should receive:
+
+- the full web application structure
+- templates, styles, scripts, and backend routes
+- an empty workspace if local data is missing
+
+They should not receive:
+
+- your reports
+- your uploaded files
+- your local AI history
+- your API keys
+
+## Local Machine Overrides
+
+Another user can create their own `.env.local` and point the app at their own local paths:
 
 ```text
-http://127.0.0.1:5000
+REPORTS_DIR=D:\their\reports\folder
+STOCKS_DATA_PATH=D:\their\web-data\stocks.json
+STOCKS_UPLOADS_DIR=D:\their\web-data\uploads\stocks
+TRANSCRIPT_UPLOADS_DIR=D:\their\web-data\uploads\transcripts
+AI_CHAT_DATA_PATH=D:\their\web-data\ai_chats.json
+AI_CONTEXT_DIR=D:\their\web-data\ai_context
 ```
 
-## 同事如何配置自己的本地路径
+These should stay local and should not be committed.
 
-如果同事有自己的 Markdown 报告目录，不需要改代码，只要在项目根目录新建 `.env.local`：
+## Local API Credentials
 
-```text
-REPORTS_DIR=D:\你的报告目录
-```
-
-例如：
-
-```text
-REPORTS_DIR=D:\工作\FTAI\reports
-```
-
-项目还支持这些可选路径覆盖：
-
-```text
-STOCKS_DATA_PATH=
-STOCKS_UPLOADS_DIR=
-TRANSCRIPT_UPLOADS_DIR=
-AI_CHAT_DATA_PATH=
-AI_CONTEXT_DIR=
-```
-
-如果不填，就会使用项目默认本地目录。
-
-## 同事如何启用语音转录
-
-如果同事要使用听悟 / OSS，他们各自在自己的 `.env.local` 中填写：
+If another user wants Tingwu / OSS features, they should place credentials only in their own `.env.local`:
 
 ```text
 ALIBABA_CLOUD_ACCESS_KEY_ID=
@@ -85,31 +99,16 @@ ALIYUN_OSS_REGION_ID=cn-beijing
 ALIYUN_OSS_BUCKET=
 ```
 
-这些配置不要提交到 GitHub。
+Never push filled credentials to Git.
 
-## 如果同事只想空白启动
+## Read This First
 
-也可以什么都不准备，直接启动：
+If another user or another Codex instance takes over this repo, read in this order:
 
-- 没有 `data/` 也可以
-- 没有 `uploads/` 也可以
-- 没有 `reports/` 也可以
+1. `README.md`
+2. `docs/WEB_STRUCTURE.md`
+3. `docs/CODEX_DEPLOY.md`
 
-项目会先以一个空白工作台启动，后面再由他们自己添加资料。
+That keeps the project aligned with the rule:
 
-## 适合共享什么
-
-这个仓库适合共享：
-
-- 页面代码
-- 模板和样式
-- 前后端逻辑
-- 启动方式
-
-这个仓库不适合直接共享：
-
-- 你的私有研究内容
-- 你的账号密钥
-- 你的本地文件和日志
-
-如果以后你想给同事一份“接近你当前本地内容”的副本，建议单独导出备份 zip 给他们，而不是把 `data/` 和 `uploads/` 推到 GitHub。
+code structure goes to Git, private local data stays local.

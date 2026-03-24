@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>股票每日分析</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='report-sources.js', v='20260316-source-toggle') }}" defer></script>
 </head>
@@ -23,7 +23,7 @@
             <p class="story-dek">{{ active_report.summary }}</p>
           {% else %}
             <p class="story-date">等待第一份报告</p>
-            <h2>把每天的监测结论沉淀成一份可持续回看的研究档案。</h2>
+            <h2>报告归档</h2>
             <p class="story-dek">把 Markdown 放进 <span class="inline-path">{{ reports_dir }}</span>，这里就会自动成为当天的封面阅读区。</p>
           {% endif %}
         </div>
@@ -246,3 +246,4 @@
   </div>
 </body>
 </html>
+

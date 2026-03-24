@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -23,6 +25,7 @@ from urllib.parse import urlparse
 
 import bleach
 import markdown
+import requests
 from bleach.css_sanitizer import CSSSanitizer
 from docx import Document
 from dotenv import load_dotenv
@@ -129,6 +132,7 @@ SEARCH_KIND_META = {
     "note": {"label": "研究笔记", "tone": "note"},
     "file": {"label": "研究资料", "tone": "file"},
     "transcript": {"label": "会议转录", "tone": "transcript"},
+    "schedule": {"label": "日程", "tone": "schedule"},
     "report": {"label": "关联日报", "tone": "report"},
     "group": {"label": "股票分组", "tone": "group"},
 }
@@ -139,13 +143,198 @@ AI_SCOPE_CONTENT_KIND_META = {
     "transcript": "转录",
 }
 AI_SCOPE_DEFAULT_CONTENT_KINDS = tuple(AI_SCOPE_CONTENT_KIND_META.keys())
+MINDMAP_STATUS_META = {
+    "pending": {"label": "排队中", "tone": "pending"},
+    "running": {"label": "生成中", "tone": "info"},
+    "completed": {"label": "已完成", "tone": "success"},
+    "error": {"label": "失败", "tone": "danger"},
+    "cancelled": {"label": "已停止", "tone": "pending"},
+}
+MINDMAP_STRUCTURE_KIND_META = {
+    "single_stock": "单股拆解",
+    "peer_group": "同行对比",
+    "value_chain": "产业链传导",
+    "theme_bundle": "主题资料包",
+}
+MINDMAP_STUDIO_THEME_META = {
+    "graphite": {
+        "label": "石墨蓝图",
+        "description": "适合长时间梳理研究结构的冷静深色主题。",
+    },
+    "paper": {
+        "label": "纸面研究",
+        "description": "偏文稿与会议复盘的浅色纸面视图。",
+    },
+    "ocean": {
+        "label": "海港晨光",
+        "description": "更适合产业链与主题图谱的蓝绿层次。",
+    },
+}
+MINDMAP_STUDIO_SURFACE_META = {
+    "desktop": {
+        "label": "桌面工作台",
+        "description": "适合独立使用的大画布布局。",
+        "frame_width": 1480,
+    },
+    "embedded": {
+        "label": "网页嵌入",
+        "description": "为未来嵌入现有网页预留更紧凑的安全边距。",
+        "frame_width": 1180,
+    },
+    "mobile": {
+        "label": "移动预览",
+        "description": "提前检查窄屏下节点密度与检查器行为。",
+        "frame_width": 430,
+    },
+}
+MINDMAP_STUDIO_DENSITY_META = {
+    "roomy": {"label": "宽松", "description": "更强调阅读与汇报展示。"},
+    "compact": {"label": "紧凑", "description": "更适合高密度研究梳理。"},
+}
+MINDMAP_STUDIO_LAYOUT_META = {
+    "mindmap": {
+        "label": "分叉导图",
+        "description": "根节点居中，主分支向左右延展，适合大多数研究梳理。",
+    },
+    "logic": {
+        "label": "逻辑链",
+        "description": "从左到右单向展开，适合判断链和会议复盘。",
+    },
+    "lanes": {
+        "label": "分栏链路",
+        "description": "按栏位并列展示，适合产业链、对比和资料分组。",
+    },
+}
+MINDMAP_STUDIO_NODE_KIND_META = {
+    "topic": "主题",
+    "thesis": "判断",
+    "evidence": "证据",
+    "question": "待验证",
+    "risk": "风险",
+    "catalyst": "催化",
+    "timeline": "时间锚点",
+}
+MINDMAP_STUDIO_RELATION_TONE_META = {
+    "support": "支撑",
+    "conflict": "冲突",
+    "compare": "对照",
+    "flow": "传导",
+}
+MINDMAP_STUDIO_ORIGIN_META = {
+    "seed": "模板",
+    "generated": "生成",
+    "manual": "手动",
+}
+MINDMAP_STUDIO_VERIFY_META = {
+    "stable": "已确认",
+    "needs_verify": "待验证",
+    "draft": "草稿",
+}
+MINDMAP_STUDIO_TEMPLATE_META = {
+    "blank": {
+        "label": "空白导图",
+        "description": "从一张空白结构开始。",
+    },
+    "thesis": {
+        "label": "投资判断",
+        "description": "适合单股或主题判断拆解。",
+    },
+    "value_chain": {
+        "label": "产业链传导",
+        "description": "适合上下游与供需链路追踪。",
+    },
+    "debrief": {
+        "label": "访谈复盘",
+        "description": "适合专家会和内部会议复盘。",
+    },
+}
 TRASH_KIND_META = {
     "note": {"label": "研究笔记", "description": "可恢复到原股票页"},
     "file": {"label": "研究资料", "description": "会保留原来的文件与说明"},
     "transcript": {"label": "会议转录", "description": "恢复后仍可继续查看与同步"},
     "group": {"label": "股票分组", "description": "恢复后会带回原有股票列表"},
+    "schedule_item": {"label": "日程条目", "description": "恢复后会回到日程区，保留日期、备忘和关联公司"},
     "monitor_report": {"label": "Monitor 报告", "description": "恢复后会重新回到报告归档和 Monitor 页面"},
 }
+SCHEDULE_KIND_META = {
+    "meeting": {"label": "专家会", "tone": "meeting"},
+    "earnings": {"label": "业绩期", "tone": "earnings"},
+    "task": {"label": "待办", "tone": "task"},
+    "reminder": {"label": "提醒", "tone": "reminder"},
+}
+SCHEDULE_STATUS_META = {
+    "planned": {"label": "待处理", "tone": "pending"},
+    "done": {"label": "已完成", "tone": "success"},
+    "cancelled": {"label": "已取消", "tone": "danger"},
+}
+SCHEDULE_PRIORITY_META = {
+    "high": {"label": "高优先", "tone": "danger"},
+    "normal": {"label": "常规", "tone": "info"},
+    "low": {"label": "低优先", "tone": "pending"},
+}
+EXPERT_CATEGORY_META = {
+    "management": {"label": "公司/管理层", "tone": "info", "order": 1},
+    "industry": {"label": "产业专家", "tone": "note", "order": 2},
+    "channel": {"label": "渠道/客户", "tone": "success", "order": 3},
+    "supply_chain": {"label": "供应链/制造", "tone": "pending", "order": 4},
+    "former_employee": {"label": "前员工/前高管", "tone": "danger", "order": 5},
+    "capital": {"label": "投资/顾问", "tone": "group", "order": 6},
+}
+EXPERT_STAGE_META = {
+    "priority": {"label": "重点跟进", "tone": "danger", "order": 1},
+    "active": {"label": "稳定覆盖", "tone": "success", "order": 2},
+    "watch": {"label": "观察名单", "tone": "pending", "order": 3},
+    "archived": {"label": "已归档", "tone": "info", "order": 4},
+}
+EXPERT_INTERVIEW_KIND_META = {
+    "expert_call": {"label": "专家会", "order": 1},
+    "follow_up": {"label": "跟进访谈", "order": 2},
+    "channel_check": {"label": "渠道验证", "order": 3},
+    "debrief": {"label": "会后复盘", "order": 4},
+}
+EXPERT_INTERVIEW_STATUS_META = {
+    "planned": {"label": "待访谈", "tone": "pending", "order": 1},
+    "completed": {"label": "已完成", "tone": "success", "order": 2},
+    "cancelled": {"label": "已取消", "tone": "danger", "order": 3},
+}
+EXPERT_RESOURCE_KIND_META = {
+    "note": {"label": "研究笔记", "tone": "note", "order": 1},
+    "file": {"label": "研究资料", "tone": "file", "order": 2},
+    "transcript": {"label": "会议转录", "tone": "transcript", "order": 3},
+    "schedule": {"label": "日程安排", "tone": "schedule", "order": 4},
+}
+EXPERT_VIEW_OPTIONS = {"manage", "create"}
+SCHEDULE_VIEW_OPTIONS = {"board", "form"}
+TIME_VALUE_PATTERN = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
+EARNINGS_SYNC_TAG = "自动同步业绩"
+EARNINGS_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+EARNINGS_SOURCE_CATALOG = (
+    {
+        "label": "Barchart",
+        "url_template": "https://www.barchart.com/stocks/quotes/{symbol}/earnings-estimates",
+        "date_pattern": re.compile(
+            r"Next Earnings Release Date\s*-\s*<span class=\"next-earning \">\s*(\d{2}/\d{2}/\d{2})\s*</span>",
+            re.IGNORECASE,
+        ),
+        "date_format": "%m/%d/%y",
+    },
+    {
+        "label": "Stock Analysis",
+        "url_template": "https://stockanalysis.com/stocks/{symbol}/",
+        "date_pattern": re.compile(
+            r"Earnings Date\s*</td>\s*<td[^>]*>\s*([A-Z][a-z]{2} \d{1,2}, \d{4})\s*</td>",
+            re.IGNORECASE,
+        ),
+        "date_format": "%b %d, %Y",
+    },
+)
 TRANSCRIPT_AUDIO_SUFFIXES = {
     ".mp3",
     ".wav",
@@ -201,6 +390,24 @@ TRANSCRIPT_MEDIA_KIND_LABELS = {
     "video": "视频",
     "media": "媒体",
 }
+TRANSCRIPT_CATEGORY_META = {
+    "work": {
+        "label": "工作",
+        "description": "直接的工作内容",
+        "summary": "电话会、专家访谈、内部会议等直接面向工作的录音。",
+        "order": 1,
+    },
+    "reading": {
+        "label": "阅读",
+        "description": "工作补充阅读",
+        "summary": "博客、文章、播客等作为工作补充的阅读或收听材料。",
+        "order": 2,
+    },
+}
+TRANSCRIPT_CATEGORY_OPTIONS = [
+    {"value": key, "label": meta["label"], "description": meta["description"]}
+    for key, meta in sorted(TRANSCRIPT_CATEGORY_META.items(), key=lambda item: item[1]["order"])
+]
 TRANSCRIPT_STATUS_META = {
     "pending_api": {"label": "待提交", "tone": "pending"},
     "queued": {"label": "排队中", "tone": "info"},
@@ -338,15 +545,62 @@ STOCK_UPLOADS_DIR = resolve_app_path("STOCKS_UPLOADS_DIR", BASE_DIR / "uploads" 
 TRANSCRIPT_UPLOADS_DIR = resolve_app_path("TRANSCRIPT_UPLOADS_DIR", BASE_DIR / "uploads" / "transcripts")
 AI_CHAT_STORE_PATH = resolve_app_path("AI_CHAT_DATA_PATH", BASE_DIR / "data" / "ai_chats.json")
 AI_CONTEXT_DIR = resolve_app_path("AI_CONTEXT_DIR", BASE_DIR / "data" / "ai_context")
+MINDMAP_STORE_PATH = resolve_app_path("MINDMAP_DATA_PATH", BASE_DIR / "data" / "mindmaps.json")
+MINDMAP_CONTEXT_DIR = resolve_app_path("MINDMAP_CONTEXT_DIR", BASE_DIR / "data" / "mindmap_context")
+MINDMAP_STUDIO_STORE_PATH = resolve_app_path("MINDMAP_STUDIO_DATA_PATH", BASE_DIR / "data" / "mindmap_studio.json")
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_MODELS_CACHE_PATH = CODEX_CONFIG_DIR / "models_cache.json"
 AI_CODEX_TIMEOUT_SECONDS = int(os.getenv("AI_CODEX_TIMEOUT_SECONDS", "900"))
 AI_POLL_INTERVAL_SECONDS = int(os.getenv("AI_POLL_INTERVAL_SECONDS", "5"))
+MINDMAP_POLL_INTERVAL_SECONDS = int(os.getenv("MINDMAP_POLL_INTERVAL_SECONDS", "5"))
+MINDMAP_STALE_JOB_SECONDS = int(os.getenv("MINDMAP_STALE_JOB_SECONDS", "120"))
+TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS", "12"))
 AI_PROMPT_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("AI_PROMPT_KNOWLEDGE_CHAR_LIMIT", "40000"))
+MINDMAP_PIPELINE_VERSION = "20260324-research-v2"
+MINDMAP_PROMPT_VERSION = "20260324-two-step-v1"
+MINDMAP_SCHEMA_VERSION = "20260324-schema-v2"
+MINDMAP_MAX_CURATED_SOURCES = 28
+MINDMAP_RECENT_WINDOW_DAYS = 45
 AI_SESSION_LOCK = threading.RLock()
 AI_PROCESS_LOCK = threading.RLock()
 AI_RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 AI_STOP_REQUESTS: set[str] = set()
+MINDMAP_LOCK = threading.RLock()
+MINDMAP_PROCESS_LOCK = threading.RLock()
+MINDMAP_RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+MINDMAP_ACTIVE_TASKS: set[str] = set()
+MINDMAP_STOP_REQUESTS: set[str] = set()
+MINDMAP_STUDIO_LOCK = threading.RLock()
+STOCK_STORE_LOCK = threading.RLock()
+MINDMAP_KIND_PRIORITY = {
+    "report": 1.1,
+    "transcript": 1.0,
+    "note": 0.92,
+    "file": 0.84,
+}
+MINDMAP_CONFLICT_HINTS = (
+    "但",
+    "但是",
+    "不过",
+    "然而",
+    "相反",
+    "冲突",
+    "分歧",
+    "不一致",
+    "修正",
+    "推翻",
+    "对冲",
+    "验证后发现",
+    "however",
+    "but",
+    "conflict",
+    "disagree",
+    "revised",
+)
+MINDMAP_EVIDENCE_HINT_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?|\b(?:Q[1-4]|FY\d{2,4}|bps|mt|tons|aircraft|engines?)\b",
+    re.IGNORECASE,
+)
 REPORT_CACHE_LOCK = threading.RLock()
 REPORT_INDEX_CACHE: dict[str, Any] = {
     "signature": None,
@@ -618,6 +872,39 @@ def format_record_date_label(record_date: str | None, fallback_timestamp: str | 
     if normalized_date:
         return normalized_date
     return format_iso_timestamp(fallback_timestamp)
+
+
+def format_month_day_label(date_value: str | None) -> str:
+    parsed = parse_iso_date_value(date_value)
+    if not parsed:
+        return "待同步"
+    return f"{parsed.month}月{parsed.day}日"
+
+
+def normalize_stock_earnings_info(raw_info: Any) -> dict[str, Any]:
+    source = raw_info if isinstance(raw_info, dict) else {}
+    return {
+        "next_date": normalize_date_field(source.get("next_date")),
+        "source_label": str(source.get("source_label") or "").strip()[:80],
+        "source_url": str(source.get("source_url") or "").strip()[:600],
+        "last_synced_at": str(source.get("last_synced_at") or "").strip()[:40],
+        "is_estimated": bool(source.get("is_estimated")),
+    }
+
+
+def build_stock_earnings_view(entry: dict[str, Any]) -> dict[str, Any]:
+    info = normalize_stock_earnings_info(entry.get("earnings"))
+    next_date = info["next_date"]
+    return {
+        **info,
+        "has_date": bool(next_date),
+        "short_label": format_month_day_label(next_date),
+        "full_label": next_date or "待同步",
+        "headline": f"下一次业绩：{format_month_day_label(next_date)}",
+        "display_last_synced_at": (
+            format_iso_timestamp(info["last_synced_at"]) if info["last_synced_at"] else "未同步"
+        ),
+    }
 
 
 def note_display_time(note: dict[str, Any]) -> str:
@@ -1098,6 +1385,264 @@ def normalize_tag_list(raw_values: Any) -> list[str]:
     return ordered[:12]
 
 
+def normalize_identifier_list(
+    raw_values: Any,
+    *,
+    max_items: int = 200,
+    max_length: int = 80,
+) -> list[str]:
+    if isinstance(raw_values, str):
+        values = re.split(r"[\s,;，；]+", raw_values)
+    elif isinstance(raw_values, (list, tuple, set)):
+        values = raw_values
+    else:
+        values = []
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = re.sub(r"[^A-Za-z0-9._:-]", "", str(raw_value or "").strip())[:max_length]
+        if not value:
+            continue
+        normalized_key = value.casefold()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        ordered.append(value)
+
+    return ordered[:max_items]
+
+
+def normalize_expert_resource_ref(raw_ref: Any) -> dict[str, str] | None:
+    if not isinstance(raw_ref, dict):
+        return None
+
+    kind = str(raw_ref.get("kind") or "").strip().lower()
+    if kind not in EXPERT_RESOURCE_KIND_META:
+        return None
+
+    resource_id = re.sub(r"[^A-Za-z0-9._-]", "", str(raw_ref.get("resource_id") or "").strip())[:80]
+    if not resource_id:
+        return None
+
+    symbol = normalize_stock_symbol(str(raw_ref.get("symbol") or "")) or ""
+    if kind in {"note", "file"} and not symbol:
+        return None
+
+    return {
+        "kind": kind,
+        "symbol": symbol if kind in {"note", "file"} else "",
+        "resource_id": resource_id,
+    }
+
+
+def build_expert_resource_token(resource_ref: dict[str, Any]) -> str:
+    kind = str(resource_ref.get("kind") or "").strip().lower()
+    symbol = str(resource_ref.get("symbol") or "").strip().upper()
+    resource_id = str(resource_ref.get("resource_id") or "").strip()
+    return "|".join([kind, symbol, resource_id])
+
+
+def build_expert_resource_preview_url(resource_ref: dict[str, Any]) -> str:
+    return url_for("expert_resource_preview", token=build_expert_resource_token(resource_ref))
+
+
+def parse_expert_resource_token(raw_value: str | None) -> dict[str, str] | None:
+    parts = str(raw_value or "").split("|", 2)
+    if len(parts) != 3:
+        return None
+
+    return normalize_expert_resource_ref(
+        {
+            "kind": parts[0],
+            "symbol": parts[1],
+            "resource_id": parts[2],
+        }
+    )
+
+
+def normalize_expert_resource_refs(raw_values: Any) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    values = raw_values if isinstance(raw_values, (list, tuple, set)) else []
+    for raw_value in values:
+        if isinstance(raw_value, str):
+            resource_ref = parse_expert_resource_token(raw_value)
+        else:
+            resource_ref = normalize_expert_resource_ref(raw_value)
+        if resource_ref is None:
+            continue
+
+        token = build_expert_resource_token(resource_ref)
+        if token in seen:
+            continue
+        seen.add(token)
+        refs.append(resource_ref)
+
+    return refs
+
+
+def normalize_time_field(value: str | None) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+
+    match = TIME_VALUE_PATTERN.fullmatch(raw_value)
+    if not match:
+        return ""
+
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return ""
+
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_schedule_view(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in SCHEDULE_VIEW_OPTIONS:
+        return candidate
+    return "board"
+
+
+def normalize_expert_view(value: str | None, *, has_experts: bool) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in EXPERT_VIEW_OPTIONS:
+        return candidate
+    return "manage" if has_experts else "create"
+
+
+def normalize_schedule_item(raw_item: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_item, dict):
+        return None
+
+    title = str(raw_item.get("title") or "").strip()
+    scheduled_date = normalize_date_field(raw_item.get("scheduled_date"))
+    if not title or not scheduled_date:
+        return None
+
+    kind = str(raw_item.get("kind") or "meeting").strip()
+    if kind not in SCHEDULE_KIND_META:
+        kind = "meeting"
+
+    status = str(raw_item.get("status") or "planned").strip()
+    if status not in SCHEDULE_STATUS_META:
+        status = "planned"
+
+    priority = str(raw_item.get("priority") or "normal").strip()
+    if priority not in SCHEDULE_PRIORITY_META:
+        priority = "normal"
+
+    start_time = normalize_time_field(raw_item.get("start_time"))
+    end_time = normalize_time_field(raw_item.get("end_time"))
+    all_day = bool(raw_item.get("all_day"))
+    has_time_range = bool(raw_item.get("has_time_range")) or bool(start_time or end_time)
+    if all_day:
+        has_time_range = False
+        start_time = ""
+        end_time = ""
+    elif not has_time_range:
+        start_time = ""
+        end_time = ""
+    elif start_time and end_time and end_time <= start_time:
+        end_time = ""
+
+    return {
+        "id": str(raw_item.get("id") or uuid.uuid4().hex[:10]),
+        "title": title[:160],
+        "kind": kind,
+        "status": status,
+        "priority": priority,
+        "symbol": normalize_stock_symbol(str(raw_item.get("symbol") or "")) or "",
+        "company": str(raw_item.get("company") or "").strip()[:120],
+        "scheduled_date": scheduled_date,
+        "has_time_range": has_time_range,
+        "start_time": start_time,
+        "end_time": end_time,
+        "all_day": all_day,
+        "location": str(raw_item.get("location") or "").strip()[:180],
+        "note": trim_note_content(str(raw_item.get("note") or "").strip(), limit=1800),
+        "tags": normalize_tag_list(raw_item.get("tags", [])),
+        "created_at": str(raw_item.get("created_at") or now_iso()),
+        "updated_at": str(raw_item.get("updated_at") or now_iso()),
+    }
+
+
+def normalize_expert_interview(raw_interview: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_interview, dict):
+        return None
+
+    title = str(raw_interview.get("title") or "").strip()
+    interview_date = normalize_date_field(raw_interview.get("interview_date"))
+    if not title or not interview_date:
+        return None
+
+    kind = str(raw_interview.get("kind") or "expert_call").strip()
+    if kind not in EXPERT_INTERVIEW_KIND_META:
+        kind = "expert_call"
+
+    status = str(raw_interview.get("status") or "completed").strip()
+    if status not in EXPERT_INTERVIEW_STATUS_META:
+        status = "completed"
+
+    return {
+        "id": str(raw_interview.get("id") or uuid.uuid4().hex[:10]),
+        "title": title[:160],
+        "kind": kind,
+        "status": status,
+        "interview_date": interview_date,
+        "summary": trim_note_content(str(raw_interview.get("summary") or "").strip(), limit=2200),
+        "follow_up": trim_note_content(str(raw_interview.get("follow_up") or "").strip(), limit=1400),
+        "tags": normalize_tag_list(raw_interview.get("tags", [])),
+        "created_at": str(raw_interview.get("created_at") or now_iso()),
+        "updated_at": str(raw_interview.get("updated_at") or now_iso()),
+    }
+
+
+def normalize_expert_entry(raw_expert: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_expert, dict):
+        return None
+
+    name = str(raw_expert.get("name") or "").strip()
+    if not name:
+        return None
+
+    category = str(raw_expert.get("category") or "industry").strip()
+    if category not in EXPERT_CATEGORY_META:
+        category = "industry"
+
+    stage = str(raw_expert.get("stage") or "watch").strip()
+    if stage not in EXPERT_STAGE_META:
+        stage = "watch"
+
+    interviews = [
+        interview
+        for raw_interview in raw_expert.get("interviews", [])
+        if (interview := normalize_expert_interview(raw_interview)) is not None
+    ]
+
+    return {
+        "id": str(raw_expert.get("id") or uuid.uuid4().hex[:10]),
+        "name": name[:120],
+        "organization": str(raw_expert.get("organization") or "").strip()[:120],
+        "title": str(raw_expert.get("title") or "").strip()[:120],
+        "category": category,
+        "stage": stage,
+        "region": str(raw_expert.get("region") or "").strip()[:80],
+        "source": str(raw_expert.get("source") or "").strip()[:120],
+        "related_symbols": normalize_stock_symbol_list(raw_expert.get("related_symbols", [])),
+        "tags": normalize_tag_list(raw_expert.get("tags", [])),
+        "expertise": trim_note_content(str(raw_expert.get("expertise") or "").strip(), limit=1800),
+        "contact_notes": trim_note_content(str(raw_expert.get("contact_notes") or "").strip(), limit=2000),
+        "resource_refs": normalize_expert_resource_refs(raw_expert.get("resource_refs", [])),
+        "interviews": interviews,
+        "created_at": str(raw_expert.get("created_at") or now_iso()),
+        "updated_at": str(raw_expert.get("updated_at") or now_iso()),
+    }
+
+
 def tag_match(tags: list[str], target: str | None) -> bool:
     if not target:
         return True
@@ -1236,6 +1781,24 @@ def build_transcript_feature_chips(entry: dict[str, Any]) -> list[str]:
     return chips
 
 
+def normalize_transcript_category(value: str | None) -> str:
+    candidate = str(value or "").strip()
+    if candidate in TRANSCRIPT_CATEGORY_META:
+        return candidate
+    return "work"
+
+
+def build_transcript_category_payload(value: str | None) -> dict[str, str]:
+    category = normalize_transcript_category(value)
+    meta = TRANSCRIPT_CATEGORY_META[category]
+    return {
+        "key": category,
+        "label": meta["label"],
+        "description": meta["description"],
+        "summary": meta["summary"],
+    }
+
+
 def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
     status_meta = TRANSCRIPT_STATUS_META.get(entry["status"], TRANSCRIPT_STATUS_META["pending_api"])
     transcript_html = entry.get("transcript_html", "")
@@ -1244,6 +1807,7 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
     has_remote_task = bool(entry.get("provider_task_id"))
     has_file_url = bool(str(entry.get("file_url_hint") or "").strip())
     source_meta = build_transcript_source_meta(entry)
+    category_meta = build_transcript_category_payload(entry.get("category"))
     linked_symbols = transcript_linked_symbols(entry)
     linked_symbol = linked_symbols[0] if linked_symbols else ""
     linked_search_symbol = linked_symbol if len(linked_symbols) == 1 else ""
@@ -1259,6 +1823,9 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
         "display_created_at": format_iso_timestamp(entry["created_at"]),
         "display_updated_at": format_iso_timestamp(entry["updated_at"]),
         "meeting_date_label": entry["meeting_date"] or "未设置会议日期",
+        "category_label": category_meta["label"],
+        "category_description": category_meta["description"],
+        "category_summary": category_meta["summary"],
         "status_label": status_meta["label"],
         "status_tone": status_meta["tone"],
         "media_kind_label": TRANSCRIPT_MEDIA_KIND_LABELS.get(entry["media_kind"], "媒体"),
@@ -1314,6 +1881,25 @@ def build_transcript_stats_payload(transcript_cards: list[dict[str, Any]]) -> di
     }
 
 
+def build_transcript_category_cards(transcript_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for key, meta in sorted(TRANSCRIPT_CATEGORY_META.items(), key=lambda item: item[1]["order"]):
+        matched = [item for item in transcript_cards if item.get("category") == key]
+        cards.append(
+            {
+                "key": key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "summary": meta["summary"],
+                "total_count": len(matched),
+                "completed_count": sum(1 for item in matched if item["status"] == "completed"),
+                "queue_count": sum(1 for item in matched if item["status"] != "completed"),
+            }
+        )
+
+    return cards
+
+
 def build_transcript_page_context(
     store: dict[str, Any],
     *,
@@ -1322,13 +1908,14 @@ def build_transcript_page_context(
     stock_options = build_stock_selector_options(store)
     available_symbols = {item["symbol"] for item in stock_options}
     preferred_symbol = requested_symbol if requested_symbol in available_symbols else ""
-    transcript_cards = build_transcript_cards(store)
+    transcript_cards = build_transcript_cards(store, symbol_filter=preferred_symbol or None)
     transcript_stats = build_transcript_stats_payload(transcript_cards)
 
     return {
         "stock_options": stock_options,
         "preferred_symbol": preferred_symbol,
         "transcripts": transcript_cards,
+        "transcript_category_cards": build_transcript_category_cards(transcript_cards),
         "completed_transcripts": [item for item in transcript_cards if item["status"] == "completed"],
         "queue_transcripts": [item for item in transcript_cards if item["status"] != "completed"],
         "transcript_stats": {
@@ -3254,6 +3841,7 @@ def stock_entry_template(symbol: str) -> dict[str, Any]:
         "display_name": symbol,
         "created_at": stamp,
         "updated_at": stamp,
+        "earnings": normalize_stock_earnings_info({}),
         "notes": [],
         "files": [],
     }
@@ -3327,6 +3915,8 @@ def normalize_transcript_entry(raw_transcript: Any) -> dict[str, Any] | None:
     if output_level not in TRANSCRIPT_OUTPUT_LEVEL_LABELS:
         output_level = "2"
 
+    category = normalize_transcript_category(raw_transcript.get("category"))
+
     try:
         speaker_count = int(raw_transcript.get("speaker_count") or 2)
     except (TypeError, ValueError):
@@ -3392,6 +3982,7 @@ def normalize_transcript_entry(raw_transcript: Any) -> dict[str, Any] | None:
         "source_url_expires_at": str(raw_transcript.get("source_url_expires_at") or "").strip()[:40],
         "linked_symbol": linked_symbol or "",
         "linked_symbols": linked_symbols,
+        "category": category,
         "source_language": source_language,
         "output_level": output_level,
         "diarization_enabled": bool(raw_transcript.get("diarization_enabled")),
@@ -3492,6 +4083,8 @@ def normalize_trash_entry(raw_entry: Any) -> dict[str, Any] | None:
         normalized_payload = normalize_transcript_entry(payload)
     elif item_type == "group":
         normalized_payload = normalize_group_entry(payload)
+    elif item_type == "schedule_item":
+        normalized_payload = normalize_schedule_item(payload)
     elif item_type == "monitor_report":
         normalized_payload = normalize_monitor_report_payload(payload)
     elif item_type == "signal_report":
@@ -3546,6 +4139,16 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
         for raw_transcript in raw_transcripts
         if (transcript := normalize_transcript_entry(raw_transcript)) is not None
     ]
+    experts = [
+        expert
+        for raw_expert in source.get("experts", [])
+        if (expert := normalize_expert_entry(raw_expert)) is not None
+    ]
+    schedule_items = [
+        item
+        for raw_item in source.get("schedule_items", [])
+        if (item := normalize_schedule_item(raw_item)) is not None
+    ]
     trash = [
         trash_entry
         for raw_entry in source.get("trash", [])
@@ -3565,6 +4168,7 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
                 entry["display_name"] = str(raw_entry.get("display_name") or symbol).strip() or symbol
                 entry["created_at"] = str(raw_entry.get("created_at") or entry["created_at"])
                 entry["updated_at"] = str(raw_entry.get("updated_at") or entry["updated_at"])
+                entry["earnings"] = normalize_stock_earnings_info(raw_entry.get("earnings"))
                 entry["notes"] = [
                     note
                     for raw_note in raw_entry.get("notes", [])
@@ -3590,6 +4194,8 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
         "favorites": favorites,
         "stocks": stocks,
         "transcripts": transcripts,
+        "experts": experts,
+        "schedule_items": schedule_items,
         "trash": trash,
     }
 
@@ -3644,6 +4250,161 @@ def touch_stock(store: dict[str, Any], symbol: str) -> None:
     entry["updated_at"] = now_iso()
 
 
+def fetch_next_stock_earnings(symbol: str) -> dict[str, Any]:
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not normalized_symbol:
+        raise ValueError("无效股票代码")
+
+    errors: list[str] = []
+    for source in EARNINGS_SOURCE_CATALOG:
+        source_label = str(source["label"])
+        source_url = str(source["url_template"]).format(symbol=normalized_symbol.lower())
+        try:
+            response = requests.get(
+                source_url,
+                headers=EARNINGS_REQUEST_HEADERS,
+                timeout=20,
+            )
+            response.raise_for_status()
+            match = source["date_pattern"].search(response.text)
+            if not match:
+                raise ValueError("页面里没有找到下一次业绩日期")
+
+            next_date = datetime.strptime(match.group(1).strip(), str(source["date_format"])).date().isoformat()
+            if next_date < today_date_iso():
+                raise ValueError(f"返回了历史日期 {next_date}")
+
+            return normalize_stock_earnings_info(
+                {
+                    "next_date": next_date,
+                    "source_label": source_label,
+                    "source_url": source_url,
+                    "last_synced_at": now_iso(),
+                    "is_estimated": source_label == "Barchart",
+                }
+            )
+        except Exception as exc:
+            errors.append(f"{source_label}: {exc}")
+
+    raise RuntimeError("；".join(errors) or "未找到可用的业绩日期来源")
+
+
+def build_managed_earnings_schedule_title(symbol: str) -> str:
+    return f"{symbol} 下一次业绩"
+
+
+def build_stock_earnings_priority(next_date: str) -> str:
+    parsed = parse_iso_date_value(next_date)
+    if not parsed:
+        return "normal"
+
+    days_until = (parsed.date() - datetime.now().date()).days
+    if days_until <= 14:
+        return "high"
+    if days_until >= 60:
+        return "low"
+    return "normal"
+
+
+def build_auto_earnings_schedule_note(earnings_info: dict[str, Any]) -> str:
+    synced_label = (
+        format_iso_timestamp(earnings_info.get("last_synced_at"))
+        if earnings_info.get("last_synced_at")
+        else "刚刚"
+    )
+    source_label = str(earnings_info.get("source_label") or "外部行情页")
+    note = f"自动同步来源：{source_label}；同步时间：{synced_label}。"
+    if earnings_info.get("is_estimated"):
+        note += " 如果公司后续正式公告不同，请以公司公告为准。"
+    return note
+
+
+def is_managed_earnings_schedule_item(item: dict[str, Any], symbol: str) -> bool:
+    if str(item.get("kind") or "") != "earnings":
+        return False
+    if normalize_stock_symbol(str(item.get("symbol") or "")) != symbol:
+        return False
+
+    tags = normalize_tag_list(item.get("tags", []))
+    title = str(item.get("title") or "").strip()
+    return EARNINGS_SYNC_TAG in tags or title == build_managed_earnings_schedule_title(symbol)
+
+
+def upsert_stock_earnings_schedule_item(
+    store: dict[str, Any],
+    symbol: str,
+    earnings_info: dict[str, Any],
+) -> None:
+    next_date = str(earnings_info.get("next_date") or "")
+    if not next_date:
+        return
+
+    entry = ensure_stock_entry(store, symbol)
+    schedule_items = store.setdefault("schedule_items", [])
+    matched_indexes = [
+        index for index, item in enumerate(schedule_items) if is_managed_earnings_schedule_item(item, symbol)
+    ]
+    existing = schedule_items[matched_indexes[0]] if matched_indexes else {}
+    payload = normalize_schedule_item(
+        {
+            "id": existing.get("id"),
+            "title": build_managed_earnings_schedule_title(symbol),
+            "kind": "earnings",
+            "status": "planned",
+            "priority": build_stock_earnings_priority(next_date),
+            "symbol": symbol,
+            "company": str(entry.get("display_name") or symbol).strip(),
+            "scheduled_date": next_date,
+            "has_time_range": False,
+            "all_day": True,
+            "location": "",
+            "note": build_auto_earnings_schedule_note(earnings_info),
+            "tags": ["业绩期", EARNINGS_SYNC_TAG],
+            "created_at": existing.get("created_at") or now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+    if not payload:
+        return
+
+    if matched_indexes:
+        schedule_items[matched_indexes[0]] = payload
+        for index in reversed(matched_indexes[1:]):
+            del schedule_items[index]
+    else:
+        schedule_items.append(payload)
+
+
+def apply_stock_earnings_snapshot(
+    store: dict[str, Any],
+    symbol: str,
+    earnings_info: dict[str, Any],
+) -> None:
+    entry = ensure_stock_entry(store, symbol)
+    normalized = normalize_stock_earnings_info(earnings_info)
+    if not normalized["next_date"]:
+        raise ValueError("缺少可写入的业绩日期")
+
+    entry["earnings"] = normalized
+    upsert_stock_earnings_schedule_item(store, symbol, normalized)
+
+
+def collect_stock_earnings_snapshots(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+
+    for raw_symbol in ordered_unique(symbols):
+        symbol = normalize_stock_symbol(raw_symbol)
+        if not symbol:
+            continue
+        try:
+            snapshots[symbol] = fetch_next_stock_earnings(symbol)
+        except Exception as exc:
+            errors.append(f"{symbol}: {exc}")
+
+    return snapshots, errors
+
+
 def slugify_group_name(name: str) -> str:
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
@@ -3666,6 +4427,14 @@ def get_group(store: dict[str, Any], group_id: str) -> dict[str, Any]:
     for group in store["groups"]:
         if group["id"] == group_id:
             return group
+
+    abort(404)
+
+
+def get_schedule_item(store: dict[str, Any], item_id: str) -> dict[str, Any]:
+    for item in store.get("schedule_items", []):
+        if item["id"] == item_id:
+            return item
 
     abort(404)
 
@@ -3714,6 +4483,7 @@ def build_stock_card(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "file_count": len(entry.get("files", [])),
         "transcript_count": transcript_count_for_symbol(store, symbol),
         "updated_label": format_iso_timestamp(entry.get("updated_at")),
+        "next_earnings": build_stock_earnings_view(entry),
         "groups": memberships,
     }
 
@@ -3755,6 +4525,1035 @@ def build_stock_selector_options(store: dict[str, Any]) -> list[dict[str, str]]:
         )
 
     return options
+
+
+def schedule_item_sort_datetime(item: dict[str, Any]) -> datetime:
+    date_value = parse_iso_date_value(str(item.get("scheduled_date") or ""))
+    if date_value is None:
+        return datetime.now().replace(microsecond=0)
+
+    if item.get("all_day"):
+        return datetime.combine(date_value.date(), datetime.min.time())
+
+    start_time = normalize_time_field(str(item.get("start_time") or ""))
+    if not start_time:
+        return datetime.combine(date_value.date(), datetime.strptime("12:00", "%H:%M").time())
+
+    return datetime.combine(date_value.date(), datetime.strptime(start_time, "%H:%M").time())
+
+
+def schedule_item_has_time_range(item: dict[str, Any]) -> bool:
+    if item.get("all_day"):
+        return False
+
+    if bool(item.get("has_time_range")):
+        return True
+
+    start_time = normalize_time_field(str(item.get("start_time") or ""))
+    end_time = normalize_time_field(str(item.get("end_time") or ""))
+    return bool(start_time or end_time)
+
+
+def schedule_item_time_rank(item: dict[str, Any]) -> int:
+    if schedule_item_has_time_range(item):
+        return 0
+    if item.get("all_day"):
+        return 1
+    return 2
+
+
+def schedule_card_sort_key(item: dict[str, Any]) -> tuple[str, int, float, str]:
+    return (
+        str(item.get("scheduled_date") or ""),
+        schedule_item_time_rank(item),
+        float(item.get("sort_value") or 0),
+        str(item.get("title") or "").lower(),
+    )
+
+
+def build_schedule_time_label(item: dict[str, Any]) -> str:
+    if item.get("all_day"):
+        return "全天"
+
+    start_time = normalize_time_field(str(item.get("start_time") or ""))
+    end_time = normalize_time_field(str(item.get("end_time") or ""))
+    if start_time and end_time:
+        return f"{start_time} - {end_time}"
+    if start_time:
+        return start_time
+    return "时间待定"
+
+
+def build_schedule_day_heading(date_value: str) -> dict[str, str]:
+    parsed = parse_iso_date_value(date_value)
+    if parsed is None:
+        return {"label": date_value, "relative_label": "日程"}
+
+    today = datetime.now().date()
+    delta_days = (parsed.date() - today).days
+    weekday_label = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][parsed.weekday()]
+
+    if delta_days == 0:
+        relative_label = "今天"
+    elif delta_days == 1:
+        relative_label = "明天"
+    elif delta_days == -1:
+        relative_label = "昨天"
+    elif delta_days < 0:
+        relative_label = f"已过 {abs(delta_days)} 天"
+    else:
+        relative_label = f"{delta_days} 天后"
+
+    return {
+        "label": f"{parsed.strftime('%Y-%m-%d')} · {weekday_label}",
+        "relative_label": relative_label,
+    }
+
+
+def build_schedule_company_label(store: dict[str, Any], item: dict[str, Any]) -> str:
+    company = str(item.get("company") or "").strip()
+    symbol = str(item.get("symbol") or "").strip()
+    if not symbol:
+        return company
+
+    stock_label = symbol
+    if symbol in store.get("stocks", {}):
+        stock_label = str(store["stocks"][symbol].get("display_name") or symbol).strip() or symbol
+
+    if company and company.casefold() != stock_label.casefold() and company.casefold() != symbol.casefold():
+        return f"{company} · {symbol}"
+    if company:
+        return company
+    if stock_label.casefold() != symbol.casefold():
+        return f"{stock_label} · {symbol}"
+    return symbol
+
+
+def build_schedule_card(
+    store: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    focus_item_id: str = "",
+) -> dict[str, Any]:
+    status = str(item.get("status") or "planned")
+    status_meta = SCHEDULE_STATUS_META.get(status, SCHEDULE_STATUS_META["planned"])
+    priority = str(item.get("priority") or "normal")
+    priority_meta = SCHEDULE_PRIORITY_META.get(priority, SCHEDULE_PRIORITY_META["normal"])
+    sort_value = schedule_item_sort_datetime(item)
+    scheduled_date = str(item.get("scheduled_date") or "")
+    today = today_date_iso()
+    is_overdue = status == "planned" and scheduled_date < today
+
+    note = str(item.get("note") or "").strip()
+    location = str(item.get("location") or "").strip()
+    fallback_summary = location or build_schedule_time_label(item)
+
+    return {
+        **item,
+        "kind_label": SCHEDULE_KIND_META.get(str(item.get("kind") or ""), SCHEDULE_KIND_META["meeting"])["label"],
+        "kind_tone": SCHEDULE_KIND_META.get(str(item.get("kind") or ""), SCHEDULE_KIND_META["meeting"])["tone"],
+        "status_label": status_meta["label"],
+        "status_tone": status_meta["tone"],
+        "priority_label": priority_meta["label"],
+        "priority_tone": priority_meta["tone"],
+        "company_label": build_schedule_company_label(store, item),
+        "display_time": build_schedule_time_label(item),
+        "has_time_range": schedule_item_has_time_range(item),
+        "time_sort_rank": schedule_item_time_rank(item),
+        "summary": summarize_text_block(note or fallback_summary, limit=180),
+        "sort_value": sort_value.timestamp(),
+        "display_updated_at": format_iso_timestamp(str(item.get("updated_at") or "")),
+        "is_overdue": is_overdue,
+        "is_today": scheduled_date == today,
+        "is_focus": bool(focus_item_id and str(item.get("id") or "") == focus_item_id),
+        "stock_url": url_for("stock_detail", symbol=item["symbol"]) if item.get("symbol") else "",
+    }
+
+
+def build_schedule_date_groups(cards: list[dict[str, Any]], *, reverse: bool = False) -> list[dict[str, Any]]:
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for card in cards:
+        grouped[str(card.get("scheduled_date") or "")].append(card)
+
+    ordered_dates = sorted(grouped.keys(), reverse=reverse)
+    groups: list[dict[str, Any]] = []
+    for date_value in ordered_dates:
+        items = sorted(grouped[date_value], key=schedule_card_sort_key)
+        heading = build_schedule_day_heading(date_value)
+        groups.append(
+            {
+                "date": date_value,
+                "label": heading["label"],
+                "relative_label": heading["relative_label"],
+                "items": items,
+            }
+        )
+    return groups
+
+
+def build_schedule_period_stats(cards: list[dict[str, Any]], prefix: str) -> dict[str, int]:
+    matched = [item for item in cards if str(item.get("scheduled_date") or "").startswith(prefix)]
+    return {
+        "total_count": len(matched),
+        "open_count": sum(1 for item in matched if item.get("status") == "planned"),
+        "earnings_count": sum(1 for item in matched if item.get("kind") == "earnings"),
+    }
+
+
+def build_schedule_activity(
+    store: dict[str, Any],
+    *,
+    focus_item_id: str = "",
+) -> dict[str, Any]:
+    cards = [build_schedule_card(store, item, focus_item_id=focus_item_id) for item in store.get("schedule_items", [])]
+    cards.sort(key=schedule_card_sort_key)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    entries: list[dict[str, Any]] = []
+    for card in cards:
+        schedule_date = str(card.get("scheduled_date") or "")
+        entries.append(
+            {
+                "date": schedule_date,
+                "kind": str(card.get("kind") or ""),
+                "status": str(card.get("status") or ""),
+            }
+        )
+        summary = summaries.setdefault(
+            schedule_date,
+            {
+                "total_count": 0,
+                "open_count": 0,
+                "earnings_count": 0,
+                "items": [],
+            },
+        )
+        summary["total_count"] += 1
+        if card.get("status") == "planned":
+            summary["open_count"] += 1
+        if card.get("kind") == "earnings":
+            summary["earnings_count"] += 1
+        summary["items"].append(card)
+
+    for summary in summaries.values():
+        summary["items"].sort(key=schedule_card_sort_key)
+
+    return {
+        "cards": cards,
+        "entries": entries,
+        "summaries": summaries,
+    }
+
+
+def build_schedule_sections(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    today = today_date_iso()
+    week_end = (datetime.now().date() + timedelta(days=7)).isoformat()
+
+    planned_cards = [item for item in cards if item.get("status") == "planned"]
+    overdue_cards = [item for item in planned_cards if str(item.get("scheduled_date") or "") < today]
+    today_cards = [item for item in planned_cards if str(item.get("scheduled_date") or "") == today]
+    next_week_cards = [
+        item
+        for item in planned_cards
+        if today < str(item.get("scheduled_date") or "") <= week_end
+    ]
+    later_cards = [item for item in planned_cards if str(item.get("scheduled_date") or "") > week_end]
+    archived_cards = [item for item in cards if item.get("status") in {"done", "cancelled"}]
+
+    return [
+        {
+            "key": "overdue",
+            "title": "逾期未完成",
+            "caption": "优先把已经过期但还没处理的会议、提醒和业绩节点拉出来。",
+            "empty_copy": "当前没有逾期项目，节奏还算稳。",
+            "groups": build_schedule_date_groups(overdue_cards),
+            "count": len(overdue_cards),
+        },
+        {
+            "key": "today",
+            "title": "今天",
+            "caption": "今天要发生的事集中放在这里，适合临开会前快速看一眼。",
+            "empty_copy": "今天还没有安排，后面新增后会立刻出现在这里。",
+            "groups": build_schedule_date_groups(today_cards),
+            "count": len(today_cards),
+        },
+        {
+            "key": "next_week",
+            "title": "未来 7 天",
+            "caption": "把最近一周的节奏提前排好，避免专家会和业绩期撞在一起。",
+            "empty_copy": "未来 7 天暂时是空的，可以先把最近要约的会补进来。",
+            "groups": build_schedule_date_groups(next_week_cards),
+            "count": len(next_week_cards),
+        },
+        {
+            "key": "later",
+            "title": "之后",
+            "caption": "更远的安排放在后面，先占住坑位，之后再补细节。",
+            "empty_copy": "更远时间段还没有安排。",
+            "groups": build_schedule_date_groups(later_cards),
+            "count": len(later_cards),
+        },
+        {
+            "key": "archived",
+            "title": "已完成 / 已取消",
+            "caption": "保留最近处理过的事项，方便回看自己排期是否合理。",
+            "empty_copy": "最近还没有归档项。",
+            "groups": build_schedule_date_groups(archived_cards, reverse=True),
+            "count": len(archived_cards),
+        },
+    ]
+
+
+def build_schedule_page_context(
+    store: dict[str, Any],
+    *,
+    month_param: str | None,
+    year_param: str | None = None,
+    month_number_param: str | None = None,
+    date_param: str | None,
+    focus_item_id: str = "",
+) -> dict[str, Any]:
+    activity = build_schedule_activity(store, focus_item_id=focus_item_id)
+    cards = activity["cards"]
+    selected_date_value = parse_iso_date_value(date_param)
+    fallback_month = selected_date_value or (
+        parse_iso_date_value(cards[0]["scheduled_date"]) if cards else datetime.now()
+    )
+    month_value = resolve_month_value(
+        month_param=month_param,
+        year_param=year_param,
+        month_number_param=month_number_param,
+        fallback=fallback_month,
+    )
+    selected_date = selected_date_value.date().isoformat() if selected_date_value else None
+    month_key = month_value.strftime("%Y-%m")
+
+    if not selected_date or not selected_date.startswith(month_key):
+        if today_date_iso().startswith(month_key):
+            selected_date = today_date_iso()
+        else:
+            selected_date = find_month_default_date(activity["summaries"], month_value)
+
+    previous_year, previous_month = shift_month(month_value.year, month_value.month, -1)
+    next_year, next_month = shift_month(month_value.year, month_value.month, 1)
+    selected_summary = activity["summaries"].get(selected_date or "")
+
+    today = today_date_iso()
+    week_end = (datetime.now().date() + timedelta(days=7)).isoformat()
+    upcoming_cards = [
+        item
+        for item in cards
+        if item.get("status") == "planned" and str(item.get("scheduled_date") or "") >= today
+    ]
+    upcoming_cards.sort(key=schedule_card_sort_key)
+    upcoming_earnings = [
+        item
+        for item in cards
+        if item.get("kind") == "earnings"
+        and item.get("status") == "planned"
+        and str(item.get("scheduled_date") or "") >= today
+    ]
+    upcoming_earnings.sort(key=schedule_card_sort_key)
+
+    return {
+        "schedule_cards": cards,
+        "schedule_sections": build_schedule_sections(cards),
+        "schedule_open_count": sum(1 for item in cards if item.get("status") == "planned"),
+        "schedule_today_count": sum(
+            1 for item in cards if item.get("status") == "planned" and item.get("scheduled_date") == today
+        ),
+        "schedule_week_count": sum(
+            1
+            for item in cards
+            if item.get("status") == "planned" and today < str(item.get("scheduled_date") or "") <= week_end
+        ),
+        "schedule_earnings_count": len(upcoming_earnings),
+        "schedule_overdue_count": sum(
+            1 for item in cards if item.get("status") == "planned" and str(item.get("scheduled_date") or "") < today
+        ),
+        "schedule_month_stats": build_schedule_period_stats(cards, month_key),
+        "schedule_year_stats": build_schedule_period_stats(cards, f"{month_value.year:04d}"),
+        "schedule_upcoming_cards": upcoming_cards[:10],
+        "upcoming_earnings": upcoming_earnings[:8],
+        "selected_schedule_items": selected_summary.get("items", []) if selected_summary else [],
+        "selected_schedule_date": selected_date,
+        "selected_schedule_heading": build_schedule_day_heading(selected_date)["label"] if selected_date else "选择一天",
+        "month_value": month_value,
+        "month_key": month_key,
+        "month_label": month_value.strftime("%Y 年 %m 月"),
+        "previous_month_key": f"{previous_year:04d}-{previous_month:02d}",
+        "next_month_key": f"{next_year:04d}-{next_month:02d}",
+        "current_month_key": datetime.now().strftime("%Y-%m"),
+        "selected_year": month_value.year,
+        "selected_month_number": month_value.month,
+        "available_years": build_available_years(activity["entries"], month_value.year),
+        "month_options": [{"value": month, "label": f"{month} 月"} for month in range(1, 13)],
+        "calendar_weeks": build_calendar_weeks(month_value, activity["summaries"], selected_date),
+        "weekday_labels": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+        "focus_schedule_item_id": focus_item_id,
+    }
+
+
+def build_expert_identity_line(expert: dict[str, Any]) -> str:
+    bits = [str(expert.get("organization") or "").strip(), str(expert.get("title") or "").strip()]
+    return " · ".join(bit for bit in bits if bit)
+
+
+def expert_stage_order(value: str | None) -> int:
+    return int(EXPERT_STAGE_META.get(str(value or "").strip(), {}).get("order") or 999)
+
+
+def expert_category_order(value: str | None) -> int:
+    return int(EXPERT_CATEGORY_META.get(str(value or "").strip(), {}).get("order") or 999)
+
+
+def expert_interview_status_order(value: str | None) -> int:
+    return int(EXPERT_INTERVIEW_STATUS_META.get(str(value or "").strip(), {}).get("order") or 999)
+
+
+def expert_interview_sort_key(interview: dict[str, Any]) -> tuple[str, int, float, str]:
+    return (
+        str(interview.get("interview_date") or ""),
+        expert_interview_status_order(str(interview.get("status") or "")),
+        coerce_sort_timestamp(interview.get("updated_at") or interview.get("created_at")),
+        str(interview.get("title") or "").casefold(),
+    )
+
+
+def get_expert_entry(store: dict[str, Any], expert_id: str) -> dict[str, Any]:
+    for expert in store.get("experts", []):
+        if expert["id"] == expert_id:
+            return expert
+
+    abort(404)
+
+
+def get_expert_interview_entry(expert: dict[str, Any], interview_id: str) -> dict[str, Any]:
+    for interview in expert.get("interviews", []):
+        if interview["id"] == interview_id:
+            return interview
+
+    abort(404)
+
+
+def resolve_expert_resource_ref(store: dict[str, Any], resource_ref: dict[str, Any]) -> dict[str, Any] | None:
+    kind = str(resource_ref.get("kind") or "").strip()
+    resource_id = str(resource_ref.get("resource_id") or "").strip()
+    symbol = str(resource_ref.get("symbol") or "").strip()
+    kind_meta = EXPERT_RESOURCE_KIND_META.get(kind)
+    if not kind_meta or not resource_id:
+        return None
+    normalized_ref = {
+        "kind": kind,
+        "symbol": symbol if kind in {"note", "file"} else "",
+        "resource_id": resource_id,
+    }
+    preview_url = build_expert_resource_preview_url(normalized_ref)
+    token = build_expert_resource_token(normalized_ref)
+
+    if kind == "note" and symbol:
+        entry = ensure_stock_entry(store, symbol)
+        for note in entry.get("notes", []):
+            if str(note.get("id") or "") != resource_id:
+                continue
+            return {
+                "kind": kind,
+                "kind_label": kind_meta["label"],
+                "kind_tone": kind_meta["tone"],
+                "resource_id": resource_id,
+                "symbol": symbol,
+                "title": note.get("title") or "未命名笔记",
+                "summary": summarize_text_block(note.get("content_text") or ""),
+                "display_time": note_display_time(note),
+                "sort_value": coerce_sort_timestamp(note.get("created_at")),
+                "token": token,
+                "preview_url": preview_url,
+                "url": build_stock_detail_deep_link(
+                    symbol=symbol,
+                    panel="notes",
+                    item_kind="note",
+                    item_id=resource_id,
+                    anchor=f"note-{resource_id}",
+                ),
+            }
+
+    if kind == "file" and symbol:
+        entry = ensure_stock_entry(store, symbol)
+        for file_entry in entry.get("files", []):
+            if str(file_entry.get("id") or "") != resource_id:
+                continue
+            return {
+                "kind": kind,
+                "kind_label": kind_meta["label"],
+                "kind_tone": kind_meta["tone"],
+                "resource_id": resource_id,
+                "symbol": symbol,
+                "title": file_entry.get("original_name") or "已上传资料",
+                "summary": summarize_text_block(
+                    file_entry.get("description")
+                    or f"{detect_file_type_label(str(file_entry.get('original_name') or ''))} 文件"
+                ),
+                "display_time": file_display_time(file_entry),
+                "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
+                "token": token,
+                "preview_url": preview_url,
+                "url": build_stock_detail_deep_link(
+                    symbol=symbol,
+                    panel="files",
+                    item_kind="file",
+                    item_id=resource_id,
+                    anchor=f"file-{resource_id}",
+                ),
+                "secondary_url": url_for("download_stock_file", symbol=symbol, file_id=resource_id),
+                "secondary_label": "下载文件",
+            }
+
+    if kind == "transcript":
+        for transcript in store.get("transcripts", []):
+            if str(transcript.get("id") or "") != resource_id:
+                continue
+            card = build_transcript_card(transcript)
+            primary_symbol = card["linked_symbols"][0] if card.get("linked_symbols") else ""
+            return {
+                "kind": kind,
+                "kind_label": kind_meta["label"],
+                "kind_tone": kind_meta["tone"],
+                "resource_id": resource_id,
+                "symbol": primary_symbol,
+                "symbols": card.get("linked_symbols", []),
+                "title": card.get("display_title") or "会议转录",
+                "summary": card.get("summary_excerpt") or TRANSCRIPT_PLACEHOLDER_COPY,
+                "display_time": card.get("meeting_date_label") or card.get("display_created_at"),
+                "sort_value": coerce_sort_timestamp(card.get("meeting_date") or card.get("created_at")),
+                "token": token,
+                "preview_url": preview_url,
+                "url": (
+                    build_stock_detail_deep_link(
+                        symbol=primary_symbol,
+                        panel="transcripts",
+                        item_kind="transcript",
+                        item_id=resource_id,
+                        anchor=f"transcript-{resource_id}",
+                    )
+                    if primary_symbol
+                    else url_for("transcripts_page")
+                ),
+            }
+
+    if kind == "schedule":
+        for item in store.get("schedule_items", []):
+            if str(item.get("id") or "") != resource_id:
+                continue
+            card = build_schedule_card(store, item)
+            schedule_date = str(card.get("scheduled_date") or "")
+            return {
+                "kind": kind,
+                "kind_label": kind_meta["label"],
+                "kind_tone": kind_meta["tone"],
+                "resource_id": resource_id,
+                "symbol": str(card.get("symbol") or ""),
+                "title": card.get("title") or "未命名日程",
+                "summary": card.get("summary") or "",
+                "display_time": f"{schedule_date} · {card.get('display_time') or '时间待定'}",
+                "sort_value": schedule_item_sort_datetime(item).timestamp(),
+                "status_label": card.get("status_label") or "",
+                "status_tone": card.get("status_tone") or "pending",
+                "token": token,
+                "preview_url": preview_url,
+                "url": url_for("schedule_page", month=schedule_date[:7], date=schedule_date, focus=resource_id),
+            }
+
+    return None
+
+
+def build_expert_resource_groups(store: dict[str, Any], expert: dict[str, Any]) -> list[dict[str, Any]]:
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for resource_ref in expert.get("resource_refs", []):
+        resolved = resolve_expert_resource_ref(store, resource_ref)
+        if resolved is None:
+            continue
+        grouped[resolved["kind"]].append(resolved)
+
+    groups: list[dict[str, Any]] = []
+    for kind, meta in sorted(EXPERT_RESOURCE_KIND_META.items(), key=lambda item: item[1]["order"]):
+        items = grouped.get(kind, [])
+        items.sort(key=lambda item: (float(item.get("sort_value") or 0), item.get("title") or ""), reverse=True)
+        groups.append(
+            {
+                "kind": kind,
+                "label": meta["label"],
+                "tone": meta["tone"],
+                "count": len(items),
+                "items": items,
+            }
+        )
+
+    return groups
+
+
+def build_expert_resource_catalog(
+    store: dict[str, Any],
+    expert: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    selected_tokens = {
+        build_expert_resource_token(resource_ref)
+        for resource_ref in (expert.get("resource_refs", []) if expert else [])
+    }
+    preferred_symbols = set(expert.get("related_symbols", []) if expert else [])
+    scope_symbols = sorted(preferred_symbols) if preferred_symbols else sorted(list_stock_symbols(store))
+    sections: list[dict[str, Any]] = []
+
+    note_items: list[dict[str, Any]] = []
+    file_items: list[dict[str, Any]] = []
+    for symbol in scope_symbols:
+        entry = ensure_stock_entry(store, symbol)
+        for note in entry.get("notes", []):
+            resource_ref = {"kind": "note", "symbol": symbol, "resource_id": str(note.get("id") or "")}
+            token = build_expert_resource_token(resource_ref)
+            note_items.append(
+                {
+                    "token": token,
+                    "title": note.get("title") or "未命名笔记",
+                    "summary": summarize_text_block(note.get("content_text") or ""),
+                    "display_time": note_display_time(note),
+                    "symbol": symbol,
+                    "is_selected": token in selected_tokens,
+                    "sort_value": coerce_sort_timestamp(note.get("created_at")),
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="notes",
+                        item_kind="note",
+                        item_id=str(note.get("id") or ""),
+                        anchor=f"note-{note.get('id')}",
+                    ),
+                }
+            )
+
+        for file_entry in entry.get("files", []):
+            resource_ref = {"kind": "file", "symbol": symbol, "resource_id": str(file_entry.get("id") or "")}
+            token = build_expert_resource_token(resource_ref)
+            file_items.append(
+                {
+                    "token": token,
+                    "title": file_entry.get("original_name") or "已上传资料",
+                    "summary": summarize_text_block(
+                        file_entry.get("description")
+                        or f"{detect_file_type_label(str(file_entry.get('original_name') or ''))} 文件"
+                    ),
+                    "display_time": file_display_time(file_entry),
+                    "symbol": symbol,
+                    "is_selected": token in selected_tokens,
+                    "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="files",
+                        item_kind="file",
+                        item_id=str(file_entry.get("id") or ""),
+                        anchor=f"file-{file_entry.get('id')}",
+                    ),
+                }
+            )
+
+    note_items.sort(key=lambda item: (float(item["sort_value"]), item["title"]), reverse=True)
+    file_items.sort(key=lambda item: (float(item["sort_value"]), item["title"]), reverse=True)
+    sections.append(
+        {
+            "kind": "note",
+            "label": EXPERT_RESOURCE_KIND_META["note"]["label"],
+            "tone": EXPERT_RESOURCE_KIND_META["note"]["tone"],
+            "items": note_items,
+            "count": len(note_items),
+        }
+    )
+    sections.append(
+        {
+            "kind": "file",
+            "label": EXPERT_RESOURCE_KIND_META["file"]["label"],
+            "tone": EXPERT_RESOURCE_KIND_META["file"]["tone"],
+            "items": file_items,
+            "count": len(file_items),
+        }
+    )
+
+    transcript_items: list[dict[str, Any]] = []
+    for transcript in build_transcript_cards(store):
+        linked_symbols = transcript.get("linked_symbols", [])
+        symbol_match_rank = 0 if not preferred_symbols or preferred_symbols.intersection(linked_symbols) else 1
+        resource_ref = {"kind": "transcript", "symbol": "", "resource_id": transcript["id"]}
+        token = build_expert_resource_token(resource_ref)
+        transcript_items.append(
+            {
+                "token": token,
+                "title": transcript.get("display_title") or "会议转录",
+                "summary": transcript.get("summary_excerpt") or TRANSCRIPT_PLACEHOLDER_COPY,
+                "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
+                "symbol": linked_symbols[0] if linked_symbols else "",
+                "symbols": linked_symbols,
+                "is_selected": token in selected_tokens,
+                "match_rank": symbol_match_rank,
+                "sort_value": coerce_sort_timestamp(transcript.get("meeting_date") or transcript.get("created_at")),
+                "url": (
+                    build_stock_detail_deep_link(
+                        symbol=linked_symbols[0],
+                        panel="transcripts",
+                        item_kind="transcript",
+                        item_id=transcript["id"],
+                        anchor=f"transcript-{transcript['id']}",
+                    )
+                    if linked_symbols
+                    else url_for("transcripts_page")
+                ),
+            }
+        )
+
+    transcript_items.sort(
+        key=lambda item: (int(item["match_rank"]), -float(item["sort_value"]), item["title"]),
+    )
+    sections.append(
+        {
+            "kind": "transcript",
+            "label": EXPERT_RESOURCE_KIND_META["transcript"]["label"],
+            "tone": EXPERT_RESOURCE_KIND_META["transcript"]["tone"],
+            "items": transcript_items,
+            "count": len(transcript_items),
+        }
+    )
+
+    schedule_items: list[dict[str, Any]] = []
+    for item in [build_schedule_card(store, raw_item) for raw_item in store.get("schedule_items", [])]:
+        item_symbol = str(item.get("symbol") or "")
+        symbol_match_rank = 0 if not preferred_symbols or item_symbol in preferred_symbols or not item_symbol else 1
+        resource_ref = {"kind": "schedule", "symbol": "", "resource_id": item["id"]}
+        token = build_expert_resource_token(resource_ref)
+        schedule_items.append(
+            {
+                "token": token,
+                "title": item.get("title") or "未命名日程",
+                "summary": item.get("summary") or "",
+                "display_time": f"{item.get('scheduled_date') or ''} · {item.get('display_time') or '时间待定'}",
+                "symbol": item_symbol,
+                "is_selected": token in selected_tokens,
+                "match_rank": symbol_match_rank,
+                "sort_value": schedule_item_sort_datetime(item).timestamp(),
+                "status_label": item.get("status_label") or "",
+                "status_tone": item.get("status_tone") or "pending",
+                "url": url_for(
+                    "schedule_page",
+                    month=str(item.get("scheduled_date") or "")[:7],
+                    date=item.get("scheduled_date"),
+                    focus=item["id"],
+                ),
+            }
+        )
+
+    schedule_items.sort(
+        key=lambda item: (int(item["match_rank"]), -float(item["sort_value"]), item["title"]),
+    )
+    sections.append(
+        {
+            "kind": "schedule",
+            "label": EXPERT_RESOURCE_KIND_META["schedule"]["label"],
+            "tone": EXPERT_RESOURCE_KIND_META["schedule"]["tone"],
+            "items": schedule_items,
+            "count": len(schedule_items),
+        }
+    )
+
+    return sections
+
+
+def build_expert_resource_preview_context(
+    store: dict[str, Any],
+    resource_ref: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = resolve_expert_resource_ref(store, resource_ref)
+    if resolved is None:
+        abort(404)
+
+    preview_kind = str(resolved.get("kind") or "")
+    context: dict[str, Any] = {
+        "preview_kind": preview_kind,
+        "resource": resolved,
+    }
+
+    if preview_kind == "note":
+        symbol = str(resolved.get("symbol") or "")
+        entry = ensure_stock_entry(store, symbol)
+        note = next(
+            (item for item in entry.get("notes", []) if str(item.get("id") or "") == str(resolved.get("resource_id") or "")),
+            None,
+        )
+        if note is None:
+            abort(404)
+        file_lookup = {item["id"]: item for item in entry.get("files", [])}
+        source_file = file_lookup.get(str(note.get("source_file_id") or ""))
+        context["note"] = {
+            **note,
+            "symbol": symbol,
+            "display_title": note.get("title") or "未命名笔记",
+            "display_created_at": note_display_time(note),
+            "source_file": source_file,
+            "source_file_name_display": note.get("source_file_name")
+            or (str(source_file.get("original_name") or "") if source_file else ""),
+            "tags": normalize_tag_list(note.get("tags", [])),
+        }
+        return context
+
+    if preview_kind == "file":
+        symbol = str(resolved.get("symbol") or "")
+        file_entry = get_stock_file_entry(store, symbol, str(resolved.get("resource_id") or ""))
+        return {
+            **context,
+            "stock_symbol": symbol,
+            **build_stock_file_preview_context(store, symbol, file_entry),
+        }
+
+    if preview_kind == "transcript":
+        transcript = get_transcript_entry(store, str(resolved.get("resource_id") or ""))
+        context["transcript"] = build_transcript_card(transcript)
+        return context
+
+    if preview_kind == "schedule":
+        schedule_item = get_schedule_item(store, str(resolved.get("resource_id") or ""))
+        context["schedule_item"] = build_schedule_card(store, schedule_item)
+        return context
+
+    abort(404)
+
+
+def build_expert_interview_card(interview: dict[str, Any]) -> dict[str, Any]:
+    kind_meta = EXPERT_INTERVIEW_KIND_META.get(str(interview.get("kind") or ""), EXPERT_INTERVIEW_KIND_META["expert_call"])
+    status_meta = EXPERT_INTERVIEW_STATUS_META.get(
+        str(interview.get("status") or ""),
+        EXPERT_INTERVIEW_STATUS_META["completed"],
+    )
+    summary = str(interview.get("summary") or "").strip()
+    follow_up = str(interview.get("follow_up") or "").strip()
+
+    return {
+        **interview,
+        "kind_label": kind_meta["label"],
+        "status_label": status_meta["label"],
+        "status_tone": status_meta["tone"],
+        "display_date": str(interview.get("interview_date") or ""),
+        "summary_preview": summarize_text_block(summary, limit=220) if summary else "",
+        "follow_up_preview": summarize_text_block(follow_up, limit=220) if follow_up else "",
+        "sort_value": coerce_sort_timestamp(interview.get("interview_date") or interview.get("updated_at")),
+        "display_updated_at": format_iso_timestamp(str(interview.get("updated_at") or "")),
+    }
+
+
+def build_expert_card(expert: dict[str, Any], *, selected_expert_id: str = "") -> dict[str, Any]:
+    category_meta = EXPERT_CATEGORY_META.get(str(expert.get("category") or ""), EXPERT_CATEGORY_META["industry"])
+    stage_meta = EXPERT_STAGE_META.get(str(expert.get("stage") or ""), EXPERT_STAGE_META["watch"])
+    identity_line = build_expert_identity_line(expert)
+    interviews = [build_expert_interview_card(item) for item in expert.get("interviews", [])]
+    interviews.sort(key=expert_interview_sort_key, reverse=True)
+    latest_interview = interviews[0] if interviews else None
+    related_symbols = expert.get("related_symbols", [])
+    resource_count = len(expert.get("resource_refs", []))
+    brief = summarize_text_block(
+        str(expert.get("expertise") or "").strip()
+        or str(expert.get("contact_notes") or "").strip()
+        or identity_line
+        or f"{category_meta['label']} · {stage_meta['label']}",
+        limit=120,
+    )
+
+    return {
+        **expert,
+        "category_label": category_meta["label"],
+        "category_tone": category_meta["tone"],
+        "category_order": category_meta["order"],
+        "stage_label": stage_meta["label"],
+        "stage_tone": stage_meta["tone"],
+        "stage_order": stage_meta["order"],
+        "identity_line": identity_line,
+        "brief": brief,
+        "brief_full": (
+            str(expert.get("expertise") or "").strip()
+            or str(expert.get("contact_notes") or "").strip()
+            or identity_line
+            or f"{category_meta['label']} 路 {stage_meta['label']}"
+        ),
+        "related_symbols": related_symbols,
+        "related_symbols_label": " · ".join(related_symbols),
+        "interview_count": len(interviews),
+        "resource_count": resource_count,
+        "latest_interview_label": latest_interview["display_date"] if latest_interview else "暂无访谈",
+        "display_updated_at": format_iso_timestamp(str(expert.get("updated_at") or "")),
+        "is_selected": bool(selected_expert_id and expert["id"] == selected_expert_id),
+        "url": url_for("experts_page", view="manage", expert=expert["id"]),
+    }
+
+
+def build_expert_overview_groups(experts: list[dict[str, Any]], *, selected_expert_id: str = "") -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in EXPERT_CATEGORY_META}
+    for expert in experts:
+        card = build_expert_card(expert, selected_expert_id=selected_expert_id)
+        grouped.setdefault(card["category"], []).append(card)
+
+    groups: list[dict[str, Any]] = []
+    for category, meta in sorted(EXPERT_CATEGORY_META.items(), key=lambda item: item[1]["order"]):
+        items = grouped.get(category, [])
+        items.sort(
+            key=lambda item: (
+                int(item["stage_order"]),
+                -(coerce_sort_timestamp(item.get("latest_interview_label")) or 0),
+                -(coerce_sort_timestamp(item.get("updated_at")) or 0),
+                item["name"].casefold(),
+            )
+        )
+        groups.append(
+            {
+                "category": category,
+                "label": meta["label"],
+                "tone": meta["tone"],
+                "count": len(items),
+                "experts": items,
+            }
+        )
+
+    return groups
+
+
+def build_expert_stock_groups(experts: list[dict[str, Any]], *, selected_expert_id: str = "") -> list[dict[str, Any]]:
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    uncategorized: list[dict[str, Any]] = []
+
+    for expert in experts:
+        card = build_expert_card(expert, selected_expert_id=selected_expert_id)
+        symbols = sorted(
+            {
+                str(symbol).strip().upper()
+                for symbol in card.get("related_symbols", [])
+                if str(symbol).strip()
+            },
+            key=str.casefold,
+        )
+        if symbols:
+            for symbol in symbols:
+                grouped[symbol].append(card)
+        else:
+            uncategorized.append(card)
+
+    groups: list[dict[str, Any]] = []
+    for symbol in sorted(grouped.keys(), key=str.casefold):
+        items = grouped[symbol]
+        items.sort(
+            key=lambda item: (
+                int(item["stage_order"]),
+                -(coerce_sort_timestamp(item.get("latest_interview_label")) or 0),
+                -(coerce_sort_timestamp(item.get("updated_at")) or 0),
+                item["name"].casefold(),
+            )
+        )
+        groups.append(
+            {
+                "symbol": symbol,
+                "label": symbol,
+                "tone": "info",
+                "count": len(items),
+                "experts": items,
+            }
+        )
+
+    if uncategorized:
+        uncategorized.sort(
+            key=lambda item: (
+                int(item["stage_order"]),
+                -(coerce_sort_timestamp(item.get("latest_interview_label")) or 0),
+                -(coerce_sort_timestamp(item.get("updated_at")) or 0),
+                item["name"].casefold(),
+            )
+        )
+        groups.append(
+            {
+                "symbol": "",
+                "label": "未关联股票",
+                "tone": "pending",
+                "count": len(uncategorized),
+                "experts": uncategorized,
+            }
+        )
+
+    return groups
+
+
+def build_expert_stats(experts: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total_count": len(experts),
+        "active_count": sum(1 for item in experts if item.get("stage") in {"priority", "active"}),
+        "priority_count": sum(1 for item in experts if item.get("stage") == "priority"),
+        "interview_count": sum(len(item.get("interviews", [])) for item in experts),
+        "planned_interview_count": sum(
+            1
+            for item in experts
+            for interview in item.get("interviews", [])
+            if interview.get("status") == "planned"
+        ),
+        "resource_count": sum(len(item.get("resource_refs", [])) for item in experts),
+    }
+
+
+def build_experts_page_context(store: dict[str, Any], *, selected_expert_id: str = "") -> dict[str, Any]:
+    experts = list(store.get("experts", []))
+    experts.sort(
+        key=lambda item: (
+            expert_stage_order(item.get("stage")),
+            expert_category_order(item.get("category")),
+            -(coerce_sort_timestamp(item.get("updated_at")) or 0),
+            str(item.get("name") or "").casefold(),
+        )
+    )
+
+    selected_expert = next((item for item in experts if item["id"] == selected_expert_id), None)
+    if selected_expert is None and experts:
+        selected_expert = next((item for item in experts if item.get("stage") != "archived"), experts[0])
+
+    selected_card = build_expert_card(selected_expert, selected_expert_id=selected_expert["id"]) if selected_expert else None
+    selected_interviews = (
+        sorted(
+            [build_expert_interview_card(item) for item in selected_expert.get("interviews", [])],
+            key=expert_interview_sort_key,
+            reverse=True,
+        )
+        if selected_expert
+        else []
+    )
+
+    return {
+        "expert_stats": build_expert_stats(experts),
+        "expert_overview_groups": build_expert_overview_groups(
+            experts,
+            selected_expert_id=selected_expert["id"] if selected_expert else "",
+        ),
+        "expert_stock_groups": build_expert_stock_groups(
+            experts,
+            selected_expert_id=selected_expert["id"] if selected_expert else "",
+        ),
+        "selected_expert": selected_card,
+        "selected_expert_raw": selected_expert,
+        "selected_expert_interviews": selected_interviews,
+        "selected_expert_resource_groups": build_expert_resource_groups(store, selected_expert) if selected_expert else [],
+        "selected_expert_resource_catalog": build_expert_resource_catalog(store, selected_expert),
+        "expert_category_options": [
+            {"value": key, "label": meta["label"]}
+            for key, meta in sorted(EXPERT_CATEGORY_META.items(), key=lambda item: item[1]["order"])
+        ],
+        "expert_stage_options": [
+            {"value": key, "label": meta["label"]}
+            for key, meta in sorted(EXPERT_STAGE_META.items(), key=lambda item: item[1]["order"])
+        ],
+        "expert_interview_kind_options": [
+            {"value": key, "label": meta["label"]}
+            for key, meta in sorted(EXPERT_INTERVIEW_KIND_META.items(), key=lambda item: item[1]["order"])
+        ],
+        "expert_interview_status_options": [
+            {"value": key, "label": meta["label"]}
+            for key, meta in sorted(EXPERT_INTERVIEW_STATUS_META.items(), key=lambda item: item[1]["order"])
+        ],
+    }
 
 
 def build_stock_tag_summary(store: dict[str, Any], symbol: str | None = None) -> list[dict[str, Any]]:
@@ -4195,6 +5994,61 @@ def build_global_search_context(
             }
         )
 
+    for schedule_item in store.get("schedule_items", []):
+        if selected_kind and selected_kind != "schedule":
+            continue
+        tags = normalize_tag_list(schedule_item.get("tags", []))
+        symbol = str(schedule_item.get("symbol") or "")
+        search_text = " ".join(
+            [
+                symbol,
+                str(schedule_item.get("company") or ""),
+                str(schedule_item.get("title") or ""),
+                str(schedule_item.get("note") or ""),
+                str(schedule_item.get("location") or ""),
+                " ".join(tags),
+            ]
+        )
+        if normalized_symbol and symbol != normalized_symbol:
+            continue
+        if normalized_tag and not tag_match(tags, normalized_tag):
+            continue
+        if terms and not text_contains_all_terms(search_text, terms):
+            continue
+
+        schedule_date = str(schedule_item.get("scheduled_date") or "")
+        results.append(
+            {
+                "kind": "schedule",
+                "kind_label": SEARCH_KIND_META["schedule"]["label"],
+                "kind_tone": SEARCH_KIND_META["schedule"]["tone"],
+                "title": str(schedule_item.get("title") or "未命名日程"),
+                "summary": build_match_excerpt(
+                    " ".join(
+                        [
+                            str(schedule_item.get("note") or ""),
+                            str(schedule_item.get("location") or ""),
+                            str(schedule_item.get("company") or ""),
+                        ]
+                    ),
+                    terms,
+                    summarize_text_block(
+                        str(schedule_item.get("note") or "")
+                        or str(schedule_item.get("location") or "")
+                        or build_schedule_time_label(schedule_item)
+                    ),
+                ),
+                "symbol": symbol,
+                "display_time": f"{schedule_date} · {build_schedule_time_label(schedule_item)}",
+                "sort_value": schedule_item_sort_datetime(schedule_item).timestamp(),
+                "tags": tags,
+                "url": (
+                    url_for("schedule_page", month=schedule_date[:7], date=schedule_date, focus=schedule_item["id"])
+                    + f"#schedule-item-{schedule_item['id']}"
+                ),
+            }
+        )
+
     report_symbol_pattern = (
         re.compile(rf"(?<![A-Z0-9]){re.escape(normalized_symbol)}(?![A-Z0-9])", re.IGNORECASE)
         if normalized_symbol
@@ -4323,6 +6177,7 @@ def build_trash_stats(entries: list[dict[str, Any]]) -> dict[str, int]:
         "file_count": sum(1 for item in entries if item["item_type"] == "file"),
         "transcript_count": sum(1 for item in entries if item["item_type"] == "transcript"),
         "group_count": sum(1 for item in entries if item["item_type"] == "group"),
+        "schedule_item_count": sum(1 for item in entries if item["item_type"] == "schedule_item"),
         "monitor_report_count": sum(1 for item in entries if item["item_type"] == "monitor_report"),
         "signal_report_count": sum(1 for item in entries if item["item_type"] == "signal_report"),
     }
@@ -4420,6 +6275,161 @@ def get_transcript_entry(store: dict[str, Any], transcript_id: str) -> dict[str,
     abort(404)
 
 
+TRANSCRIPT_PDF_FONT_CACHE: str | None = None
+TRANSCRIPT_PDF_FONT_CANDIDATES = [
+    ("TranscriptPDFHei", Path(r"C:\Windows\Fonts\simhei.ttf")),
+    ("TranscriptPDFKai", Path(r"C:\Windows\Fonts\simkai.ttf")),
+    ("TranscriptPDFFang", Path(r"C:\Windows\Fonts\STFANGSO.TTF")),
+    ("TranscriptPDFSong", Path(r"C:\Windows\Fonts\simsunb.ttf")),
+]
+
+
+def normalize_pdf_text(value: str) -> str:
+    text = str(value or "")
+    for source in ("\u2011", "\u2012", "\u2013", "\u2014", "\u2212", "\u00a0"):
+        text = text.replace(source, "-" if source != "\u00a0" else " ")
+    return text
+
+
+def transcript_export_text(entry: dict[str, Any]) -> str:
+    transcript_text = str(entry.get("transcript_text") or "").strip()
+    if transcript_text:
+        return normalize_pdf_text(transcript_text)
+
+    transcript_html = str(entry.get("transcript_html") or "").strip()
+    if transcript_html:
+        return normalize_pdf_text(note_html_to_text(transcript_html))
+
+    return normalize_pdf_text(TRANSCRIPT_PLACEHOLDER_COPY)
+
+
+def ensure_transcript_pdf_font() -> str:
+    global TRANSCRIPT_PDF_FONT_CACHE
+
+    if TRANSCRIPT_PDF_FONT_CACHE:
+        return TRANSCRIPT_PDF_FONT_CACHE
+
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("当前环境缺少 reportlab，暂时无法导出 PDF。") from exc
+
+    for font_name, font_path in TRANSCRIPT_PDF_FONT_CANDIDATES:
+        if font_path.exists():
+            pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+            TRANSCRIPT_PDF_FONT_CACHE = font_name
+            return font_name
+
+    raise RuntimeError("当前电脑没有可用的中文字体文件，暂时无法导出 PDF。")
+
+
+def build_transcript_pdf_buffer(entry: dict[str, Any]) -> tuple[io.BytesIO, str]:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("当前环境缺少 reportlab，暂时无法导出 PDF。") from exc
+
+    font_name = ensure_transcript_pdf_font()
+    card = build_transcript_card(entry)
+    transcript_text = transcript_export_text(entry)
+    filename_stem = export_safe_name(card["display_title"], fallback=f"transcript-{entry['id']}")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=normalize_pdf_text(card["display_title"]),
+        author="股票每日分析工作台",
+    )
+
+    palette = {
+        "ink": colors.HexColor("#1f2f49"),
+        "muted": colors.HexColor("#6b7a96"),
+        "line": colors.HexColor("#dce4f4"),
+        "accent": colors.HexColor("#3563d6"),
+    }
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TranscriptPdfTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=20,
+        leading=28,
+        textColor=palette["ink"],
+        alignment=TA_LEFT,
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "TranscriptPdfMeta",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=9.6,
+        leading=14,
+        textColor=palette["muted"],
+        spaceAfter=4,
+    )
+    body_style = ParagraphStyle(
+        "TranscriptPdfBody",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=11.4,
+        leading=19,
+        textColor=palette["ink"],
+        wordWrap="CJK",
+        spaceAfter=8,
+    )
+    section_style = ParagraphStyle(
+        "TranscriptPdfSection",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=10,
+        leading=14,
+        textColor=palette["accent"],
+        spaceAfter=6,
+    )
+
+    support_lines = [
+        f"会议日期：{normalize_pdf_text(card['meeting_date_label'])}",
+        f"上传时间：{normalize_pdf_text(card['display_created_at'])}",
+        f"状态：{normalize_pdf_text(card['status_label'])}",
+    ]
+    if card.get("linked_symbols"):
+        support_lines.append(f"关联股票：{normalize_pdf_text(card['linked_symbols_label'])}")
+    if card.get("original_name"):
+        support_lines.append(f"源文件：{normalize_pdf_text(card['original_name'])}")
+
+    story: list[Any] = [
+        Paragraph(escape(normalize_pdf_text(card["display_title"])), title_style),
+        Paragraph("<br/>".join(escape(line) for line in support_lines), meta_style),
+        Spacer(1, 4),
+        HRFlowable(width="100%", thickness=0.8, color=palette["line"], spaceBefore=2, spaceAfter=10),
+        Paragraph("转录全文", section_style),
+    ]
+
+    for block in re.split(r"\n{2,}", transcript_text):
+        compact = normalize_pdf_text(block).strip()
+        if not compact:
+            continue
+        story.append(Paragraph("<br/>".join(escape(line) for line in compact.splitlines()), body_style))
+
+    if len(story) <= 5:
+        story.append(Paragraph(escape(normalize_pdf_text(TRANSCRIPT_PLACEHOLDER_COPY)), body_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer, f"{filename_stem}.pdf"
+
+
 def build_navigation_context(
     *,
     active_page: str,
@@ -4436,6 +6446,10 @@ def build_navigation_context(
         "nav_group_count": len(stock_store["groups"]),
         "nav_favorites_count": len(stock_store["favorites"]),
         "nav_transcript_count": len(stock_store.get("transcripts", [])),
+        "nav_expert_count": len(stock_store.get("experts", [])),
+        "nav_schedule_count": sum(
+            1 for item in stock_store.get("schedule_items", []) if item.get("status") == "planned"
+        ),
         "nav_trash_count": len(stock_store.get("trash", [])),
     }
 
@@ -4896,6 +6910,11 @@ def collect_ai_scope_materials(
     symbols = selected_symbols if selected_symbols else sorted(list_stock_symbols(store))
     for item_symbol in symbols:
         entry = ensure_stock_entry(store, item_symbol)
+        note_lookup = {
+            str(note.get("id") or "").strip(): note
+            for note in entry["notes"]
+            if str(note.get("id") or "").strip()
+        }
 
         if "note" in selected_kind_set:
             for note in entry["notes"]:
@@ -4937,6 +6956,8 @@ def collect_ai_scope_materials(
                 if file_id:
                     detail_url = f"{detail_url}#file-{file_id}"
                     download_url = url_for("download_stock_file", symbol=item_symbol, file_id=file_id)
+                linked_note_id = str(file_entry.get("linked_note_id") or "").strip()
+                linked_note = note_lookup.get(linked_note_id)
 
                 files.append(
                     {
@@ -4948,6 +6969,9 @@ def collect_ai_scope_materials(
                         "display_time": file_display_time(file_entry),
                         "sort_value": sort_value,
                         "tags": normalize_tag_list(file_entry.get("tags", [])),
+                        "content_text": str(linked_note.get("content_text") or "").strip() if linked_note else "",
+                        "linked_note_id": linked_note_id,
+                        "linked_note_title": str(file_entry.get("linked_note_title") or "").strip(),
                         "summary": summarize_text_block(file_entry.get("description") or file_entry.get("original_name") or ""),
                         "detail_url": detail_url,
                         "detail_label": "打开资料",
@@ -5803,6 +7827,512 @@ def load_ai_knowledge_text(bundle_path: Path) -> str:
     )
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def serialize_stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def normalize_mindmap_material_body(value: str, *, limit: int = 12_000) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("\u3000", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " ..."
+
+
+def compact_mindmap_similarity_text(value: str, *, limit: int = 1_600) -> str:
+    compact = re.sub(r"\s+", "", normalize_mindmap_material_body(value, limit=limit)).lower()
+    return compact[:limit]
+
+
+def build_mindmap_similarity_tokens(value: str) -> set[str]:
+    compact = compact_mindmap_similarity_text(value)
+    if not compact:
+        return set()
+    if len(compact) <= 3:
+        return {compact}
+    return {
+        compact[index : index + 3]
+        for index in range(min(len(compact) - 2, 360))
+        if compact[index : index + 3]
+    }
+
+
+def detect_mindmap_material_density(value: str) -> float:
+    text = normalize_mindmap_material_body(value, limit=4_000)
+    if not text:
+        return 0.0
+    meaningful_chunks = [
+        chunk
+        for chunk in re.split(r"[。！？!?\n；;]+", text)
+        if len(re.sub(r"\s+", "", chunk)) >= 12
+    ]
+    unique_chars = len(set(re.sub(r"\s+", "", text[:800])))
+    chunk_score = min(len(meaningful_chunks), 8) / 8
+    unique_score = min(unique_chars, 220) / 220
+    return round((chunk_score * 0.55) + (unique_score * 0.45), 4)
+
+
+def build_mindmap_material_items(materials: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+
+    for report in materials.get("reports", []):
+        filename = str(report.get("filename") or "").strip()
+        if not filename:
+            continue
+        report_path = REPORTS_DIR / filename
+        try:
+            report_text = read_report_text(report_path)
+        except OSError:
+            report_text = ""
+        body_text = normalize_mindmap_material_body(report_text, limit=9_000)
+        summary = re.sub(r"\s+", " ", str(report.get("summary") or "").strip())[:320]
+        items.append(
+            {
+                "source_key": f"report:{filename}",
+                "kind": "report",
+                "kind_label": "日报",
+                "title": str(report.get("title") or filename).strip()[:160],
+                "summary": summary,
+                "body_text": body_text,
+                "activity_date": normalize_date_field(report.get("activity_date")) or "",
+                "display_time": str(report.get("report_date") or "").strip(),
+                "sort_value": float(report.get("sort_value") or 0),
+                "symbols": normalize_stock_symbol_list(report.get("matched_symbols", []))[:10],
+                "detail_url": str(report.get("detail_url") or "").strip(),
+            }
+        )
+
+    for note in materials.get("notes", []):
+        note_id = str(note.get("id") or "").strip()
+        symbol = str(note.get("symbol") or "").strip().upper()
+        body_text = normalize_mindmap_material_body(note.get("content_text") or "", limit=7_000)
+        items.append(
+            {
+                "source_key": f"note:{symbol}:{note_id or sha256_text(str(note.get('created_at') or ''))[:8]}",
+                "kind": "note",
+                "kind_label": "笔记",
+                "title": str(note.get("title") or "未命名笔记").strip()[:160],
+                "summary": re.sub(r"\s+", " ", str(note.get("summary") or "").strip())[:320],
+                "body_text": body_text,
+                "activity_date": normalize_date_field(note.get("activity_date")) or "",
+                "display_time": str(note.get("display_time") or "").strip(),
+                "sort_value": float(note.get("sort_value") or 0),
+                "symbols": normalize_stock_symbol_list([symbol])[:10],
+                "detail_url": str(note.get("detail_url") or "").strip(),
+            }
+        )
+
+    for file_entry in materials.get("files", []):
+        file_id = str(file_entry.get("id") or "").strip()
+        symbol = str(file_entry.get("symbol") or "").strip().upper()
+        linked_note_text = str(file_entry.get("content_text") or "").strip()
+        description = str(file_entry.get("description") or "").strip()
+        body_text = linked_note_text or description or str(file_entry.get("title") or "")
+        items.append(
+            {
+                "source_key": f"file:{symbol}:{file_id or sha256_text(str(file_entry.get('uploaded_at') or ''))[:8]}",
+                "kind": "file",
+                "kind_label": "文件",
+                "title": str(file_entry.get("title") or "已上传文件").strip()[:160],
+                "summary": re.sub(r"\s+", " ", str(file_entry.get("summary") or description).strip())[:320],
+                "body_text": normalize_mindmap_material_body(body_text, limit=6_000),
+                "activity_date": normalize_date_field(file_entry.get("activity_date")) or "",
+                "display_time": str(file_entry.get("display_time") or "").strip(),
+                "sort_value": float(file_entry.get("sort_value") or 0),
+                "symbols": normalize_stock_symbol_list([symbol])[:10],
+                "detail_url": str(file_entry.get("detail_url") or "").strip(),
+            }
+        )
+
+    for transcript in materials.get("transcripts", []):
+        transcript_id = str(transcript.get("id") or "").strip()
+        symbols = normalize_stock_symbol_list(transcript.get("linked_symbols", []))[:10]
+        items.append(
+            {
+                "source_key": f"transcript:{transcript_id or sha256_text(str(transcript.get('created_at') or ''))[:8]}",
+                "kind": "transcript",
+                "kind_label": "转录",
+                "title": str(transcript.get("title") or "会议转录").strip()[:160],
+                "summary": re.sub(r"\s+", " ", str(transcript.get("summary") or "").strip())[:320],
+                "body_text": normalize_mindmap_material_body(transcript.get("transcript_text") or "", limit=10_000),
+                "activity_date": normalize_date_field(transcript.get("activity_date")) or "",
+                "display_time": str(transcript.get("display_time") or "").strip(),
+                "sort_value": float(transcript.get("sort_value") or 0),
+                "symbols": symbols,
+                "detail_url": str(transcript.get("detail_url") or "").strip(),
+            }
+        )
+
+    return items
+
+
+def score_mindmap_material(item: dict[str, Any], *, latest_sort_value: float) -> dict[str, Any]:
+    combined_text = " ".join(
+        value
+        for value in [
+            item.get("title"),
+            item.get("summary"),
+            item.get("body_text"),
+        ]
+        if str(value or "").strip()
+    )
+    normalized_text = normalize_mindmap_material_body(combined_text, limit=10_000)
+    evidence_hits = len({match.lower() for match in MINDMAP_EVIDENCE_HINT_PATTERN.findall(normalized_text[:3_600])})
+    lowered = normalized_text.casefold()
+    conflict_hits = sum(1 for token in MINDMAP_CONFLICT_HINTS if token in lowered)
+    density_score = detect_mindmap_material_density(normalized_text)
+    recency_boost = 0.0
+    if latest_sort_value > 0 and float(item.get("sort_value") or 0) > 0:
+        age_days = max(0.0, (latest_sort_value - float(item.get("sort_value") or 0)) / 86_400)
+        recency_boost = max(0.0, 1 - (age_days / max(MINDMAP_RECENT_WINDOW_DAYS, 1))) * 0.42
+    evidence_boost = min(evidence_hits, 4) * 0.18
+    conflict_boost = min(conflict_hits, 3) * 0.22
+    base_priority = float(MINDMAP_KIND_PRIORITY.get(str(item.get("kind") or ""), 0.8))
+    low_signal_penalty = 0.38 if density_score < 0.16 and evidence_hits == 0 and conflict_hits == 0 else 0.0
+    priority_score = round(
+        base_priority + density_score + recency_boost + evidence_boost + conflict_boost - low_signal_penalty,
+        4,
+    )
+    return {
+        **item,
+        "normalized_text": normalized_text,
+        "similarity_tokens": build_mindmap_similarity_tokens(normalized_text),
+        "content_digest": sha256_text(normalized_text[:6_000]),
+        "density_score": density_score,
+        "evidence_hits": evidence_hits,
+        "conflict_hits": conflict_hits,
+        "recency_boost": round(recency_boost, 4),
+        "evidence_boost": round(evidence_boost, 4),
+        "conflict_boost": round(conflict_boost, 4),
+        "priority_score": priority_score,
+    }
+
+
+def mindmap_material_is_low_signal(item: dict[str, Any]) -> bool:
+    body_length = len(str(item.get("normalized_text") or ""))
+    summary_length = len(str(item.get("summary") or ""))
+    if body_length >= 90 or summary_length >= 60:
+        return False
+    if int(item.get("evidence_hits") or 0) > 0 or int(item.get("conflict_hits") or 0) > 0:
+        return False
+    return float(item.get("density_score") or 0) < 0.18
+
+
+def compute_mindmap_material_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    if left.get("content_digest") == right.get("content_digest"):
+        return 1.0
+    left_tokens = left.get("similarity_tokens") or set()
+    right_tokens = right.get("similarity_tokens") or set()
+    if not left_tokens or not right_tokens:
+        return 0.0
+    intersection = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def mindmap_material_duplicate_reason(candidate: dict[str, Any], keeper: dict[str, Any]) -> str | None:
+    if candidate.get("content_digest") == keeper.get("content_digest"):
+        return "exact"
+    similarity = compute_mindmap_material_similarity(candidate, keeper)
+    same_kind = str(candidate.get("kind") or "") == str(keeper.get("kind") or "")
+    symbol_overlap = set(candidate.get("symbols") or []) & set(keeper.get("symbols") or [])
+    if similarity >= 0.92 and (same_kind or symbol_overlap):
+        return "near_duplicate"
+    candidate_summary = re.sub(r"\s+", " ", str(candidate.get("summary") or "").strip())
+    keeper_summary = re.sub(r"\s+", " ", str(keeper.get("summary") or "").strip())
+    if candidate_summary and candidate_summary == keeper_summary and (same_kind or symbol_overlap):
+        return "same_view"
+    return None
+
+
+def curate_mindmap_materials(materials: dict[str, Any]) -> dict[str, Any]:
+    raw_items = build_mindmap_material_items(materials)
+    latest_sort_value = max((float(item.get("sort_value") or 0) for item in raw_items), default=0.0)
+    scored_items = [
+        score_mindmap_material(item, latest_sort_value=latest_sort_value)
+        for item in raw_items
+    ]
+    scored_items.sort(
+        key=lambda item: (
+            float(item.get("priority_score") or 0),
+            float(item.get("sort_value") or 0),
+            str(item.get("title") or ""),
+        ),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    compressed_pairs: list[dict[str, str]] = []
+    dropped_low_signal: list[dict[str, Any]] = []
+    unselected_overflow: list[dict[str, Any]] = []
+
+    for item in scored_items:
+        if mindmap_material_is_low_signal(item):
+            dropped_low_signal.append(item)
+            continue
+        duplicate_reason = next(
+            (
+                reason
+                for keeper in selected
+                if (reason := mindmap_material_duplicate_reason(item, keeper)) is not None
+            ),
+            None,
+        )
+        if duplicate_reason is not None:
+            keeper = next(
+                keeper for keeper in selected if mindmap_material_duplicate_reason(item, keeper) is not None
+            )
+            keeper.setdefault("compressed_duplicates", []).append(
+                {
+                    "source_key": str(item.get("source_key") or ""),
+                    "title": str(item.get("title") or ""),
+                    "kind_label": str(item.get("kind_label") or ""),
+                    "activity_date": str(item.get("activity_date") or ""),
+                    "reason": duplicate_reason,
+                }
+            )
+            compressed_pairs.append(
+                {
+                    "source_key": str(item.get("source_key") or ""),
+                    "keeper_source_key": str(keeper.get("source_key") or ""),
+                    "reason": duplicate_reason,
+                }
+            )
+            continue
+        if len(selected) >= MINDMAP_MAX_CURATED_SOURCES:
+            unselected_overflow.append(item)
+            continue
+        selected.append(item)
+
+    for index, item in enumerate(selected, start=1):
+        item["source_ref"] = f"M{index:02d}"
+        flags: list[str] = []
+        if float(item.get("recency_boost") or 0) >= 0.12:
+            flags.append("recent")
+        if float(item.get("evidence_boost") or 0) >= 0.18:
+            flags.append("strong_evidence")
+        if float(item.get("conflict_boost") or 0) >= 0.22:
+            flags.append("conflict")
+        if float(item.get("density_score") or 0) >= 0.55:
+            flags.append("dense")
+        item["weight_flags"] = flags
+
+    selected_manifest = [
+        {
+            "source_ref": item.get("source_ref"),
+            "source_key": item.get("source_key"),
+            "kind": item.get("kind"),
+            "title": item.get("title"),
+            "activity_date": item.get("activity_date"),
+            "symbols": item.get("symbols", []),
+            "weight_flags": item.get("weight_flags", []),
+            "priority_score": item.get("priority_score"),
+        }
+        for item in selected
+    ]
+    raw_manifest = [
+        {
+            "source_key": item.get("source_key"),
+            "kind": item.get("kind"),
+            "title": item.get("title"),
+            "activity_date": item.get("activity_date"),
+            "content_digest": item.get("content_digest"),
+        }
+        for item in scored_items
+    ]
+    return {
+        "items": selected,
+        "all_items": scored_items,
+        "compressed_pairs": compressed_pairs,
+        "dropped_low_signal": dropped_low_signal,
+        "overflow_items": unselected_overflow,
+        "raw_manifest": raw_manifest,
+        "selected_manifest": selected_manifest,
+        "selected_ref_set": {str(item.get("source_ref") or "") for item in selected if item.get("source_ref")},
+        "stats": {
+            "raw_material_count": len(raw_items),
+            "selected_material_count": len(selected),
+            "duplicate_compressed_count": len(compressed_pairs),
+            "low_signal_dropped_count": len(dropped_low_signal),
+            "overflow_count": len(unselected_overflow),
+            "recent_boosted_count": sum(1 for item in selected if "recent" in item.get("weight_flags", [])),
+            "strong_evidence_boosted_count": sum(1 for item in selected if "strong_evidence" in item.get("weight_flags", [])),
+            "conflict_boosted_count": sum(1 for item in selected if "conflict" in item.get("weight_flags", [])),
+        },
+    }
+
+
+def build_mindmap_weight_flag_labels(flags: list[str]) -> list[str]:
+    mapping = {
+        "recent": "近期资料",
+        "strong_evidence": "强证据",
+        "conflict": "存在冲突/对冲",
+        "dense": "信息密度高",
+    }
+    return [mapping[item] for item in flags if item in mapping]
+
+
+def build_mindmap_research_bundle(
+    record_id: str,
+    *,
+    scope_summary: dict[str, Any],
+    materials: dict[str, Any],
+    curated: dict[str, Any],
+) -> Path:
+    bundle_path = MINDMAP_CONTEXT_DIR / f"{record_id}-research-bundle.md"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    stats = curated.get("stats", {})
+    selected_items = curated.get("items", [])
+    timeline_items = sorted(
+        selected_items,
+        key=lambda item: (str(item.get("activity_date") or ""), float(item.get("sort_value") or 0)),
+    )
+
+    lines = [
+        "# 研究导图知识包",
+        "",
+        "这份文件由网页后端自动生成，供研究导图的两步式结构化整理使用。",
+        "",
+        "## 当前范围",
+        f"- 生成时间: {now_iso()}",
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}",
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}",
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}",
+        f"- 原始资料数: {stats.get('raw_material_count', 0)}",
+        f"- 入选资料数: {stats.get('selected_material_count', 0)}",
+        f"- 压缩重复资料: {stats.get('duplicate_compressed_count', 0)}",
+        f"- 丢弃低信息资料: {stats.get('low_signal_dropped_count', 0)}",
+        "",
+        "## 生成侧重点",
+        "- 导图必须同时表达主题结构、资料互补/冲突关系和时间演化。",
+        "- 已对重复观点、重复转录和低信息密度资料做过压缩；模型应优先参考入选资料，不要把重复内容当成额外证据。",
+        "- 已提高近期资料、强证据资料、存在冲突/对冲资料的权重；最终结论仍需按证据强弱决定。",
+        "",
+    ]
+
+    if timeline_items:
+        lines.append("## 按时间排序的入选资料")
+        for item in timeline_items:
+            symbol_label = " / ".join(item.get("symbols", [])) or "未限定股票"
+            lines.extend(
+                [
+                    f"- {item.get('activity_date') or '无日期'} | {item['source_ref']} | {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'}",
+                    f"  股票: {symbol_label}",
+                ]
+            )
+        lines.append("")
+
+    if selected_items:
+        lines.append("## 入选资料正文")
+        for item in selected_items:
+            flag_labels = build_mindmap_weight_flag_labels(item.get("weight_flags", []))
+            excerpt = trim_note_content(str(item.get("normalized_text") or ""), limit=1_300)
+            lines.extend(
+                [
+                    f"### {item['source_ref']} | {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'}",
+                    f"- source_key: {item.get('source_key') or ''}",
+                    f"- 日期: {item.get('activity_date') or item.get('display_time') or '无'}",
+                    f"- 股票: {' / '.join(item.get('symbols', [])) or '未限定'}",
+                    f"- 权重标签: {'；'.join(flag_labels) or '常规'}",
+                    f"- 摘要: {item.get('summary') or '无'}",
+                    "",
+                    excerpt or "（正文为空）",
+                    "",
+                ]
+            )
+            duplicates = item.get("compressed_duplicates", [])
+            if duplicates:
+                lines.append("合并的近似资料：")
+                for duplicate in duplicates[:6]:
+                    lines.append(
+                        f"- {duplicate.get('kind_label') or '资料'} | {duplicate.get('title') or '未命名'} | "
+                        f"{duplicate.get('activity_date') or '无日期'} | 原因: {duplicate.get('reason') or '近似重复'}"
+                    )
+                lines.append("")
+    else:
+        lines.extend(["## 入选资料正文", "- 当前没有足够资料进入导图生成。", ""])
+
+    if curated.get("dropped_low_signal"):
+        lines.append("## 已压缩的低信息资料")
+        for item in curated.get("dropped_low_signal", [])[:12]:
+            lines.append(
+                f"- {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'} | "
+                f"{item.get('activity_date') or '无日期'}"
+            )
+        lines.append("")
+
+    bundle_path.write_text("\n".join(lines), encoding="utf-8")
+    return bundle_path
+
+
+def build_mindmap_reproducibility_fingerprint(
+    *,
+    scope_settings: dict[str, Any],
+    scope_summary: dict[str, Any],
+    materials: dict[str, Any],
+    curated: dict[str, Any],
+    knowledge_text: str,
+    bundle_path: Path,
+) -> dict[str, Any]:
+    stats = curated.get("stats", {})
+    selected_sources = curated.get("selected_manifest", [])[:36]
+    return {
+        "generated_at": now_iso(),
+        "pipeline_version": MINDMAP_PIPELINE_VERSION,
+        "prompt_version": MINDMAP_PROMPT_VERSION,
+        "schema_version": MINDMAP_SCHEMA_VERSION,
+        "bundle_name": bundle_path.name,
+        "scope_digest": sha256_text(serialize_stable_json(scope_settings)),
+        "scope_summary_digest": sha256_text(serialize_stable_json(scope_summary)),
+        "material_digest": sha256_text(serialize_stable_json(curated.get("raw_manifest", []))),
+        "knowledge_digest": sha256_text(knowledge_text),
+        "raw_material_count": int(stats.get("raw_material_count") or 0),
+        "selected_material_count": int(stats.get("selected_material_count") or 0),
+        "duplicate_compressed_count": int(stats.get("duplicate_compressed_count") or 0),
+        "low_signal_dropped_count": int(stats.get("low_signal_dropped_count") or 0),
+        "recent_boosted_count": int(stats.get("recent_boosted_count") or 0),
+        "strong_evidence_boosted_count": int(stats.get("strong_evidence_boosted_count") or 0),
+        "conflict_boosted_count": int(stats.get("conflict_boosted_count") or 0),
+        "selected_sources": selected_sources,
+        "validation": {
+            "warnings": [],
+            "errors": [],
+            "repair_attempted": False,
+        },
+        "plan_digest": "",
+        "final_digest": "",
+        "material_selection_digest": sha256_text(serialize_stable_json(selected_sources)),
+        "material_mix": {
+            "report_count": int(materials.get("report_count") or 0),
+            "note_count": int(materials.get("note_count") or 0),
+            "file_count": int(materials.get("file_count") or 0),
+            "transcript_count": int(materials.get("transcript_count") or 0),
+        },
+    }
+
+
+def build_mindmap_selected_source_roster_lines(selected_sources: list[dict[str, Any]]) -> str:
+    if not selected_sources:
+        return "- 当前没有入选来源引用。"
+    return "\n".join(
+        (
+            f"- {str(source.get('source_ref') or '').strip()}: "
+            f"{str(source.get('kind') or '').strip() or 'source'} | "
+            f"{str(source.get('activity_date') or '').strip() or '无日期'} | "
+            f"{str(source.get('title') or '').strip() or '未命名'} | "
+            f"标签: {'/'.join(source.get('weight_flags', [])) or '常规'}"
+        )
+        for source in selected_sources
+    )
+
+
 def build_ai_codex_prompt(
     *,
     session: dict[str, Any],
@@ -6139,6 +8669,2046 @@ def build_ai_page_context(
         "default_export_symbol": stock_options[0]["symbol"] if stock_options else "",
         "current_ai_url": url_for("ai_workspace", session=active_session["id"]) if active_session else url_for("ai_workspace"),
     }
+
+
+def normalize_mindmap_scope_summary(raw_summary: Any) -> dict[str, Any]:
+    source = raw_summary if isinstance(raw_summary, dict) else {}
+    metrics: list[dict[str, Any]] = []
+    for raw_metric in source.get("metrics", []) if isinstance(source.get("metrics"), list) else []:
+        if not isinstance(raw_metric, dict):
+            continue
+        label = str(raw_metric.get("label") or "").strip()[:20]
+        if not label:
+            continue
+        try:
+            value = max(0, int(raw_metric.get("value") or 0))
+        except (TypeError, ValueError):
+            value = 0
+        metrics.append({"label": label, "value": value})
+
+    return {
+        "headline": str(source.get("headline") or "").strip()[:120],
+        "description": str(source.get("description") or "").strip()[:240],
+        "stock_label": str(source.get("stock_label") or "").strip()[:240],
+        "time_label": str(source.get("time_label") or "").strip()[:120],
+        "content_label": str(source.get("content_label") or "").strip()[:120],
+        "has_filters": bool(source.get("has_filters")),
+        "metrics": metrics,
+    }
+
+
+def build_mindmap_seed_title(scope_settings: dict[str, Any]) -> str:
+    symbols = normalize_stock_symbol_list(scope_settings.get("symbols"))
+    if symbols:
+        label = " / ".join(symbols[:3])
+        if len(symbols) > 3:
+            label += " 等"
+    else:
+        label = "全站资料"
+
+    if scope_settings.get("use_date_scope") and scope_settings.get("start_date") and scope_settings.get("end_date"):
+        if scope_settings["start_date"] == scope_settings["end_date"]:
+            return f"{label} {scope_settings['start_date']} 导图"
+        return f"{label} {scope_settings['start_date']} 至 {scope_settings['end_date']} 导图"
+
+    return f"{label} 研究导图"
+
+
+def normalize_mindmap_source_refs(raw_items: Any, *, limit: int = 6, valid_source_refs: set[str] | None = None) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items if isinstance(raw_items, list) else []:
+        ref = re.sub(r"[^A-Za-z0-9:-]+", "", str(raw_item or "").strip()).upper()[:24]
+        if not ref or ref in seen:
+            continue
+        if valid_source_refs is not None and ref not in valid_source_refs:
+            continue
+        seen.add(ref)
+        refs.append(ref)
+    return refs[:limit]
+
+
+def normalize_mindmap_confidence(raw_value: Any) -> str:
+    value = str(raw_value or "").strip().lower()
+    if value in {"low", "medium", "high"}:
+        return value
+    return "medium"
+
+
+def normalize_mindmap_node(
+    raw_node: Any,
+    *,
+    existing_ids: set[str],
+    depth: int = 0,
+    valid_source_refs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(raw_node, dict) or depth > 4:
+        return None
+
+    label = re.sub(r"\s+", " ", str(raw_node.get("label") or "").strip())[:80]
+    if not label:
+        return None
+
+    node_id = ensure_unique_id(str(raw_node.get("id") or "").strip(), existing_ids, length=8)
+    existing_ids.add(node_id)
+    summary = re.sub(r"\s+", " ", str(raw_node.get("summary") or "").strip())[:280]
+    raw_evidence = raw_node.get("evidence", [])
+    evidence = []
+    for raw_item in raw_evidence if isinstance(raw_evidence, list) else []:
+        item = re.sub(r"\s+", " ", str(raw_item or "").strip())[:180]
+        if item:
+            evidence.append(item)
+    raw_time_signals = raw_node.get("time_signals", [])
+    time_signals = []
+    for raw_item in raw_time_signals if isinstance(raw_time_signals, list) else []:
+        item = re.sub(r"\s+", " ", str(raw_item or "").strip())[:180]
+        if item:
+            time_signals.append(item)
+    raw_source_notes = raw_node.get("source_notes", [])
+    source_notes = []
+    for raw_item in raw_source_notes if isinstance(raw_source_notes, list) else []:
+        item = re.sub(r"\s+", " ", str(raw_item or "").strip())[:180]
+        if item:
+            source_notes.append(item)
+    raw_children = raw_node.get("children", [])
+    children = [
+        child
+        for raw_child in raw_children[:8] if isinstance(raw_children, list)
+        if (
+            child := normalize_mindmap_node(
+                raw_child,
+                existing_ids=existing_ids,
+                depth=depth + 1,
+                valid_source_refs=valid_source_refs,
+            )
+        ) is not None
+    ]
+
+    return {
+        "id": node_id,
+        "label": label,
+        "kind": str(raw_node.get("kind") or "topic").strip().lower()[:30] or "topic",
+        "summary": summary,
+        "evidence": evidence[:3],
+        "time_signals": time_signals[:3],
+        "source_notes": source_notes[:3],
+        "confidence": normalize_mindmap_confidence(raw_node.get("confidence")),
+        "source_refs": normalize_mindmap_source_refs(
+            raw_node.get("source_refs"),
+            valid_source_refs=valid_source_refs,
+        ),
+        "symbols": normalize_stock_symbol_list(raw_node.get("symbols", []))[:8],
+        "children": children,
+    }
+
+
+def count_mindmap_nodes(node: dict[str, Any]) -> int:
+    return 1 + sum(count_mindmap_nodes(child) for child in node.get("children", []))
+
+
+def compute_mindmap_depth(node: dict[str, Any]) -> int:
+    children = node.get("children", [])
+    if not children:
+        return 1
+    return 1 + max(compute_mindmap_depth(child) for child in children)
+
+
+def collect_mindmap_node_ids(node: dict[str, Any]) -> set[str]:
+    ids = {str(node.get("id") or "")}
+    for child in node.get("children", []):
+        ids.update(collect_mindmap_node_ids(child))
+    ids.discard("")
+    return ids
+
+
+def build_mindmap_outline_lines(node: dict[str, Any], *, depth: int = 0) -> list[str]:
+    indent = "  " * depth
+    summary = str(node.get("summary") or "").strip()
+    line = f"{indent}- {node['label']}"
+    if summary:
+        line += f": {summary}"
+    lines = [line]
+    for child in node.get("children", []):
+        lines.extend(build_mindmap_outline_lines(child, depth=depth + 1))
+    return lines
+
+
+def build_mindmap_outline_markdown(root: dict[str, Any]) -> str:
+    return "\n".join(build_mindmap_outline_lines(root))
+
+
+def normalize_mindmap_cross_links(raw_links: Any, *, node_ids: set[str]) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    raw_items = raw_links if isinstance(raw_links, list) else []
+    for raw_link in raw_items[:8]:
+        if not isinstance(raw_link, dict):
+            continue
+        from_id = str(raw_link.get("from") or "").strip()
+        to_id = str(raw_link.get("to") or "").strip()
+        label = re.sub(r"\s+", " ", str(raw_link.get("label") or "").strip())[:40]
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        if from_id not in node_ids or to_id not in node_ids:
+            continue
+        links.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "label": label or "关联",
+            }
+        )
+    return links
+
+
+def normalize_mindmap_timeline(
+    raw_items: Any,
+    *,
+    valid_source_refs: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    for raw_item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(raw_item, dict):
+            continue
+        date_value = str(raw_item.get("date") or "").strip()[:40]
+        label = re.sub(r"\s+", " ", str(raw_item.get("label") or "").strip())[:80]
+        summary = re.sub(r"\s+", " ", str(raw_item.get("summary") or "").strip())[:220]
+        if not label:
+            continue
+        date_type = str(raw_item.get("date_type") or "").strip().lower()
+        if date_type not in {"event", "published", "meeting", "inferred"}:
+            date_type = "event"
+        phase = str(raw_item.get("phase") or "").strip().lower()
+        if phase not in {"earliest", "mid", "latest"}:
+            phase = ""
+        timeline.append(
+            {
+                "date": date_value,
+                "label": label,
+                "summary": summary,
+                "date_type": date_type,
+                "phase": phase,
+                "source_refs": normalize_mindmap_source_refs(
+                    raw_item.get("source_refs"),
+                    valid_source_refs=valid_source_refs,
+                ),
+            }
+        )
+    return timeline[:6]
+
+
+def normalize_mindmap_source_relations(
+    raw_items: Any,
+    *,
+    valid_source_refs: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    relations: list[dict[str, Any]] = []
+    for raw_item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(raw_item, dict):
+            continue
+        label = re.sub(r"\s+", " ", str(raw_item.get("label") or "").strip())[:40]
+        source_from = re.sub(r"\s+", " ", str(raw_item.get("from") or "").strip())[:40]
+        source_to = re.sub(r"\s+", " ", str(raw_item.get("to") or "").strip())[:40]
+        summary = re.sub(r"\s+", " ", str(raw_item.get("summary") or "").strip())[:220]
+        if not label or not source_from or not source_to:
+            continue
+        relations.append(
+            {
+                "label": label,
+                "from": source_from,
+                "to": source_to,
+                "summary": summary,
+                "source_refs": normalize_mindmap_source_refs(
+                    raw_item.get("source_refs"),
+                    valid_source_refs=valid_source_refs,
+                ),
+            }
+        )
+    return relations[:8]
+
+
+def normalize_mindmap_payload(
+    raw_payload: Any,
+    *,
+    valid_source_refs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(raw_payload, dict):
+        return None
+
+    existing_ids: set[str] = set()
+    root = normalize_mindmap_node(
+        raw_payload.get("root"),
+        existing_ids=existing_ids,
+        valid_source_refs=valid_source_refs,
+    )
+    if root is None:
+        return None
+
+    node_ids = collect_mindmap_node_ids(root)
+    structure_kind = str(raw_payload.get("structure_kind") or "").strip().lower()
+    if structure_kind not in MINDMAP_STRUCTURE_KIND_META:
+        structure_kind = "theme_bundle"
+
+    title = re.sub(r"\s+", " ", str(raw_payload.get("title") or "").strip())[:120] or root["label"]
+    summary = re.sub(r"\s+", " ", str(raw_payload.get("summary") or "").strip())[:600]
+    raw_insights = raw_payload.get("insights", [])
+    insights = [
+        item
+        for raw_item in raw_insights if isinstance(raw_insights, list)
+        if (item := re.sub(r"\s+", " ", str(raw_item or "").strip())[:180])
+    ][:6]
+    timeline = normalize_mindmap_timeline(
+        raw_payload.get("timeline_highlights"),
+        valid_source_refs=valid_source_refs,
+    )
+    source_relations = normalize_mindmap_source_relations(
+        raw_payload.get("source_relations"),
+        valid_source_refs=valid_source_refs,
+    )
+    cross_links = normalize_mindmap_cross_links(raw_payload.get("cross_links"), node_ids=node_ids)
+
+    return {
+        "title": title,
+        "summary": summary,
+        "structure_kind": structure_kind,
+        "root": root,
+        "cross_links": cross_links,
+        "insights": insights,
+        "timeline_highlights": timeline,
+        "source_relations": source_relations,
+        "node_count": count_mindmap_nodes(root),
+        "max_depth": compute_mindmap_depth(root),
+        "outline_markdown": build_mindmap_outline_markdown(root),
+    }
+
+
+def normalize_mindmap_fingerprint(raw_fingerprint: Any) -> dict[str, Any]:
+    source = raw_fingerprint if isinstance(raw_fingerprint, dict) else {}
+    selected_sources: list[dict[str, Any]] = []
+    raw_sources = source.get("selected_sources", [])
+    for raw_source in raw_sources if isinstance(raw_sources, list) else []:
+        if not isinstance(raw_source, dict):
+            continue
+        source_ref = re.sub(r"[^A-Za-z0-9:-]+", "", str(raw_source.get("source_ref") or "").strip()).upper()[:24]
+        if not source_ref:
+            continue
+        raw_weight_flags = raw_source.get("weight_flags", [])
+        raw_weight_flags_list = raw_weight_flags if isinstance(raw_weight_flags, list) else []
+        selected_sources.append(
+            {
+                "source_ref": source_ref,
+                "source_key": str(raw_source.get("source_key") or "").strip()[:160],
+                "kind": str(raw_source.get("kind") or "").strip()[:20],
+                "title": re.sub(r"\s+", " ", str(raw_source.get("title") or "").strip())[:180],
+                "activity_date": str(raw_source.get("activity_date") or "").strip()[:40],
+                "symbols": normalize_stock_symbol_list(raw_source.get("symbols", []))[:12],
+                "weight_flags": [
+                    str(item).strip()[:24]
+                    for item in raw_weight_flags_list
+                    if str(item).strip()[:24]
+                ][:6],
+                "priority_score": float(raw_source.get("priority_score") or 0),
+            }
+        )
+
+    validation_source = source.get("validation") if isinstance(source.get("validation"), dict) else {}
+    raw_warnings = validation_source.get("warnings", [])
+    raw_errors = validation_source.get("errors", [])
+    raw_warnings_list = raw_warnings if isinstance(raw_warnings, list) else []
+    raw_errors_list = raw_errors if isinstance(raw_errors, list) else []
+    validation = {
+        "warnings": [
+            re.sub(r"\s+", " ", str(item or "").strip())[:240]
+            for item in raw_warnings_list
+            if re.sub(r"\s+", " ", str(item or "").strip())[:240]
+        ][:16],
+        "errors": [
+            re.sub(r"\s+", " ", str(item or "").strip())[:240]
+            for item in raw_errors_list
+            if re.sub(r"\s+", " ", str(item or "").strip())[:240]
+        ][:16],
+        "repair_attempted": bool(validation_source.get("repair_attempted")),
+    }
+    material_mix_source = source.get("material_mix") if isinstance(source.get("material_mix"), dict) else {}
+    return {
+        "generated_at": str(source.get("generated_at") or "").strip()[:40],
+        "pipeline_version": str(source.get("pipeline_version") or "").strip()[:80],
+        "prompt_version": str(source.get("prompt_version") or "").strip()[:80],
+        "schema_version": str(source.get("schema_version") or "").strip()[:80],
+        "bundle_name": str(source.get("bundle_name") or "").strip()[:160],
+        "scope_digest": str(source.get("scope_digest") or "").strip()[:80],
+        "scope_summary_digest": str(source.get("scope_summary_digest") or "").strip()[:80],
+        "material_digest": str(source.get("material_digest") or "").strip()[:80],
+        "knowledge_digest": str(source.get("knowledge_digest") or "").strip()[:80],
+        "material_selection_digest": str(source.get("material_selection_digest") or "").strip()[:80],
+        "plan_digest": str(source.get("plan_digest") or "").strip()[:80],
+        "final_digest": str(source.get("final_digest") or "").strip()[:80],
+        "raw_material_count": max(0, int(source.get("raw_material_count") or 0)),
+        "selected_material_count": max(0, int(source.get("selected_material_count") or 0)),
+        "duplicate_compressed_count": max(0, int(source.get("duplicate_compressed_count") or 0)),
+        "low_signal_dropped_count": max(0, int(source.get("low_signal_dropped_count") or 0)),
+        "recent_boosted_count": max(0, int(source.get("recent_boosted_count") or 0)),
+        "strong_evidence_boosted_count": max(0, int(source.get("strong_evidence_boosted_count") or 0)),
+        "conflict_boosted_count": max(0, int(source.get("conflict_boosted_count") or 0)),
+        "selected_sources": selected_sources,
+        "validation": validation,
+        "material_mix": {
+            "report_count": max(0, int(material_mix_source.get("report_count") or 0)),
+            "note_count": max(0, int(material_mix_source.get("note_count") or 0)),
+            "file_count": max(0, int(material_mix_source.get("file_count") or 0)),
+            "transcript_count": max(0, int(material_mix_source.get("transcript_count") or 0)),
+        },
+    }
+
+
+def normalize_mindmap_record(raw_record: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_record, dict):
+        return None
+
+    record_id = str(raw_record.get("id") or uuid.uuid4().hex[:12]).strip()
+    if not record_id:
+        return None
+
+    try:
+        scope_settings = normalize_ai_scope_settings(raw_record.get("scope_settings", {}))
+    except ValueError:
+        scope_settings = normalize_ai_scope_settings({})
+
+    map_payload = normalize_mindmap_payload(raw_record.get("map_payload"))
+    status = str(raw_record.get("status") or "completed").strip().lower()
+    if status not in MINDMAP_STATUS_META:
+        status = "completed" if map_payload else "pending"
+
+    title = re.sub(r"\s+", " ", str(raw_record.get("title") or "").strip())[:120]
+    if not title:
+        title = map_payload["title"] if map_payload else build_mindmap_seed_title(scope_settings)
+
+    scope_summary = normalize_mindmap_scope_summary(raw_record.get("scope_summary"))
+    fingerprint = normalize_mindmap_fingerprint(raw_record.get("fingerprint"))
+    summary = re.sub(r"\s+", " ", str(raw_record.get("summary") or "").strip())[:600]
+    if not summary and map_payload:
+        summary = map_payload["summary"]
+
+    return {
+        "id": record_id,
+        "title": title,
+        "created_at": str(raw_record.get("created_at") or now_iso()),
+        "updated_at": str(raw_record.get("updated_at") or now_iso()),
+        "status": status,
+        "error": str(raw_record.get("error") or "").strip()[:600],
+        "model": str(raw_record.get("model") or "").strip()[:80],
+        "reasoning_effort": str(raw_record.get("reasoning_effort") or "").strip()[:20],
+        "scope_settings": scope_settings,
+        "scope_summary": scope_summary,
+        "fingerprint": fingerprint,
+        "summary": summary,
+        "map_payload": map_payload,
+        "structure_kind": map_payload["structure_kind"] if map_payload else "",
+        "outline_markdown": str(raw_record.get("outline_markdown") or (map_payload["outline_markdown"] if map_payload else "")).strip(),
+        "node_count": int(map_payload["node_count"]) if map_payload else 0,
+        "max_depth": int(map_payload["max_depth"]) if map_payload else 0,
+    }
+
+
+def normalize_mindmap_store(data: Any) -> dict[str, Any]:
+    source = data if isinstance(data, dict) else {}
+    records = [
+        record
+        for raw_record in source.get("records", [])
+        if (record := normalize_mindmap_record(raw_record)) is not None
+    ]
+    records.sort(key=lambda item: (item["updated_at"], item["id"]), reverse=True)
+    return {"records": records}
+
+
+def load_mindmap_store() -> dict[str, Any]:
+    MINDMAP_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not MINDMAP_STORE_PATH.exists():
+        return normalize_mindmap_store({})
+
+    try:
+        raw_data = json.loads(MINDMAP_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return normalize_mindmap_store({})
+    return normalize_mindmap_store(raw_data)
+
+
+def save_mindmap_store(store: dict[str, Any]) -> None:
+    normalized = normalize_mindmap_store(store)
+    MINDMAP_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = MINDMAP_STORE_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(MINDMAP_STORE_PATH)
+
+
+def get_mindmap_record(store: dict[str, Any], record_id: str) -> dict[str, Any]:
+    for record in store.get("records", []):
+        if record["id"] == record_id:
+            return record
+    abort(404)
+
+
+def touch_mindmap_record(record: dict[str, Any]) -> None:
+    record["updated_at"] = now_iso()
+
+
+def build_mindmap_record_cards(store: dict[str, Any]) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for record in store.get("records", []):
+        cards.append(
+            {
+                "id": record["id"],
+                "title": record["title"],
+                "updated_label": format_iso_timestamp(record["updated_at"]),
+                "status": record["status"],
+                "status_label": MINDMAP_STATUS_META.get(record["status"], MINDMAP_STATUS_META["pending"])["label"],
+                "status_tone": MINDMAP_STATUS_META.get(record["status"], MINDMAP_STATUS_META["pending"])["tone"],
+                "structure_label": MINDMAP_STRUCTURE_KIND_META.get(record.get("structure_kind") or "", "资料导图"),
+                "node_count": record.get("node_count") or 0,
+                "summary": record.get("summary") or "",
+            }
+        )
+    return cards
+
+
+def update_mindmap_record(record_id: str, **changes: Any) -> None:
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        record = get_mindmap_record(store, record_id)
+        for key, value in changes.items():
+            record[key] = value
+        touch_mindmap_record(record)
+        save_mindmap_store(store)
+
+
+def read_mindmap_record(record_id: str) -> dict[str, Any] | None:
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        record = next((item for item in store.get("records", []) if item["id"] == record_id), None)
+        return deepcopy(record) if record else None
+
+
+def register_mindmap_process(record_id: str, process: subprocess.Popen[str]) -> None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_RUNNING_PROCESSES[record_id] = process
+
+
+def register_mindmap_task(record_id: str) -> None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_ACTIVE_TASKS.add(record_id)
+
+
+def release_mindmap_process(record_id: str) -> None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_RUNNING_PROCESSES.pop(record_id, None)
+
+
+def release_mindmap_task(record_id: str) -> None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_ACTIVE_TASKS.discard(record_id)
+
+
+def request_mindmap_stop(record_id: str) -> subprocess.Popen[str] | None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_STOP_REQUESTS.add(record_id)
+        return MINDMAP_RUNNING_PROCESSES.get(record_id)
+
+
+def mindmap_stop_requested(record_id: str) -> bool:
+    with MINDMAP_PROCESS_LOCK:
+        return record_id in MINDMAP_STOP_REQUESTS
+
+
+def clear_mindmap_stop_request(record_id: str) -> None:
+    with MINDMAP_PROCESS_LOCK:
+        MINDMAP_STOP_REQUESTS.discard(record_id)
+
+
+def mindmap_runtime_active(record_id: str) -> bool:
+    with MINDMAP_PROCESS_LOCK:
+        if record_id in MINDMAP_ACTIVE_TASKS:
+            return True
+        process = MINDMAP_RUNNING_PROCESSES.get(record_id)
+        if process is None:
+            return False
+        if process.poll() is None:
+            return True
+        MINDMAP_RUNNING_PROCESSES.pop(record_id, None)
+        return False
+
+
+def reconcile_stale_mindmap_store(store: dict[str, Any]) -> bool:
+    changed = False
+    stale_cutoff = time.time() - max(MINDMAP_STALE_JOB_SECONDS, 30)
+    for record in store.get("records", []):
+        if record.get("status") not in {"pending", "running"}:
+            continue
+        if mindmap_runtime_active(record["id"]):
+            continue
+        updated_at = coerce_sort_timestamp(record.get("updated_at"))
+        if updated_at and updated_at > stale_cutoff:
+            continue
+        record["status"] = "error"
+        record["error"] = "这次导图任务已经中断，通常是网页后端重启或本地 Codex 进程退出导致。请重新生成一次。"
+        touch_mindmap_record(record)
+        changed = True
+    return changed
+
+
+def extract_first_json_object(raw_text: str) -> dict[str, Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        raise ValueError("Codex 没有返回可用内容。")
+
+    if text.startswith("```"):
+        match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+
+    raise ValueError("Codex 返回了文本，但里面没有找到合法的 JSON 对象。")
+
+
+def build_mindmap_json_schema_prompt() -> str:
+    return (
+        "{\n"
+        '  "title": "导图标题",\n'
+        '  "summary": "这张导图的总括摘要",\n'
+        '  "structure_kind": "single_stock|peer_group|value_chain|theme_bundle",\n'
+        '  "insights": ["核心判断 1", "核心判断 2"],\n'
+        '  "timeline_highlights": [\n'
+        '    {"date": "2026-03-11", "date_type": "event|published|meeting|inferred", "phase": "earliest|mid|latest", "label": "时间节点标题", "summary": "这一时点的信息变化", "source_refs": ["M01"]}\n'
+        "  ],\n"
+        '  "source_relations": [\n'
+        '    {"label": "补充|验证|冲突|迭代", "from": "资料 A", "to": "资料 B", "summary": "关系说明", "source_refs": ["M01", "M04"]}\n'
+        "  ],\n"
+        '  "root": {\n'
+        '    "id": "root",\n'
+        '    "label": "根节点标题",\n'
+        '    "kind": "root",\n'
+        '    "summary": "根节点摘要",\n'
+        '    "evidence": ["证据 1", "证据 2"],\n'
+        '    "time_signals": ["时间信号 1", "时间信号 2"],\n'
+        '    "source_notes": ["资料互补/冲突备注 1"],\n'
+        '    "confidence": "low|medium|high",\n'
+        '    "source_refs": ["M01", "M02"],\n'
+        '    "symbols": ["AMD", "NVDA"],\n'
+        '    "children": [\n'
+        '      {"id": "branch-1", "label": "分支标题", "kind": "theme|question|risk|catalyst|evidence|timeline", "summary": "分支摘要", "evidence": ["..."], "time_signals": ["..."], "source_notes": ["..."], "confidence": "medium", "source_refs": ["M03"], "symbols": ["..."], "children": []}\n'
+        "    ]\n"
+        "  },\n"
+        '  "cross_links": [\n'
+        '    {"from": "branch-1", "to": "branch-2", "label": "同驱动|上游传导|结论冲突"}\n'
+        "  ]\n"
+        "}"
+    )
+
+
+def flatten_mindmap_nodes(root: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = [root]
+    for child in root.get("children", []):
+        nodes.extend(flatten_mindmap_nodes(child))
+    return nodes
+
+
+def mindmap_timeline_sort_key(date_value: str) -> tuple[int, str]:
+    normalized = normalize_date_field(date_value)
+    if normalized:
+        return (0, normalized)
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(date_value or ""))
+    if match:
+        return (0, match.group(1))
+    return (1, str(date_value or "").strip())
+
+
+def validate_mindmap_research_payload(
+    payload: dict[str, Any],
+    *,
+    curated: dict[str, Any],
+) -> dict[str, list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    root = payload.get("root") or {}
+    root_label = str(root.get("label") or "").strip()
+    normalized_root_label = root_label.casefold()
+    if normalized_root_label in {"资料整理", "研究导图", "导图", "思维导图", "资料导图"}:
+        errors.append("根节点标题过于泛化，没有直接指向研究主题。")
+
+    top_level_children = root.get("children", []) if isinstance(root.get("children"), list) else []
+    if len(top_level_children) < 2:
+        errors.append("顶层分支少于 2 个，主题拆解不够完整。")
+    elif len(top_level_children) > 6:
+        warnings.append("顶层分支超过 6 个，后续可继续收敛。")
+
+    nodes = flatten_mindmap_nodes(root) if isinstance(root, dict) else []
+    if payload.get("node_count", 0) < 10:
+        warnings.append("节点数量偏少，可能没有充分展开研究主线。")
+    if payload.get("node_count", 0) > 30:
+        warnings.append("节点数量偏多，后续可继续压缩重复表达。")
+
+    timeline = payload.get("timeline_highlights", []) if isinstance(payload.get("timeline_highlights"), list) else []
+    selected_count = int((curated.get("stats") or {}).get("selected_material_count") or 0)
+    if selected_count >= 4 and not timeline:
+        errors.append("已有较多入选资料，但导图没有给出时间轴主线。")
+    elif selected_count >= 4 and len(timeline) < 3:
+        warnings.append("时间轴节点少于 3 个，可能不够完整。")
+
+    sortable_timeline = [item for item in timeline if mindmap_timeline_sort_key(item.get("date") or "")[0] == 0]
+    sort_keys = [mindmap_timeline_sort_key(item.get("date") or "") for item in sortable_timeline]
+    if len(sort_keys) >= 2 and sort_keys != sorted(sort_keys):
+        errors.append("时间轴没有按从早到晚排序。")
+
+    phases = {str(item.get("phase") or "") for item in timeline if str(item.get("phase") or "").strip()}
+    if timeline and "latest" not in phases:
+        warnings.append("时间轴缺少 latest 阶段，最新状态不够明确。")
+    if timeline and "earliest" not in phases:
+        warnings.append("时间轴缺少 earliest 阶段，最早信号不够明确。")
+
+    conflict_selected_count = sum(
+        1
+        for source in curated.get("selected_manifest", [])
+        if "conflict" in (source.get("weight_flags") or [])
+    )
+    has_risk_or_question = any(str(node.get("kind") or "") in {"question", "risk"} for node in nodes)
+    if conflict_selected_count >= 2 and not has_risk_or_question:
+        errors.append("入选资料里存在明显冲突，但导图里没有保留待验证或风险分支。")
+
+    research_nodes = [
+        node
+        for node in nodes
+        if str(node.get("kind") or "") not in {"root", "question", "risk"}
+    ]
+    if research_nodes:
+        evidence_covered = sum(
+            1 for node in research_nodes if node.get("evidence") or node.get("source_refs")
+        )
+        coverage_ratio = evidence_covered / len(research_nodes)
+        if coverage_ratio < 0.55:
+            errors.append("可验证节点的证据或来源引用覆盖率过低。")
+        elif coverage_ratio < 0.75:
+            warnings.append("部分节点仍缺少明确证据或来源引用。")
+
+    if not any(node.get("source_refs") for node in nodes):
+        warnings.append("整张导图没有显式来源引用，后续回溯会比较困难。")
+
+    return {"errors": errors[:12], "warnings": warnings[:12]}
+
+
+def build_mindmap_plan_prompt(
+    *,
+    scope_summary: dict[str, Any],
+    knowledge_text: str,
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    return (
+        "你现在在做研究导图的第一步：先梳理结构，再决定成图骨架。\n"
+        "目标：基于资料先抽出主题主线、时间主线、冲突点和待验证问题，形成一张可复用的骨架图。\n"
+        "重要约束：\n"
+        "1. 只能基于下方资料正文，不得补外部事实。\n"
+        "2. 这是第一步，重点是结构判断，不需要把证据写满，但必须先把分叉逻辑、时间轴和冲突关系梳理清楚。\n"
+        "3. 结构模式只能四选一：single_stock / peer_group / value_chain / theme_bundle。\n"
+        "4. 时间轴必须区分最早信号、中段验证/修正、最新状态；date_type 要区分 event / published / meeting / inferred。\n"
+        "5. 资料若存在冲突、修正、对冲，必须明确留下 risk 或 question 分支，不能强行消解成单边结论。\n"
+        "6. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
+        "7. 顶层分支控制在 4 到 6 个，总节点控制在 12 到 28 个，层级最多 4 层。\n"
+        "8. 根节点不能写成“资料整理”“研究导图”之类的泛称，要直接写研究主题。\n"
+        "9. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "这一步的输出要求：\n"
+        "- 使用最终 schema，但 evidence / time_signals / source_notes 可以先写最必要的 0 到 2 条。\n"
+        "- timeline_highlights 至少给出 3 个节点（如果资料不足，再明确说明不足原因）。\n"
+        "- 每个关键节点都尽量带 source_refs 和 confidence。\n\n"
+        "当前资料范围：\n"
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}\n"
+        f"- pipeline_version: {fingerprint.get('pipeline_version') or MINDMAP_PIPELINE_VERSION}\n"
+        f"- prompt_version: {fingerprint.get('prompt_version') or MINDMAP_PROMPT_VERSION}\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"JSON schema：\n{build_mindmap_json_schema_prompt()}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空，请把导图收敛到资料不足与待验证问题。）'}\n"
+    )
+
+
+def build_mindmap_finalize_prompt(
+    *,
+    scope_summary: dict[str, Any],
+    knowledge_text: str,
+    plan_payload: dict[str, Any],
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    plan_text = json.dumps(plan_payload, ensure_ascii=False, indent=2)
+    return (
+        "你现在在做研究导图的第二步：在既有骨架上补齐研究合法的成图结果。\n"
+        "目标：把骨架图补成一张可用于研究回看和后续验证的正式导图。\n"
+        "重要约束：\n"
+        "1. 只能基于下方资料正文和骨架 JSON，不得补外部事实。\n"
+        "2. 尽量保留骨架里的 structure_kind、节点 id、主要分支和时间主线；可以小幅修正，但不要推翻结构。\n"
+        "3. 除 question / risk 外，关键节点尽量都要有 evidence 或 source_refs 支撑。\n"
+        "4. timeline_highlights 必须按从早到晚排序，并保留 earliest / mid / latest 三种 phase 的主线意识。\n"
+        "5. 必须区分 event（事件发生）、published（资料发布时间）、meeting（会议/访谈时间）、inferred（推断时间）。\n"
+        "6. 对于仍未解开的冲突，要留在 risk / question / source_notes 里，不要硬写成确定结论。\n"
+        "7. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
+        "8. summary、evidence、time_signals、source_notes 都要短、可扫读。\n"
+        "9. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "当前资料范围：\n"
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"必须遵守的 JSON schema：\n{build_mindmap_json_schema_prompt()}\n\n"
+        f"第一步骨架 JSON：\n{plan_text}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空，请把导图收敛到资料不足与待验证问题。）'}\n"
+    )
+
+
+def build_mindmap_repair_prompt(
+    *,
+    knowledge_text: str,
+    current_payload: dict[str, Any],
+    validation: dict[str, list[str]],
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    payload_text = json.dumps(current_payload, ensure_ascii=False, indent=2)
+    error_lines = "\n".join(f"- {item}" for item in validation.get("errors", [])) or "- 没有明确错误说明"
+    warning_lines = "\n".join(f"- {item}" for item in validation.get("warnings", [])) or "- 无"
+    return (
+        "你现在是研究导图结果修复器。\n"
+        "目标：在尽量少改动的前提下，修正当前 JSON，使其通过研究导图校验。\n"
+        "要求：\n"
+        "1. 只能输出一个修复后的 JSON 对象，不要解释。\n"
+        "2. 优先修复 errors；warnings 能顺手优化就优化。\n"
+        "3. 保留已有 structure_kind、节点 id、主分支和时间轴主线，不要大改主题。\n"
+        "4. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"必须修复的问题：\n{error_lines}\n\n"
+        f"可顺手优化的问题：\n{warning_lines}\n\n"
+        f"当前 JSON：\n{payload_text}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空。）'}\n"
+    )
+
+
+def run_mindmap_codex_step(
+    record_id: str,
+    *,
+    step_slug: str,
+    step_label: str,
+    prompt_text: str,
+    model: str,
+    reasoning_effort: str,
+) -> str:
+    codex_cli_path = resolve_codex_cli_path()
+    if codex_cli_path is None:
+        raise RuntimeError("当前电脑没有检测到可用的 Codex 可执行文件。")
+
+    output_path = MINDMAP_CONTEXT_DIR / f"{record_id}-{step_slug}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
+
+    command = [
+        str(codex_cli_path),
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+        "-m",
+        model,
+        "-c",
+        f"model_reasoning_effort={reasoning_effort}",
+        "-o",
+        str(output_path),
+        "-",
+    ]
+
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            cwd=str(BASE_DIR),
+        )
+        register_mindmap_process(record_id, process)
+        stdout_text, stderr_text = process.communicate(prompt_text, timeout=AI_CODEX_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            process.kill()
+            try:
+                process.communicate(timeout=5)
+            except Exception:
+                pass
+        raise RuntimeError(f"{step_label}等待时间过长，Codex 暂时没有在设定时间内返回结果。")
+    finally:
+        release_mindmap_process(record_id)
+
+    if mindmap_stop_requested(record_id):
+        return ""
+
+    reply_text = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
+    if process is not None and process.returncode != 0 and not reply_text:
+        stderr_text = (stderr_text or "").strip()
+        raise RuntimeError(stderr_text or f"{step_label}没有返回可用结果。")
+    if not reply_text:
+        reply_text = (stdout_text or "").strip()
+    if not reply_text:
+        raise RuntimeError(f"{step_label}运行结束，但没有产出可用 JSON。")
+    return reply_text
+
+
+def run_mindmap_generation(
+    record_id: str,
+    *,
+    model: str,
+    reasoning_effort: str,
+) -> None:
+    fingerprint: dict[str, Any] = {}
+    register_mindmap_task(record_id)
+    try:
+        reports = collect_reports()
+        stock_store = load_stock_store()
+        with MINDMAP_LOCK:
+            store = load_mindmap_store()
+            record = get_mindmap_record(store, record_id)
+            record["status"] = "running"
+            record["error"] = ""
+            touch_mindmap_record(record)
+            save_mindmap_store(store)
+            scope_settings = deepcopy(record["scope_settings"])
+            scope_summary = deepcopy(record["scope_summary"])
+
+        with app.test_request_context("/"):
+            materials = collect_ai_scope_materials(stock_store, reports, scope_settings=scope_settings)
+        if not scope_summary.get("headline"):
+            scope_summary = build_ai_scope_summary(scope_settings, materials)
+
+        curated = curate_mindmap_materials(materials)
+        if not curated.get("items"):
+            raise RuntimeError("当前范围里的资料经过压缩后仍然不足以生成研究导图，请放宽范围或补充更有信息密度的资料。")
+
+        bundle_path = build_mindmap_research_bundle(
+            record_id,
+            scope_summary=scope_summary,
+            materials=materials,
+            curated=curated,
+        )
+        knowledge_text = load_ai_knowledge_text(bundle_path)
+        fingerprint = build_mindmap_reproducibility_fingerprint(
+            scope_settings=scope_settings,
+            scope_summary=scope_summary,
+            materials=materials,
+            curated=curated,
+            knowledge_text=knowledge_text,
+            bundle_path=bundle_path,
+        )
+        update_mindmap_record(record_id, fingerprint=fingerprint)
+
+        if mindmap_stop_requested(record_id):
+            return
+
+        valid_source_refs = curated.get("selected_ref_set") or None
+        plan_prompt = build_mindmap_plan_prompt(
+            scope_summary=scope_summary,
+            knowledge_text=knowledge_text,
+            fingerprint=fingerprint,
+        )
+        plan_reply = run_mindmap_codex_step(
+            record_id,
+            step_slug="plan",
+            step_label="导图骨架梳理",
+            prompt_text=plan_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        if mindmap_stop_requested(record_id):
+            return
+
+        plan_raw_payload = extract_first_json_object(plan_reply)
+        plan_payload = normalize_mindmap_payload(plan_raw_payload, valid_source_refs=valid_source_refs)
+        if plan_payload is None:
+            raise RuntimeError("Codex 已返回导图骨架，但结构不符合要求。")
+        fingerprint["plan_digest"] = sha256_text(serialize_stable_json(plan_payload))
+        update_mindmap_record(record_id, fingerprint=fingerprint)
+
+        final_prompt = build_mindmap_finalize_prompt(
+            scope_summary=scope_summary,
+            knowledge_text=knowledge_text,
+            plan_payload=plan_payload,
+            fingerprint=fingerprint,
+        )
+        final_reply = run_mindmap_codex_step(
+            record_id,
+            step_slug="mindmap",
+            step_label="导图正式成图",
+            prompt_text=final_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        if mindmap_stop_requested(record_id):
+            return
+
+        final_raw_payload = extract_first_json_object(final_reply)
+        payload = normalize_mindmap_payload(final_raw_payload, valid_source_refs=valid_source_refs)
+        if payload is None:
+            raise RuntimeError("Codex 返回了成图结果，但结构不符合导图要求。")
+
+        validation = validate_mindmap_research_payload(payload, curated=curated)
+        repair_attempted = False
+        if validation["errors"]:
+            repair_attempted = True
+            repair_prompt = build_mindmap_repair_prompt(
+                knowledge_text=knowledge_text,
+                current_payload=payload,
+                validation=validation,
+                fingerprint=fingerprint,
+            )
+            repair_reply = run_mindmap_codex_step(
+                record_id,
+                step_slug="repair",
+                step_label="导图结果修复",
+                prompt_text=repair_prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            if mindmap_stop_requested(record_id):
+                return
+            repaired_raw_payload = extract_first_json_object(repair_reply)
+            repaired_payload = normalize_mindmap_payload(repaired_raw_payload, valid_source_refs=valid_source_refs)
+            if repaired_payload is None:
+                raise RuntimeError("导图修复步骤返回了内容，但结构仍然不合法。")
+            payload = repaired_payload
+            validation = validate_mindmap_research_payload(payload, curated=curated)
+
+        if validation["errors"]:
+            raise RuntimeError(f"导图结构已生成，但研究校验仍未通过：{validation['errors'][0]}")
+
+        fingerprint["final_digest"] = sha256_text(serialize_stable_json(payload))
+        fingerprint["validation"] = {
+            "warnings": validation["warnings"],
+            "errors": validation["errors"],
+            "repair_attempted": repair_attempted,
+        }
+
+        current_record = read_mindmap_record(record_id)
+        if current_record and current_record["status"] == "cancelled":
+            return
+
+        update_mindmap_record(
+            record_id,
+            status="completed",
+            title=payload["title"],
+            summary=payload["summary"],
+            outline_markdown=payload["outline_markdown"],
+            map_payload=payload,
+            structure_kind=payload["structure_kind"],
+            node_count=payload["node_count"],
+            max_depth=payload["max_depth"],
+            fingerprint=fingerprint,
+            error="",
+        )
+        sync_generated_mindmap_to_studio(record_id)
+    except Exception as exc:
+        if mindmap_stop_requested(record_id):
+            return
+        if fingerprint:
+            validation_state = fingerprint.get("validation") if isinstance(fingerprint.get("validation"), dict) else {}
+            fingerprint["validation"] = {
+                "warnings": validation_state.get("warnings", []),
+                "errors": [str(exc)[:240]],
+                "repair_attempted": bool(validation_state.get("repair_attempted")),
+            }
+            update_mindmap_record(record_id, status="error", error=str(exc), fingerprint=fingerprint)
+        else:
+            update_mindmap_record(record_id, status="error", error=str(exc))
+    finally:
+        release_mindmap_process(record_id)
+        release_mindmap_task(record_id)
+        clear_mindmap_stop_request(record_id)
+
+
+def build_mindmap_page_context(
+    *,
+    record_id: str | None,
+    reports: list[dict[str, Any]] | None = None,
+    stock_store: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        if reconcile_stale_mindmap_store(store):
+            save_mindmap_store(store)
+    reports = reports if reports is not None else collect_reports()
+    stock_store = stock_store if stock_store is not None else load_stock_store()
+    stock_options = build_stock_selector_options(stock_store)
+    known_symbols = {item["symbol"] for item in stock_options}
+    active_record = None
+    if record_id:
+        active_record = get_mindmap_record(store, record_id)
+    elif store.get("records"):
+        active_record = store["records"][0]
+
+    try:
+        active_scope_settings = normalize_ai_scope_settings(
+            (active_record or {}).get("scope_settings", {}),
+            known_symbols=known_symbols,
+        )
+    except ValueError:
+        active_scope_settings = normalize_ai_scope_settings({})
+
+    preview_month = active_scope_settings.get("preview_month") or active_scope_settings.get("end_date", "")[:7]
+    scope_preview = build_ai_scope_preview_context(
+        stock_store,
+        reports,
+        active_scope_settings,
+        month_param=preview_month or None,
+        date_param=active_scope_settings.get("selected_date") or None,
+    )
+    active_scope_settings["preview_month"] = scope_preview["month_key"]
+    scope_summary = scope_preview["summary"]
+
+    model_catalog = load_codex_model_catalog()
+    default_model = (
+        model_catalog[0]
+        if model_catalog
+        else {
+            "slug": "gpt-5.4",
+            "display_name": "gpt-5.4",
+            "reasoning_levels": ["medium"],
+            "default_reasoning": "medium",
+        }
+    )
+    active_model_slug = str((active_record or {}).get("model") or default_model["slug"])
+    selected_model_meta = next((item for item in model_catalog if item["slug"] == active_model_slug), default_model)
+    active_reasoning = str((active_record or {}).get("reasoning_effort") or selected_model_meta["default_reasoning"])
+    if active_reasoning not in (selected_model_meta.get("reasoning_levels") or ["medium"]):
+        active_reasoning = selected_model_meta.get("default_reasoning") or "medium"
+
+    return {
+        "mindmap_records": build_mindmap_record_cards(store),
+        "active_record": active_record,
+        "selected_record_id": active_record["id"] if active_record else "",
+        "stock_options": stock_options,
+        "mindmap_scope_settings": active_scope_settings,
+        "mindmap_scope_preview": scope_preview,
+        "mindmap_scope_summary": scope_summary,
+        "poll_interval_ms": MINDMAP_POLL_INTERVAL_SECONDS * 1000,
+        "codex_ready": codex_cli_available(),
+        "model_catalog": model_catalog,
+        "selected_model_meta": selected_model_meta,
+        "selected_model_slug": active_model_slug,
+        "selected_model_reasoning_levels": selected_model_meta.get("reasoning_levels") or ["medium"],
+        "selected_reasoning_effort": active_reasoning,
+        "current_mindmap_url": url_for("mindmap_workspace", map=active_record["id"]) if active_record else url_for("mindmap_workspace"),
+    }
+
+
+def normalize_mindmap_studio_template_key(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_TEMPLATE_META:
+        return candidate
+    return "blank"
+
+
+def normalize_mindmap_studio_theme_key(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_THEME_META:
+        return candidate
+    return "graphite"
+
+
+def normalize_mindmap_studio_surface_key(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_SURFACE_META:
+        return candidate
+    return "desktop"
+
+
+def normalize_mindmap_studio_density_key(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_DENSITY_META:
+        return candidate
+    return "roomy"
+
+
+def normalize_mindmap_studio_layout_key(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_LAYOUT_META:
+        return candidate
+    return "mindmap"
+
+
+def normalize_mindmap_studio_node_kind(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_NODE_KIND_META:
+        return candidate
+    return "topic"
+
+
+def normalize_mindmap_studio_relation_tone(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_RELATION_TONE_META:
+        return candidate
+    return "support"
+
+
+def normalize_mindmap_studio_origin_mode(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_ORIGIN_META:
+        return candidate
+    return "manual"
+
+
+def normalize_mindmap_studio_verify_state(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STUDIO_VERIFY_META:
+        return candidate
+    return "draft"
+
+
+def normalize_mindmap_studio_side(value: str | None, *, fallback: str = "right") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in {"left", "right", "center"}:
+        return candidate
+    if fallback in {"left", "right", "center"}:
+        return fallback
+    return "right"
+
+
+def build_mindmap_studio_template_blueprint(template_key: str) -> dict[str, Any]:
+    template_key = normalize_mindmap_studio_template_key(template_key)
+    if template_key == "thesis":
+        return {
+            "label": "投资判断主线",
+            "kind": "thesis",
+            "summary": "把判断、证据、风险和待验证分开。",
+            "children": [
+                {
+                    "label": "判断主轴",
+                    "kind": "thesis",
+                    "summary": "一句话说清主判断。",
+                    "side": "left",
+                    "children": [
+                        {"label": "为什么现在", "kind": "timeline"},
+                        {"label": "最关键支撑", "kind": "evidence"},
+                    ],
+                },
+                {
+                    "label": "支撑证据",
+                    "kind": "evidence",
+                    "summary": "把证据按来源或口径分层。",
+                    "side": "right",
+                    "children": [
+                        {"label": "专家/渠道", "kind": "evidence"},
+                        {"label": "公司口径", "kind": "evidence"},
+                    ],
+                },
+                {
+                    "label": "风险与反例",
+                    "kind": "risk",
+                    "summary": "防止导图只剩单边论证。",
+                    "side": "left",
+                    "children": [
+                        {"label": "会推翻判断的信号", "kind": "question"},
+                    ],
+                },
+                {
+                    "label": "跟踪清单",
+                    "kind": "question",
+                    "summary": "把后续要追的资料挂在这里。",
+                    "side": "right",
+                    "children": [
+                        {"label": "下一次验证点", "kind": "timeline"},
+                    ],
+                },
+            ],
+        }
+    if template_key == "value_chain":
+        return {
+            "label": "产业链图谱",
+            "kind": "topic",
+            "summary": "适合把上中下游、价格和传导拆开。",
+            "children": [
+                {
+                    "label": "上游供给",
+                    "kind": "topic",
+                    "side": "left",
+                    "children": [
+                        {"label": "约束点", "kind": "risk"},
+                        {"label": "放量节点", "kind": "catalyst"},
+                    ],
+                },
+                {
+                    "label": "中游制造",
+                    "kind": "topic",
+                    "side": "right",
+                    "children": [
+                        {"label": "良率/产能", "kind": "evidence"},
+                    ],
+                },
+                {
+                    "label": "下游需求",
+                    "kind": "topic",
+                    "side": "left",
+                    "children": [
+                        {"label": "客户结构", "kind": "thesis"},
+                    ],
+                },
+                {
+                    "label": "价格与利润率",
+                    "kind": "thesis",
+                    "side": "right",
+                    "children": [
+                        {"label": "传导节奏", "kind": "timeline"},
+                    ],
+                },
+            ],
+        }
+    if template_key == "debrief":
+        return {
+            "label": "访谈复盘",
+            "kind": "topic",
+            "summary": "把结论、分歧和待跟进动作拆开。",
+            "children": [
+                {
+                    "label": "核心结论",
+                    "kind": "thesis",
+                    "side": "left",
+                    "children": [
+                        {"label": "最强一句话", "kind": "thesis"},
+                    ],
+                },
+                {
+                    "label": "新增信息",
+                    "kind": "evidence",
+                    "side": "right",
+                    "children": [
+                        {"label": "与旧判断不同", "kind": "evidence"},
+                    ],
+                },
+                {
+                    "label": "分歧与疑点",
+                    "kind": "question",
+                    "side": "left",
+                    "children": [
+                        {"label": "需要交叉验证", "kind": "question"},
+                    ],
+                },
+                {
+                    "label": "后续动作",
+                    "kind": "timeline",
+                    "side": "right",
+                    "children": [
+                        {"label": "谁来跟", "kind": "timeline"},
+                    ],
+                },
+            ],
+        }
+
+    return {
+        "label": "研究主题",
+        "kind": "topic",
+        "summary": "从这里开始搭你的导图。",
+        "children": [
+            {"label": "主线", "kind": "thesis", "side": "left"},
+            {"label": "证据", "kind": "evidence", "side": "right"},
+            {"label": "风险", "kind": "risk", "side": "left"},
+            {"label": "待验证", "kind": "question", "side": "right"},
+        ],
+    }
+
+
+def instantiate_mindmap_studio_blueprint(
+    blueprint: dict[str, Any],
+    *,
+    nodes: list[dict[str, Any]],
+    parent_id: str | None,
+    side: str,
+    order: int,
+) -> str:
+    node_id = uuid.uuid4().hex[:10]
+    label = re.sub(r"\s+", " ", str(blueprint.get("label") or "").strip())[:80] or "未命名节点"
+    summary = re.sub(r"\s+", " ", str(blueprint.get("summary") or "").strip())[:240]
+    note = trim_note_content(str(blueprint.get("note") or "").strip(), limit=2000)
+    node_side = "center" if parent_id is None else normalize_mindmap_studio_side(blueprint.get("side"), fallback=side)
+    node = {
+        "id": node_id,
+        "parent_id": parent_id,
+        "side": node_side,
+        "order": max(order, 0),
+        "label": label,
+        "summary": summary,
+        "note": note,
+        "kind": normalize_mindmap_studio_node_kind(blueprint.get("kind")),
+        "origin_mode": "seed",
+        "verify_state": "draft",
+        "origin_snapshot_node_id": "",
+        "symbols": normalize_stock_symbol_list(blueprint.get("symbols", []))[:10],
+        "tags": normalize_tag_list(blueprint.get("tags", []))[:12],
+        "time_hint": re.sub(r"\s+", " ", str(blueprint.get("time_hint") or "").strip())[:120],
+        "collapsed": bool(blueprint.get("collapsed")),
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    nodes.append(node)
+
+    for child_index, raw_child in enumerate(blueprint.get("children", []) if isinstance(blueprint.get("children"), list) else []):
+        if not isinstance(raw_child, dict):
+            continue
+        instantiate_mindmap_studio_blueprint(
+            raw_child,
+            nodes=nodes,
+            parent_id=node_id,
+            side=node_side if node_side in {"left", "right"} else normalize_mindmap_studio_side(raw_child.get("side"), fallback="right"),
+            order=child_index,
+        )
+
+    return node_id
+
+
+def build_mindmap_studio_document(*, template_key: str = "blank", title: str | None = None) -> dict[str, Any]:
+    template_key = normalize_mindmap_studio_template_key(template_key)
+    template_meta = MINDMAP_STUDIO_TEMPLATE_META[template_key]
+    layout_key = {
+        "blank": "mindmap",
+        "thesis": "mindmap",
+        "value_chain": "lanes",
+        "debrief": "logic",
+    }.get(template_key, "mindmap")
+    nodes: list[dict[str, Any]] = []
+    instantiate_mindmap_studio_blueprint(
+        build_mindmap_studio_template_blueprint(template_key),
+        nodes=nodes,
+        parent_id=None,
+        side="center",
+        order=0,
+    )
+    root_id = nodes[0]["id"]
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "source_record_id": "",
+        "title": re.sub(r"\s+", " ", str(title or template_meta["label"]).strip())[:120] or "新导图",
+        "template_key": template_key,
+        "theme_key": "graphite",
+        "surface_key": "embedded",
+        "density_key": "roomy",
+        "layout_key": layout_key,
+        "active_node_id": root_id,
+        "root_id": root_id,
+        "reference_document_ids": [],
+        "generated_snapshot": None,
+        "nodes": nodes,
+        "relationships": [],
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+
+
+def normalize_mindmap_studio_node(raw_node: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_node, dict):
+        return None
+
+    label = re.sub(r"\s+", " ", str(raw_node.get("label") or "").strip())[:80]
+    if not label:
+        return None
+
+    try:
+        order = max(int(raw_node.get("order") or 0), 0)
+    except (TypeError, ValueError):
+        order = 0
+
+    return {
+        "id": str(raw_node.get("id") or uuid.uuid4().hex[:10]).strip()[:24] or uuid.uuid4().hex[:10],
+        "parent_id": str(raw_node.get("parent_id") or "").strip()[:24] or None,
+        "side": normalize_mindmap_studio_side(raw_node.get("side")),
+        "order": order,
+        "label": label,
+        "summary": re.sub(r"\s+", " ", str(raw_node.get("summary") or "").strip())[:240],
+        "note": trim_note_content(str(raw_node.get("note") or "").strip(), limit=5000),
+        "kind": normalize_mindmap_studio_node_kind(raw_node.get("kind")),
+        "origin_mode": normalize_mindmap_studio_origin_mode(raw_node.get("origin_mode")),
+        "verify_state": normalize_mindmap_studio_verify_state(raw_node.get("verify_state")),
+        "origin_snapshot_node_id": str(raw_node.get("origin_snapshot_node_id") or "").strip()[:24],
+        "symbols": normalize_stock_symbol_list(raw_node.get("symbols", []))[:10],
+        "tags": normalize_tag_list(raw_node.get("tags", []))[:12],
+        "time_hint": re.sub(r"\s+", " ", str(raw_node.get("time_hint") or "").strip())[:120],
+        "collapsed": bool(raw_node.get("collapsed")),
+        "created_at": str(raw_node.get("created_at") or now_iso()),
+        "updated_at": str(raw_node.get("updated_at") or now_iso()),
+    }
+
+
+def normalize_mindmap_studio_relationship(raw_relationship: Any, *, node_ids: set[str]) -> dict[str, Any] | None:
+    if not isinstance(raw_relationship, dict):
+        return None
+
+    from_node_id = str(raw_relationship.get("from_node_id") or raw_relationship.get("from") or "").strip()[:24]
+    to_node_id = str(raw_relationship.get("to_node_id") or raw_relationship.get("to") or "").strip()[:24]
+    if not from_node_id or not to_node_id or from_node_id == to_node_id:
+        return None
+    if from_node_id not in node_ids or to_node_id not in node_ids:
+        return None
+
+    label = re.sub(r"\s+", " ", str(raw_relationship.get("label") or "").strip())[:60]
+    if not label:
+        return None
+
+    return {
+        "id": str(raw_relationship.get("id") or uuid.uuid4().hex[:10]).strip()[:24] or uuid.uuid4().hex[:10],
+        "from_node_id": from_node_id,
+        "to_node_id": to_node_id,
+        "label": label,
+        "tone": normalize_mindmap_studio_relation_tone(raw_relationship.get("tone")),
+    }
+
+
+def normalize_mindmap_studio_snapshot(raw_snapshot: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_snapshot, dict):
+        return None
+
+    nodes = [
+        node
+        for raw_node in raw_snapshot.get("nodes", []) if isinstance(raw_snapshot.get("nodes"), list)
+        if (node := normalize_mindmap_studio_node(raw_node)) is not None
+    ][:240]
+    node_ids = {node["id"] for node in nodes}
+    relationships = [
+        relationship
+        for raw_relationship in raw_snapshot.get("relationships", []) if isinstance(raw_snapshot.get("relationships"), list)
+        if (relationship := normalize_mindmap_studio_relationship(raw_relationship, node_ids=node_ids)) is not None
+    ][:48]
+    return {
+        "generated_at": str(raw_snapshot.get("generated_at") or now_iso()),
+        "reference_document_ids": normalize_identifier_list(raw_snapshot.get("reference_document_ids", []), max_items=16),
+        "nodes": nodes,
+        "relationships": relationships,
+    }
+
+
+def group_mindmap_studio_children(document: dict[str, Any]) -> dict[str | None, list[dict[str, Any]]]:
+    children: defaultdict[str | None, list[dict[str, Any]]] = defaultdict(list)
+    for node in document.get("nodes", []):
+        children[node.get("parent_id")].append(node)
+    for parent_id, items in children.items():
+        items.sort(key=lambda item: (item.get("order", 0), item.get("label", "").casefold(), item.get("id", "")))
+        for index, item in enumerate(items):
+            item["order"] = index
+    return dict(children)
+
+
+def collect_mindmap_studio_subtree_ids(document: dict[str, Any], node_id: str) -> set[str]:
+    children = group_mindmap_studio_children(document)
+    collected: set[str] = set()
+
+    def walk(current_id: str) -> None:
+        if current_id in collected:
+            return
+        collected.add(current_id)
+        for child in children.get(current_id, []):
+            walk(child["id"])
+
+    walk(node_id)
+    return collected
+
+
+def normalize_mindmap_studio_document(raw_document: Any) -> dict[str, Any]:
+    if not isinstance(raw_document, dict):
+        return build_mindmap_studio_document()
+
+    title = re.sub(r"\s+", " ", str(raw_document.get("title") or "").strip())[:120] or "新导图"
+    template_key = normalize_mindmap_studio_template_key(raw_document.get("template_key"))
+
+    nodes = [
+        node
+        for raw_node in raw_document.get("nodes", []) if isinstance(raw_document.get("nodes"), list)
+        if (node := normalize_mindmap_studio_node(raw_node)) is not None
+    ][:240]
+    if not nodes:
+        seeded = build_mindmap_studio_document(template_key=template_key, title=title)
+        seeded["id"] = str(raw_document.get("id") or seeded["id"])[:12]
+        return seeded
+
+    root_candidates = [node for node in nodes if not node.get("parent_id")]
+    root = root_candidates[0] if root_candidates else nodes[0]
+    root["parent_id"] = None
+    root["side"] = "center"
+
+    node_lookup = {node["id"]: node for node in nodes}
+    root_id = root["id"]
+    for node in nodes:
+        if node["id"] == root_id:
+            continue
+        if not node.get("parent_id") or node["parent_id"] not in node_lookup or node["parent_id"] == node["id"]:
+            node["parent_id"] = root_id
+
+    node_lookup = {node["id"]: node for node in nodes}
+    children = group_mindmap_studio_children({"nodes": nodes})
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in seen or node_id not in node_lookup:
+            return
+        seen.add(node_id)
+        ordered_ids.append(node_id)
+        for child in children.get(node_id, []):
+            visit(child["id"])
+
+    visit(root_id)
+    for node in nodes:
+        if node["id"] not in seen:
+            node["parent_id"] = root_id
+    node_lookup = {node["id"]: node for node in nodes}
+    children = group_mindmap_studio_children({"nodes": nodes})
+    ordered_ids = []
+    seen = set()
+    visit(root_id)
+    normalized_nodes = [node_lookup[node_id] for node_id in ordered_ids]
+
+    node_lookup = {node["id"]: node for node in normalized_nodes}
+    for node in normalized_nodes:
+        if node["id"] == root_id:
+            node["side"] = "center"
+            continue
+        parent = node_lookup.get(node.get("parent_id") or "")
+        if parent and parent["id"] == root_id:
+            node["side"] = normalize_mindmap_studio_side(node.get("side"), fallback="right")
+        else:
+            node["side"] = parent["side"] if parent else "right"
+
+    node_ids = {node["id"] for node in normalized_nodes}
+    relationships: list[dict[str, Any]] = []
+    seen_relationships: set[tuple[str, str, str]] = set()
+    for raw_relationship in raw_document.get("relationships", []) if isinstance(raw_document.get("relationships"), list) else []:
+        relationship = normalize_mindmap_studio_relationship(raw_relationship, node_ids=node_ids)
+        if relationship is None:
+            continue
+        dedupe_key = (
+            relationship["from_node_id"],
+            relationship["to_node_id"],
+            relationship["label"].casefold(),
+        )
+        if dedupe_key in seen_relationships:
+            continue
+        seen_relationships.add(dedupe_key)
+        relationships.append(relationship)
+
+    active_node_id = str(raw_document.get("active_node_id") or "").strip()
+    if active_node_id not in node_ids:
+        active_node_id = root_id
+
+    return {
+        "id": str(raw_document.get("id") or uuid.uuid4().hex[:12]).strip()[:12] or uuid.uuid4().hex[:12],
+        "title": title,
+        "source_record_id": str(raw_document.get("source_record_id") or "").strip()[:24],
+        "template_key": template_key,
+        "theme_key": normalize_mindmap_studio_theme_key(raw_document.get("theme_key")),
+        "surface_key": normalize_mindmap_studio_surface_key(raw_document.get("surface_key")),
+        "density_key": normalize_mindmap_studio_density_key(raw_document.get("density_key")),
+        "layout_key": normalize_mindmap_studio_layout_key(raw_document.get("layout_key")),
+        "active_node_id": active_node_id,
+        "root_id": root_id,
+        "reference_document_ids": normalize_identifier_list(raw_document.get("reference_document_ids", []), max_items=16),
+        "generated_snapshot": normalize_mindmap_studio_snapshot(raw_document.get("generated_snapshot")),
+        "nodes": normalized_nodes,
+        "relationships": relationships[:48],
+        "created_at": str(raw_document.get("created_at") or now_iso()),
+        "updated_at": str(raw_document.get("updated_at") or now_iso()),
+    }
+
+
+def build_mindmap_studio_tree(document: dict[str, Any]) -> dict[str, Any]:
+    node_lookup = {node["id"]: deepcopy(node) for node in document.get("nodes", [])}
+    children = group_mindmap_studio_children(document)
+
+    def attach(node_id: str, depth: int, branch_side: str) -> dict[str, Any]:
+        node = deepcopy(node_lookup[node_id])
+        side = node["side"] if node["side"] in {"left", "right"} else branch_side
+        node["branch_side"] = side
+        node["depth"] = depth
+        node["children"] = [
+            attach(child["id"], depth + 1, side)
+            for child in children.get(node_id, [])
+        ]
+        return node
+
+    return attach(document["root_id"], 0, "center")
+
+
+def compute_mindmap_studio_depth(node: dict[str, Any]) -> int:
+    children = node.get("children", [])
+    if not children:
+        return 1
+    return 1 + max(compute_mindmap_studio_depth(child) for child in children)
+
+
+def count_mindmap_studio_leaf_nodes(node: dict[str, Any]) -> int:
+    children = node.get("children", [])
+    if not children:
+        return 1
+    return sum(count_mindmap_studio_leaf_nodes(child) for child in children)
+
+
+def build_mindmap_studio_outline_lines(node: dict[str, Any], *, depth: int = 0) -> list[str]:
+    indent = "  " * depth
+    summary = str(node.get("summary") or "").strip()
+    line = f"{indent}- {node['label']}"
+    if summary:
+        line += f": {summary}"
+    lines = [line]
+    for child in node.get("children", []):
+        lines.extend(build_mindmap_studio_outline_lines(child, depth=depth + 1))
+    return lines
+
+
+def build_mindmap_studio_document_stats(document: dict[str, Any]) -> dict[str, Any]:
+    tree = build_mindmap_studio_tree(document)
+    return {
+        "node_count": len(document.get("nodes", [])),
+        "relationship_count": len(document.get("relationships", [])),
+        "leaf_count": count_mindmap_studio_leaf_nodes(tree),
+        "max_depth": compute_mindmap_studio_depth(tree),
+        "outline_markdown": "\n".join(build_mindmap_studio_outline_lines(tree)),
+        "tree": tree,
+    }
+
+
+def build_mindmap_studio_document_card(document: dict[str, Any]) -> dict[str, Any]:
+    stats = build_mindmap_studio_document_stats(document)
+    return {
+        "id": document["id"],
+        "title": document["title"],
+        "template_key": document["template_key"],
+        "template_label": MINDMAP_STUDIO_TEMPLATE_META.get(document["template_key"], MINDMAP_STUDIO_TEMPLATE_META["blank"])["label"],
+        "theme_key": document["theme_key"],
+        "theme_label": MINDMAP_STUDIO_THEME_META[document["theme_key"]]["label"],
+        "surface_key": document["surface_key"],
+        "surface_label": MINDMAP_STUDIO_SURFACE_META[document["surface_key"]]["label"],
+        "density_key": document["density_key"],
+        "density_label": MINDMAP_STUDIO_DENSITY_META[document["density_key"]]["label"],
+        "layout_key": document["layout_key"],
+        "layout_label": MINDMAP_STUDIO_LAYOUT_META[document["layout_key"]]["label"],
+        "updated_at": document["updated_at"],
+        "updated_label": format_iso_timestamp(document["updated_at"]),
+        "node_count": stats["node_count"],
+        "relationship_count": stats["relationship_count"],
+        "max_depth": stats["max_depth"],
+        "has_generated_snapshot": bool(document.get("generated_snapshot")),
+    }
+
+
+def serialize_mindmap_studio_document(document: dict[str, Any]) -> dict[str, Any]:
+    stats = build_mindmap_studio_document_stats(document)
+    return {
+        **deepcopy(document),
+        "theme_label": MINDMAP_STUDIO_THEME_META[document["theme_key"]]["label"],
+        "surface_label": MINDMAP_STUDIO_SURFACE_META[document["surface_key"]]["label"],
+        "density_label": MINDMAP_STUDIO_DENSITY_META[document["density_key"]]["label"],
+        "layout_label": MINDMAP_STUDIO_LAYOUT_META[document["layout_key"]]["label"],
+        "stats": {
+            "node_count": stats["node_count"],
+            "relationship_count": stats["relationship_count"],
+            "leaf_count": stats["leaf_count"],
+            "max_depth": stats["max_depth"],
+        },
+        "outline_markdown": stats["outline_markdown"],
+        "tree": stats["tree"],
+    }
+
+
+def normalize_mindmap_studio_store(data: Any) -> dict[str, Any]:
+    source = data if isinstance(data, dict) else {}
+    documents = [
+        document
+        for raw_document in source.get("documents", []) if isinstance(source.get("documents"), list)
+        if (document := normalize_mindmap_studio_document(raw_document)) is not None
+    ]
+    documents.sort(key=lambda item: (coerce_sort_timestamp(item.get("updated_at")), item["id"]), reverse=True)
+    return {
+        "documents": documents,
+        "updated_at": str(source.get("updated_at") or now_iso()),
+    }
+
+
+def load_mindmap_studio_store() -> dict[str, Any]:
+    if not MINDMAP_STUDIO_STORE_PATH.exists():
+        return normalize_mindmap_studio_store({})
+    try:
+        raw_data = json.loads(MINDMAP_STUDIO_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return normalize_mindmap_studio_store({})
+    return normalize_mindmap_studio_store(raw_data)
+
+
+def save_mindmap_studio_store(store: dict[str, Any]) -> None:
+    normalized = normalize_mindmap_studio_store(store)
+    normalized["updated_at"] = now_iso()
+    MINDMAP_STUDIO_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = MINDMAP_STUDIO_STORE_PATH.with_suffix(MINDMAP_STUDIO_STORE_PATH.suffix + ".tmp")
+    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(MINDMAP_STUDIO_STORE_PATH)
+
+
+def ensure_mindmap_studio_seeded(store: dict[str, Any]) -> dict[str, Any]:
+    if store.get("documents"):
+        return store
+    store["documents"] = [
+        build_mindmap_studio_document(template_key="thesis", title="研究导图工作台"),
+    ]
+    store["updated_at"] = now_iso()
+    return store
+
+
+def get_mindmap_studio_document(store: dict[str, Any], document_id: str) -> dict[str, Any]:
+    for document in store.get("documents", []):
+        if document["id"] == document_id:
+            return document
+    raise KeyError(document_id)
+
+
+def build_mindmap_studio_bootstrap_payload(store: dict[str, Any], *, document_id: str | None = None) -> dict[str, Any]:
+    store = ensure_mindmap_studio_seeded(store)
+    documents = store.get("documents", [])
+    active_document = None
+    if document_id:
+        active_document = next((item for item in documents if item["id"] == document_id), None)
+    if active_document is None and documents:
+        active_document = documents[0]
+
+    return {
+        "documents": [build_mindmap_studio_document_card(document) for document in documents],
+        "active_document": serialize_mindmap_studio_document(active_document) if active_document else None,
+        "theme_options": [
+            {"key": key, **value}
+            for key, value in MINDMAP_STUDIO_THEME_META.items()
+        ],
+        "surface_options": [
+            {"key": key, **value}
+            for key, value in MINDMAP_STUDIO_SURFACE_META.items()
+        ],
+        "density_options": [
+            {"key": key, **value}
+            for key, value in MINDMAP_STUDIO_DENSITY_META.items()
+        ],
+        "layout_options": [
+            {"key": key, **value}
+            for key, value in MINDMAP_STUDIO_LAYOUT_META.items()
+        ],
+        "kind_options": [
+            {"key": key, "label": value}
+            for key, value in MINDMAP_STUDIO_NODE_KIND_META.items()
+        ],
+        "relation_tones": [
+            {"key": key, "label": value}
+            for key, value in MINDMAP_STUDIO_RELATION_TONE_META.items()
+        ],
+        "origin_options": [
+            {"key": key, "label": value}
+            for key, value in MINDMAP_STUDIO_ORIGIN_META.items()
+        ],
+        "verify_options": [
+            {"key": key, "label": value}
+            for key, value in MINDMAP_STUDIO_VERIFY_META.items()
+        ],
+        "template_options": [
+            {"key": key, **value}
+            for key, value in MINDMAP_STUDIO_TEMPLATE_META.items()
+        ],
+    }
+
+
+def build_mindmap_studio_note_from_generated_node(node: dict[str, Any]) -> str:
+    sections: list[str] = []
+    confidence = normalize_mindmap_confidence(node.get("confidence"))
+    source_refs = [str(item).strip() for item in node.get("source_refs", []) if str(item).strip()]
+    if source_refs:
+        sections.append("来源引用\n" + "\n".join(f"- {item}" for item in source_refs[:8]))
+    if confidence:
+        sections.append(f"置信度\n- {confidence}")
+
+    evidence = [str(item).strip() for item in node.get("evidence", []) if str(item).strip()]
+    if evidence:
+        sections.append("证据\n" + "\n".join(f"- {item}" for item in evidence[:6]))
+
+    source_notes = [str(item).strip() for item in node.get("source_notes", []) if str(item).strip()]
+    if source_notes:
+        sections.append("资料关系\n" + "\n".join(f"- {item}" for item in source_notes[:6]))
+
+    time_signals = [str(item).strip() for item in node.get("time_signals", []) if str(item).strip()]
+    if len(time_signals) > 1:
+        sections.append("时间信号\n" + "\n".join(f"- {item}" for item in time_signals[:6]))
+
+    return trim_note_content("\n\n".join(sections).strip(), limit=5000)
+
+
+def mindmap_confidence_to_verify_state(confidence: str | None) -> str:
+    normalized = normalize_mindmap_confidence(confidence)
+    if normalized == "high":
+        return "verified"
+    if normalized == "low":
+        return "needs_verify"
+    return "draft"
+
+
+def infer_mindmap_studio_relation_tone(label: str) -> str:
+    normalized = str(label or "").casefold()
+    if any(token in normalized for token in ("冲突", "矛盾", "相反", "对冲", "修正")):
+        return "conflict"
+    if any(token in normalized for token in ("传导", "上游", "下游", "因果", "驱动", "影响")):
+        return "flow"
+    if any(token in normalized for token in ("补充", "验证", "支持", "印证")):
+        return "support"
+    return "compare"
+
+
+def convert_generated_mindmap_to_studio_document(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("map_payload") or {}
+    root = payload.get("root")
+    if not isinstance(root, dict):
+        raise ValueError("导图结果里缺少可用的根节点。")
+
+    structure_kind = str(payload.get("structure_kind") or "").strip().lower()
+    template_key = {
+        "single_stock": "thesis",
+        "peer_group": "thesis",
+        "value_chain": "value_chain",
+        "theme_bundle": "debrief",
+    }.get(structure_kind, "thesis")
+    layout_key = {
+        "single_stock": "mindmap",
+        "peer_group": "mindmap",
+        "value_chain": "lanes",
+        "theme_bundle": "logic",
+    }.get(structure_kind, "mindmap")
+
+    document = build_mindmap_studio_document(template_key=template_key, title=payload.get("title") or record.get("title"))
+    document["source_record_id"] = record["id"]
+    document["template_key"] = template_key
+    document["layout_key"] = layout_key
+    document["theme_key"] = "graphite"
+    document["surface_key"] = "embedded"
+    document["density_key"] = "roomy"
+
+    nodes: list[dict[str, Any]] = []
+    node_ids: set[str] = set()
+
+    def walk(raw_node: dict[str, Any], *, parent_id: str | None, order: int, side: str) -> str:
+        raw_id = str(raw_node.get("id") or "").strip()
+        node_id = ensure_unique_id(raw_id, node_ids, length=10)
+        node_ids.add(node_id)
+        time_signals = [
+            re.sub(r"\s+", " ", str(item or "").strip())[:120]
+            for item in raw_node.get("time_signals", [])
+            if re.sub(r"\s+", " ", str(item or "").strip())[:120]
+        ]
+        studio_node = {
+            "id": node_id,
+            "parent_id": parent_id,
+            "side": "center" if parent_id is None else side,
+            "order": max(order, 0),
+            "label": re.sub(r"\s+", " ", str(raw_node.get("label") or "").strip())[:80] or "未命名节点",
+            "summary": re.sub(r"\s+", " ", str(raw_node.get("summary") or "").strip())[:240],
+            "note": build_mindmap_studio_note_from_generated_node(raw_node),
+            "kind": {
+                "root": "thesis",
+                "theme": "topic",
+                "topic": "topic",
+                "question": "question",
+                "risk": "risk",
+                "catalyst": "catalyst",
+                "evidence": "evidence",
+                "timeline": "timeline",
+            }.get(str(raw_node.get("kind") or "").strip().lower(), "topic"),
+            "origin_mode": "generated",
+            "verify_state": mindmap_confidence_to_verify_state(raw_node.get("confidence")),
+            "origin_snapshot_node_id": node_id,
+            "symbols": normalize_stock_symbol_list(raw_node.get("symbols", []))[:10],
+            "tags": [],
+            "time_hint": time_signals[0] if time_signals else "",
+            "collapsed": False,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        nodes.append(studio_node)
+
+        for child_index, child in enumerate(raw_node.get("children", []) if isinstance(raw_node.get("children"), list) else []):
+            child_side = side
+            if parent_id is None and layout_key == "mindmap":
+                child_side = "left" if child_index % 2 == 0 else "right"
+            elif parent_id is None:
+                child_side = "right"
+            walk(child, parent_id=node_id, order=child_index, side=child_side)
+        return node_id
+
+    root_id = walk(root, parent_id=None, order=0, side="center")
+    document["nodes"] = nodes
+    document["root_id"] = root_id
+    document["active_node_id"] = root_id
+
+    relationships: list[dict[str, Any]] = []
+    seen_relationships: set[tuple[str, str, str]] = set()
+    for raw_link in payload.get("cross_links", []) if isinstance(payload.get("cross_links"), list) else []:
+        from_node_id = str(raw_link.get("from") or "").strip()
+        to_node_id = str(raw_link.get("to") or "").strip()
+        label = re.sub(r"\s+", " ", str(raw_link.get("label") or "").strip())[:60]
+        if not from_node_id or not to_node_id or not label:
+            continue
+        if from_node_id not in node_ids or to_node_id not in node_ids or from_node_id == to_node_id:
+            continue
+        dedupe_key = (from_node_id, to_node_id, label.casefold())
+        if dedupe_key in seen_relationships:
+            continue
+        seen_relationships.add(dedupe_key)
+        relationships.append(
+            {
+                "id": uuid.uuid4().hex[:10],
+                "from_node_id": from_node_id,
+                "to_node_id": to_node_id,
+                "label": label,
+                "tone": infer_mindmap_studio_relation_tone(label),
+            }
+        )
+    document["relationships"] = relationships[:48]
+    document["generated_snapshot"] = {
+        "generated_at": now_iso(),
+        "reference_document_ids": [],
+        "nodes": deepcopy(document["nodes"]),
+        "relationships": deepcopy(document["relationships"]),
+    }
+    document["updated_at"] = now_iso()
+    return normalize_mindmap_studio_document(document)
+
+
+def sync_generated_mindmap_to_studio(record_id: str) -> str | None:
+    record = read_mindmap_record(record_id)
+    if not record or not record.get("map_payload"):
+        return None
+
+    document = convert_generated_mindmap_to_studio_document(record)
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        existing = next((item for item in store.get("documents", []) if item.get("source_record_id") == record_id), None)
+        if existing is not None:
+            document["id"] = existing["id"]
+            document["created_at"] = str(existing.get("created_at") or document["created_at"])
+            document["reference_document_ids"] = existing.get("reference_document_ids", [])
+            store["documents"] = [document if item["id"] == existing["id"] else item for item in store.get("documents", [])]
+        else:
+            store.setdefault("documents", []).insert(0, document)
+        save_mindmap_studio_store(store)
+    return document["id"]
 
 
 def build_export_center_context() -> dict[str, Any]:
@@ -6951,11 +11521,12 @@ def ai_scope_preview() -> str:
     stock_store = load_stock_store()
     reports = collect_reports()
     known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
+    content_kinds = request.args.get("content_kinds", "").strip() or ", ".join(AI_SCOPE_DEFAULT_CONTENT_KINDS)
     scope_settings = normalize_ai_scope_settings(
         {
             "use_stock_scope": request.args.get("use_stock_scope"),
             "symbols": request.args.get("symbols", ""),
-            "content_kinds": request.args.get("content_kinds", ""),
+            "content_kinds": content_kinds,
             "use_date_scope": request.args.get("use_date_scope"),
             "start_date": request.args.get("start_date"),
             "end_date": request.args.get("end_date"),
@@ -7385,6 +11956,346 @@ def ai_session_status(session_id: str):
     )
 
 
+@app.get("/mindmaps")
+def mindmap_workspace() -> str:
+    reports = collect_reports()
+    stock_store = load_stock_store()
+    record_id = request.args.get("map", "").strip() or None
+    return render_template(
+        "mindmaps.html",
+        **build_mindmap_page_context(record_id=record_id, reports=reports, stock_store=stock_store),
+        **build_navigation_context(active_page="mindmaps", reports=reports, stock_store=stock_store),
+    )
+
+
+@app.get("/mindmaps/scope/preview")
+def mindmap_scope_preview() -> str:
+    stock_store = load_stock_store()
+    reports = collect_reports()
+    known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
+    content_kinds = request.args.get("content_kinds", "").strip() or ", ".join(AI_SCOPE_DEFAULT_CONTENT_KINDS)
+    scope_settings = normalize_ai_scope_settings(
+        {
+            "use_stock_scope": request.args.get("use_stock_scope"),
+            "symbols": request.args.get("symbols", ""),
+            "content_kinds": content_kinds,
+            "use_date_scope": request.args.get("use_date_scope"),
+            "start_date": request.args.get("start_date"),
+            "end_date": request.args.get("end_date"),
+            "preview_month": request.args.get("month"),
+            "selected_date": request.args.get("date"),
+        },
+        known_symbols=known_symbols,
+    )
+    preview_context = build_ai_scope_preview_context(
+        stock_store,
+        reports,
+        scope_settings,
+        month_param=request.args.get("month"),
+        year_param=request.args.get("year"),
+        month_number_param=request.args.get("month_number"),
+        date_param=request.args.get("date"),
+    )
+    return render_template("_ai_scope_preview.html", scope_preview=preview_context)
+
+
+@app.post("/mindmaps/generate")
+def generate_mindmap():
+    if not codex_cli_available():
+        flash("当前电脑还没有可用的本地 Codex，暂时无法生成思维图。", "error")
+        return redirect(url_for("mindmap_workspace"))
+
+    stock_store = load_stock_store()
+    reports = collect_reports()
+    known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
+    try:
+        scope_settings = normalize_ai_scope_settings(
+            {
+                "use_stock_scope": request.form.get("use_stock_scope"),
+                "symbols": request.form.get("scope_symbols", ""),
+                "content_kinds": request.form.get("scope_content_kinds", ""),
+                "use_date_scope": request.form.get("use_date_scope"),
+                "start_date": request.form.get("scope_start_date"),
+                "end_date": request.form.get("scope_end_date"),
+                "preview_month": request.form.get("scope_preview_month"),
+                "selected_date": request.form.get("scope_selected_date"),
+            },
+            known_symbols=known_symbols,
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("mindmap_workspace"))
+
+    model_catalog = load_codex_model_catalog()
+    selected_model = next(
+        (
+            item
+            for item in model_catalog
+            if item["slug"] == str(request.form.get("model_slug") or "").strip()
+        ),
+        model_catalog[0]
+        if model_catalog
+        else {
+            "slug": "gpt-5.4",
+            "reasoning_levels": ["medium"],
+            "default_reasoning": "medium",
+        },
+    )
+    model_slug = selected_model["slug"]
+    reasoning_effort = str(request.form.get("reasoning_effort") or "").strip()
+    if reasoning_effort not in (selected_model.get("reasoning_levels") or []):
+        reasoning_effort = selected_model.get("default_reasoning") or "medium"
+
+    materials = collect_ai_scope_materials(stock_store, reports, scope_settings=scope_settings)
+    if (
+        materials["report_count"]
+        + materials["note_count"]
+        + materials["file_count"]
+        + materials["transcript_count"]
+        <= 0
+    ):
+        flash("当前范围内还没有可用资料，先放宽股票范围或调整时间窗口再生成。", "error")
+        return redirect(url_for("mindmap_workspace"))
+
+    scope_summary = build_ai_scope_summary(scope_settings, materials)
+    record = normalize_mindmap_record(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "title": build_mindmap_seed_title(scope_settings),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "status": "pending",
+            "model": model_slug,
+            "reasoning_effort": reasoning_effort,
+            "scope_settings": scope_settings,
+            "scope_summary": scope_summary,
+            "summary": "",
+            "map_payload": None,
+            "fingerprint": {
+                "generated_at": now_iso(),
+                "pipeline_version": MINDMAP_PIPELINE_VERSION,
+                "prompt_version": MINDMAP_PROMPT_VERSION,
+                "schema_version": MINDMAP_SCHEMA_VERSION,
+                "validation": {
+                    "warnings": [],
+                    "errors": [],
+                    "repair_attempted": False,
+                },
+            },
+        }
+    )
+    if record is None:
+        abort(500)
+
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        store.setdefault("records", []).insert(0, record)
+        save_mindmap_store(store)
+
+    worker = threading.Thread(
+        target=run_mindmap_generation,
+        args=(record["id"],),
+        kwargs={
+            "model": model_slug,
+            "reasoning_effort": reasoning_effort,
+        },
+        daemon=True,
+    )
+    worker.start()
+
+    return redirect(url_for("mindmap_workspace", map=record["id"]))
+
+
+@app.post("/mindmaps/<record_id>/delete")
+def delete_mindmap(record_id: str):
+    redirect_id = ""
+    running = False
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        record = get_mindmap_record(store, record_id)
+        running = record["status"] in {"pending", "running"}
+        store["records"] = [item for item in store.get("records", []) if item["id"] != record_id]
+        if store["records"]:
+            redirect_id = store["records"][0]["id"]
+        save_mindmap_store(store)
+
+    if running:
+        process = request_mindmap_stop(record_id)
+        if process is not None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    if redirect_id:
+        return redirect(url_for("mindmap_workspace", map=redirect_id))
+    return redirect(url_for("mindmap_workspace"))
+
+
+@app.post("/mindmaps/<record_id>/stop")
+def stop_mindmap(record_id: str):
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        record = get_mindmap_record(store, record_id)
+        if record["status"] not in {"pending", "running"}:
+            return redirect(url_for("mindmap_workspace", map=record_id))
+        record["status"] = "cancelled"
+        record["error"] = ""
+        touch_mindmap_record(record)
+        save_mindmap_store(store)
+
+    process = request_mindmap_stop(record_id)
+    if process is not None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    return redirect(url_for("mindmap_workspace", map=record_id))
+
+
+@app.get("/mindmaps/<record_id>/status")
+def mindmap_status(record_id: str):
+    with MINDMAP_LOCK:
+        store = load_mindmap_store()
+        if reconcile_stale_mindmap_store(store):
+            save_mindmap_store(store)
+        record = get_mindmap_record(store, record_id)
+    return jsonify(
+        {
+            "record_id": record["id"],
+            "status": record["status"],
+            "has_pending": record["status"] in {"pending", "running"},
+            "updated_at": record["updated_at"],
+        }
+    )
+
+
+@app.get("/labs/mindmap-studio")
+def mindmap_studio_workspace() -> str:
+    requested_document_id = request.args.get("doc", "").strip()
+    return render_template(
+        "mindmap_studio.html",
+        requested_document_id=requested_document_id,
+        mindmap_studio_bootstrap_url=url_for("mindmap_studio_bootstrap"),
+        mindmap_studio_create_url=url_for("create_mindmap_studio_document"),
+        mindmap_studio_current_url=url_for("mindmap_studio_workspace"),
+    )
+
+
+@app.get("/labs/mindmap-studio/bootstrap")
+def mindmap_studio_bootstrap():
+    requested_document_id = request.args.get("doc", "").strip() or None
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        seeded = ensure_mindmap_studio_seeded(store)
+        if seeded is store and (not MINDMAP_STUDIO_STORE_PATH.exists() or not store.get("documents")):
+            save_mindmap_studio_store(store)
+        payload = build_mindmap_studio_bootstrap_payload(store, document_id=requested_document_id)
+    return jsonify({"ok": True, **payload})
+
+
+@app.post("/labs/mindmap-studio/documents")
+def create_mindmap_studio_document():
+    payload = request.get_json(silent=True) or {}
+    template_key = normalize_mindmap_studio_template_key(payload.get("template_key"))
+    title = re.sub(r"\s+", " ", str(payload.get("title") or "").strip())[:120] or MINDMAP_STUDIO_TEMPLATE_META[template_key]["label"]
+
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = build_mindmap_studio_document(template_key=template_key, title=title)
+        store.setdefault("documents", []).insert(0, document)
+        save_mindmap_studio_store(store)
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=document["id"])
+
+    return jsonify({"ok": True, **response_payload})
+
+
+@app.post("/labs/mindmap-studio/documents/<document_id>/duplicate")
+def duplicate_mindmap_studio_document(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        source_document = deepcopy(get_mindmap_studio_document(store, document_id))
+        source_document["id"] = uuid.uuid4().hex[:12]
+        source_document["title"] = (source_document["title"] + " 副本")[:120]
+        source_document["created_at"] = now_iso()
+        source_document["updated_at"] = now_iso()
+        store.setdefault("documents", []).insert(0, normalize_mindmap_studio_document(source_document))
+        save_mindmap_studio_store(store)
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=source_document["id"])
+
+    return jsonify({"ok": True, **response_payload})
+
+
+@app.post("/labs/mindmap-studio/documents/<document_id>/delete")
+def delete_mindmap_studio_document(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        get_mindmap_studio_document(store, document_id)
+        store["documents"] = [item for item in store.get("documents", []) if item["id"] != document_id]
+        if not store.get("documents"):
+            ensure_mindmap_studio_seeded(store)
+        save_mindmap_studio_store(store)
+        next_document_id = store["documents"][0]["id"] if store.get("documents") else None
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=next_document_id)
+
+    return jsonify({"ok": True, **response_payload})
+
+
+@app.post("/labs/mindmap-studio/documents/<document_id>/save")
+def save_mindmap_studio_document(document_id: str):
+    payload = request.get_json(silent=True) or {}
+    raw_document = payload.get("document") if isinstance(payload, dict) else None
+    if not isinstance(raw_document, dict):
+        return jsonify({"ok": False, "message": "缺少可保存的导图数据。"}), 400
+
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        existing_document = deepcopy(get_mindmap_studio_document(store, document_id))
+        merged_document = {
+            **raw_document,
+            "id": existing_document["id"],
+            "created_at": existing_document["created_at"],
+            "updated_at": now_iso(),
+            "generated_snapshot": (
+                raw_document.get("generated_snapshot")
+                if "generated_snapshot" in raw_document
+                else existing_document.get("generated_snapshot")
+            ),
+            "reference_document_ids": (
+                raw_document.get("reference_document_ids")
+                if "reference_document_ids" in raw_document
+                else existing_document.get("reference_document_ids", [])
+            ),
+        }
+        normalized_document = normalize_mindmap_studio_document(merged_document)
+        normalized_document["updated_at"] = now_iso()
+        store["documents"] = [
+            normalized_document if item["id"] == document_id else item
+            for item in store.get("documents", [])
+        ]
+        save_mindmap_studio_store(store)
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=document_id)
+
+    return jsonify({"ok": True, **response_payload})
+
+
+@app.get("/labs/mindmap-studio/documents/<document_id>/export.json")
+def export_mindmap_studio_document(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+    export_payload = serialize_mindmap_studio_document(document)
+    buffer = io.BytesIO(json.dumps(export_payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    filename = secure_filename(document["title"]) or f"mindmap-{document['id']}"
+    return send_file(
+        buffer,
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=f"{filename}.json",
+    )
+
+
 @app.route("/")
 def index() -> str:
     reports = collect_reports()
@@ -7729,6 +12640,421 @@ def stocks_workspace() -> str:
     )
 
 
+@app.post("/stocks/earnings/sync")
+def sync_all_stock_earnings():
+    next_url = safe_next_url(request.form.get("next_url"), url_for("stocks_workspace"))
+    store = load_stock_store()
+    symbols = list_stock_symbols(store)
+    if not symbols:
+        flash("当前股票工作台里还没有可同步业绩期的股票。", "error")
+        return redirect(next_url)
+
+    snapshots, errors = collect_stock_earnings_snapshots(symbols)
+    if not snapshots:
+        flash("业绩期同步失败，暂时没有拿到可写入的数据。", "error")
+        if errors:
+            flash("；".join(errors[:3]), "error")
+        return redirect(next_url)
+
+    with STOCK_STORE_LOCK:
+        writable_store = load_stock_store()
+        for symbol, earnings_info in snapshots.items():
+            apply_stock_earnings_snapshot(writable_store, symbol, earnings_info)
+        save_stock_store(writable_store)
+
+    flash(f"已同步 {len(snapshots)} 只股票的下一次业绩，并更新到日程里。", "success")
+    if errors:
+        flash("部分股票同步失败：" + "；".join(errors[:3]), "error")
+    return redirect(next_url)
+
+
+@app.get("/schedule")
+def schedule_page() -> str:
+    store = load_stock_store()
+    current_view = normalize_schedule_view(request.args.get("view"))
+    page_return_url = request.full_path if request.query_string else request.path
+    schedule_context = build_schedule_page_context(
+        store,
+        month_param=request.args.get("month"),
+        year_param=request.args.get("year"),
+        month_number_param=request.args.get("month_number"),
+        date_param=request.args.get("date"),
+        focus_item_id=request.args.get("focus", "").strip(),
+    )
+    selected_date = schedule_context.get("selected_schedule_date") or ""
+    focus_item_id = schedule_context.get("focus_schedule_item_id") or ""
+    board_params = {"view": "board", "month": schedule_context["month_key"]}
+    form_params = {"view": "form", "month": schedule_context["month_key"]}
+    if selected_date:
+        board_params["date"] = selected_date
+        form_params["date"] = selected_date
+    if focus_item_id:
+        board_params["focus"] = focus_item_id
+        form_params["focus"] = focus_item_id
+
+    return render_template(
+        "schedule.html",
+        stock_options=build_stock_selector_options(store),
+        today_date=today_date_iso(),
+        page_return_url=page_return_url,
+        current_schedule_view=current_view,
+        schedule_view_links={
+            "board": url_for("schedule_page", **board_params),
+            "form": url_for("schedule_page", **form_params),
+        },
+        **schedule_context,
+        **build_navigation_context(active_page="schedule", stock_store=store),
+    )
+
+
+@app.post("/schedule/items")
+def create_schedule_item():
+    store = load_stock_store()
+    next_url = safe_next_url(request.form.get("next_url"), url_for("schedule_page"))
+    normalized_item = normalize_schedule_item(
+        {
+            "title": request.form.get("title"),
+            "kind": request.form.get("kind"),
+            "status": "planned",
+            "priority": request.form.get("priority"),
+            "symbol": request.form.get("symbol"),
+            "company": request.form.get("company"),
+            "scheduled_date": request.form.get("scheduled_date"),
+            "has_time_range": request.form.get("has_time_range") == "on",
+            "start_time": request.form.get("start_time"),
+            "end_time": request.form.get("end_time"),
+            "all_day": request.form.get("all_day") == "on",
+            "location": request.form.get("location"),
+            "note": request.form.get("note"),
+            "tags": request.form.get("tags"),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+
+    if normalized_item is None:
+        flash("请至少填写标题和日期，这样日程才能真正落下来。", "error")
+        return redirect(next_url)
+
+    store.setdefault("schedule_items", []).append(normalized_item)
+    save_stock_store(store)
+    flash(f'日程“{normalized_item["title"]}”已加入。', "success")
+    return redirect(
+        url_for(
+            "schedule_page",
+            view="board",
+            month=normalized_item["scheduled_date"][:7],
+            date=normalized_item["scheduled_date"],
+            focus=normalized_item["id"],
+        )
+    )
+
+
+@app.post("/schedule/items/<item_id>/update")
+def update_schedule_item(item_id: str):
+    store = load_stock_store()
+    item = get_schedule_item(store, item_id)
+    next_url = safe_next_url(
+        request.form.get("next_url"),
+        url_for(
+            "schedule_page",
+            month=str(item.get("scheduled_date") or "")[:7],
+            date=item.get("scheduled_date"),
+            focus=item_id,
+        ),
+    )
+    normalized_item = normalize_schedule_item(
+        {
+            "id": item["id"],
+            "created_at": item.get("created_at"),
+            "title": request.form.get("title"),
+            "kind": request.form.get("kind"),
+            "status": request.form.get("status") or item.get("status"),
+            "priority": request.form.get("priority"),
+            "symbol": request.form.get("symbol"),
+            "company": request.form.get("company"),
+            "scheduled_date": request.form.get("scheduled_date"),
+            "has_time_range": request.form.get("has_time_range") == "on",
+            "start_time": request.form.get("start_time"),
+            "end_time": request.form.get("end_time"),
+            "all_day": request.form.get("all_day") == "on",
+            "location": request.form.get("location"),
+            "note": request.form.get("note"),
+            "tags": request.form.get("tags"),
+            "updated_at": now_iso(),
+        }
+    )
+
+    if normalized_item is None:
+        flash("请至少保留标题和日期，避免这条日程变成空壳。", "error")
+        return redirect(next_url)
+
+    item.update(normalized_item)
+    save_stock_store(store)
+    flash(f'日程“{item["title"]}”已更新。', "success")
+    return redirect(
+        url_for(
+            "schedule_page",
+            view="board",
+            month=item["scheduled_date"][:7],
+            date=item["scheduled_date"],
+            focus=item["id"],
+        )
+    )
+
+
+@app.post("/schedule/items/<item_id>/status")
+def update_schedule_item_status(item_id: str):
+    store = load_stock_store()
+    item = get_schedule_item(store, item_id)
+    next_url = safe_next_url(
+        request.form.get("next_url"),
+        url_for(
+            "schedule_page",
+            month=str(item.get("scheduled_date") or "")[:7],
+            date=item.get("scheduled_date"),
+            focus=item_id,
+        ),
+    )
+    status = str(request.form.get("status") or "").strip()
+    if status not in SCHEDULE_STATUS_META:
+        flash("这次状态更新没有识别出来，请再试一次。", "error")
+        return redirect(next_url)
+
+    item["status"] = status
+    item["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash(f'日程“{item["title"]}”状态已更新为 {SCHEDULE_STATUS_META[status]["label"]}。', "success")
+    return redirect(next_url)
+
+
+@app.post("/schedule/items/<item_id>/delete")
+def delete_schedule_item(item_id: str):
+    store = load_stock_store()
+    item = get_schedule_item(store, item_id)
+    append_to_trash(
+        store,
+        create_trash_entry(
+            "schedule_item",
+            item,
+            symbol=str(item.get("symbol") or ""),
+            title=str(item.get("title") or "日程"),
+        ),
+    )
+    store["schedule_items"] = [
+        schedule_item for schedule_item in store.get("schedule_items", []) if schedule_item["id"] != item_id
+    ]
+    save_stock_store(store)
+    flash(f'日程“{item["title"]}”已移入回收站。', "success")
+    return redirect(safe_next_url(request.form.get("next_url"), url_for("schedule_page")))
+
+
+@app.get("/experts")
+def experts_page() -> str:
+    store = load_stock_store()
+    selected_expert_id = str(request.args.get("expert") or "").strip()
+    current_expert_view = normalize_expert_view(request.args.get("view"), has_experts=bool(store.get("experts")))
+    manage_params: dict[str, str] = {"view": "manage"}
+    create_params: dict[str, str] = {"view": "create"}
+    if selected_expert_id:
+        manage_params["expert"] = selected_expert_id
+
+    return render_template(
+        "experts.html",
+        today_date=today_date_iso(),
+        page_return_url=request.full_path if request.query_string else request.path,
+        current_expert_view=current_expert_view,
+        expert_view_links={
+            "manage": url_for("experts_page", **manage_params),
+            "create": url_for("experts_page", **create_params),
+        },
+        **build_experts_page_context(store, selected_expert_id=selected_expert_id),
+        **build_navigation_context(active_page="experts", stock_store=store),
+    )
+
+
+@app.get("/experts/resources/preview")
+def expert_resource_preview() -> str:
+    store = load_stock_store()
+    resource_ref = parse_expert_resource_token(request.args.get("token"))
+    if resource_ref is None:
+        abort(404)
+
+    return render_template(
+        "expert_resource_modal.html",
+        **build_expert_resource_preview_context(store, resource_ref),
+    )
+
+
+@app.post("/experts")
+def create_expert():
+    store = load_stock_store()
+    normalized_expert = normalize_expert_entry(
+        {
+            "name": request.form.get("name"),
+            "organization": request.form.get("organization"),
+            "title": request.form.get("title"),
+            "category": request.form.get("category"),
+            "stage": request.form.get("stage"),
+            "region": request.form.get("region"),
+            "source": request.form.get("source"),
+            "related_symbols": request.form.get("related_symbols"),
+            "tags": request.form.get("tags"),
+            "expertise": request.form.get("expertise"),
+            "contact_notes": request.form.get("contact_notes"),
+            "resource_refs": [],
+            "interviews": [],
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+    if normalized_expert is None:
+        flash("请至少填写专家姓名，才能建立这条专家档案。", "error")
+        return redirect(url_for("experts_page"))
+
+    store.setdefault("experts", []).append(normalized_expert)
+    save_stock_store(store)
+    flash(f'专家“{normalized_expert["name"]}”已加入专家记录。', "success")
+    return redirect(url_for("experts_page", view="manage", expert=normalized_expert["id"]))
+
+
+@app.post("/experts/<expert_id>/update")
+def update_expert(expert_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id))
+    normalized_expert = normalize_expert_entry(
+        {
+            "id": expert["id"],
+            "name": request.form.get("name"),
+            "organization": request.form.get("organization"),
+            "title": request.form.get("title"),
+            "category": request.form.get("category"),
+            "stage": request.form.get("stage"),
+            "region": request.form.get("region"),
+            "source": request.form.get("source"),
+            "related_symbols": request.form.get("related_symbols"),
+            "tags": request.form.get("tags"),
+            "expertise": request.form.get("expertise"),
+            "contact_notes": request.form.get("contact_notes"),
+            "resource_refs": expert.get("resource_refs", []),
+            "interviews": expert.get("interviews", []),
+            "created_at": expert.get("created_at"),
+            "updated_at": now_iso(),
+        }
+    )
+    if normalized_expert is None:
+        flash("专家档案没有保存成功，请检查姓名和字段内容。", "error")
+        return redirect(next_url)
+
+    expert.update(normalized_expert)
+    save_stock_store(store)
+    flash(f'专家“{expert["name"]}”档案已更新。', "success")
+    return redirect(url_for("experts_page", view="manage", expert=expert_id))
+
+
+@app.post("/experts/<expert_id>/archive")
+def archive_expert(expert_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id))
+    expert["stage"] = "archived"
+    expert["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash(f'专家“{expert["name"]}”已标记为归档。', "success")
+    return redirect(next_url)
+
+
+@app.post("/experts/<expert_id>/resources")
+def update_expert_resources(expert_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id))
+    resource_refs = normalize_expert_resource_refs(request.form.getlist("resource_ref_tokens"))
+    expert["resource_refs"] = resource_refs
+    expert["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash(f'专家“{expert["name"]}”的关联资料已更新。', "success")
+    return redirect(next_url)
+
+
+@app.post("/experts/<expert_id>/interviews")
+def create_expert_interview(expert_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id))
+    normalized_interview = normalize_expert_interview(
+        {
+            "title": request.form.get("title"),
+            "kind": request.form.get("kind"),
+            "status": request.form.get("status"),
+            "interview_date": request.form.get("interview_date"),
+            "summary": request.form.get("summary"),
+            "follow_up": request.form.get("follow_up"),
+            "tags": request.form.get("tags"),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+    if normalized_interview is None:
+        flash("请至少填写访谈标题和日期，时间线里才不会留下空记录。", "error")
+        return redirect(next_url)
+
+    expert.setdefault("interviews", []).append(normalized_interview)
+    expert["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash(f'已为“{expert["name"]}”新增一条访谈记录。', "success")
+    return redirect(url_for("experts_page", view="manage", expert=expert_id))
+
+
+@app.post("/experts/<expert_id>/interviews/<interview_id>/update")
+def update_expert_interview(expert_id: str, interview_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    interview = get_expert_interview_entry(expert, interview_id)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id))
+    normalized_interview = normalize_expert_interview(
+        {
+            "id": interview["id"],
+            "title": request.form.get("title"),
+            "kind": request.form.get("kind"),
+            "status": request.form.get("status"),
+            "interview_date": request.form.get("interview_date"),
+            "summary": request.form.get("summary"),
+            "follow_up": request.form.get("follow_up"),
+            "tags": request.form.get("tags"),
+            "created_at": interview.get("created_at"),
+            "updated_at": now_iso(),
+        }
+    )
+    if normalized_interview is None:
+        flash("这条访谈记录没有保存成功，请检查标题和日期。", "error")
+        return redirect(next_url)
+
+    interview.update(normalized_interview)
+    expert["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash("访谈记录已更新。", "success")
+    return redirect(url_for("experts_page", view="manage", expert=expert_id))
+
+
+@app.post("/experts/<expert_id>/interviews/<interview_id>/delete")
+def delete_expert_interview(expert_id: str, interview_id: str):
+    store = load_stock_store()
+    expert = get_expert_entry(store, expert_id)
+    before_count = len(expert.get("interviews", []))
+    expert["interviews"] = [
+        interview for interview in expert.get("interviews", []) if interview["id"] != interview_id
+    ]
+    if len(expert["interviews"]) == before_count:
+        abort(404)
+
+    expert["updated_at"] = now_iso()
+    save_stock_store(store)
+    flash("这条访谈记录已删除。", "success")
+    return redirect(safe_next_url(request.form.get("next_url"), url_for("experts_page", expert=expert_id)))
+
+
 @app.get("/search")
 def global_search() -> str:
     store = load_stock_store()
@@ -7833,6 +13159,12 @@ def restore_trash_item(trash_id: str):
     elif item_type == "group":
         payload["id"] = ensure_unique_id(payload.get("id", ""), {group["id"] for group in store["groups"]}, length=8)
         store["groups"].append(payload)
+    elif item_type == "schedule_item":
+        payload["id"] = ensure_unique_id(
+            payload.get("id", ""),
+            {item["id"] for item in store.get("schedule_items", [])},
+        )
+        store.setdefault("schedule_items", []).append(payload)
     elif item_type == "monitor_report":
         trash_path = Path(str(payload.get("trash_path") or ""))
         if not trash_path.exists():
@@ -7923,6 +13255,8 @@ def transcripts_page() -> str:
         speaker_count_options=TRANSCRIPT_SPEAKER_COUNT_OPTIONS,
         meeting_assistance_options=TRANSCRIPT_MEETING_ASSISTANCE_OPTIONS,
         summarization_options=TRANSCRIPT_SUMMARIZATION_OPTIONS,
+        transcript_category_options=TRANSCRIPT_CATEGORY_OPTIONS,
+        transcript_status_poll_seconds=TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS,
         supported_format_hint=(
             "音频支持 mp3 / wav / m4a / aac / amr / flac，"
             "视频支持 mp4 / mov / mkv / webm / avi 等格式。保存后会自动尝试上传到 OSS。"
@@ -7978,6 +13312,8 @@ def create_transcript_job():
     output_level = str(request.form.get("output_level") or "2").strip()
     if output_level not in TRANSCRIPT_OUTPUT_LEVEL_LABELS:
         output_level = "2"
+
+    transcript_category = normalize_transcript_category(request.form.get("transcript_category"))
 
     try:
         speaker_count = int(request.form.get("speaker_count") or 2)
@@ -8043,6 +13379,7 @@ def create_transcript_job():
         "source_url_expires_at": "",
         "linked_symbol": linked_symbols[0] if linked_symbols else "",
         "linked_symbols": linked_symbols,
+        "category": transcript_category,
         "source_language": source_language,
         "output_level": output_level,
         "diarization_enabled": diarization_enabled,
@@ -8091,9 +13428,11 @@ def create_transcript_job():
             normalized_transcript["updated_at"] = now_iso()
             auto_submit_error = str(exc)
 
-    store.setdefault("transcripts", []).append(normalized_transcript)
-    touch_transcript_stocks(store, normalized_transcript)
-    save_stock_store(store)
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        store.setdefault("transcripts", []).append(normalized_transcript)
+        touch_transcript_stocks(store, normalized_transcript)
+        save_stock_store(store)
 
     if auto_submitted:
         flash("会议转录任务已保存，并已提交到听悟。后续请用“刷新状态”主动轮询结果。", "success")
@@ -8110,82 +13449,121 @@ def create_transcript_job():
 
 @app.post("/transcripts/<transcript_id>/submit")
 def submit_transcript_job(transcript_id: str):
-    store = load_stock_store()
-    transcript = get_transcript_entry(store, transcript_id)
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    try:
-        submit_transcript_job_to_tingwu(transcript)
-        touch_transcript_stocks(store, transcript)
-        save_stock_store(store)
-        flash("任务已提交到听悟。当前项目按主动轮询设计，请继续点击“刷新状态”获取结果。", "success")
-    except Exception as exc:
-        transcript["last_error"] = str(exc)[:2000]
-        transcript["updated_at"] = now_iso()
-        save_stock_store(store)
-        flash(f"提交到听悟失败：{exc}", "error")
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+
+        try:
+            submit_transcript_job_to_tingwu(transcript)
+            touch_transcript_stocks(store, transcript)
+            save_stock_store(store)
+            flash("任务已提交到听悟。当前项目按主动轮询设计，请继续点击“刷新状态”获取结果。", "success")
+        except Exception as exc:
+            transcript["last_error"] = str(exc)[:2000]
+            transcript["updated_at"] = now_iso()
+            save_stock_store(store)
+            flash(f"提交到听悟失败：{exc}", "error")
 
     return redirect(next_url)
 
 
 @app.post("/transcripts/<transcript_id>/sync")
 def sync_transcript_job(transcript_id: str):
-    store = load_stock_store()
-    transcript = get_transcript_entry(store, transcript_id)
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    try:
-        task_info = sync_transcript_job_from_tingwu(transcript)
-        touch_transcript_stocks(store, transcript)
-        save_stock_store(store)
-        if transcript["status"] == "completed":
-            flash("听悟结果已同步回来，转录内容已经写入页面。", "success")
-        elif transcript["status"] == "failed":
-            flash(
-                transcript.get("last_error") or "听悟任务返回失败状态，请检查云端任务。",
-                "error",
-            )
-        else:
-            flash(f"任务状态已刷新：{task_info.get('task_status') or '处理中'}。", "success")
-    except Exception as exc:
-        transcript["last_error"] = str(exc)[:2000]
-        transcript["updated_at"] = now_iso()
-        save_stock_store(store)
-        flash(f"刷新任务状态失败：{exc}", "error")
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+
+        try:
+            task_info = sync_transcript_job_from_tingwu(transcript)
+            touch_transcript_stocks(store, transcript)
+            save_stock_store(store)
+            if transcript["status"] == "completed":
+                flash("听悟结果已同步回来，转录内容已经写入页面。", "success")
+            elif transcript["status"] == "failed":
+                flash(
+                    transcript.get("last_error") or "听悟任务返回失败状态，请检查云端任务。",
+                    "error",
+                )
+            else:
+                flash(f"任务状态已刷新：{task_info.get('task_status') or '处理中'}。", "success")
+        except Exception as exc:
+            transcript["last_error"] = str(exc)[:2000]
+            transcript["updated_at"] = now_iso()
+            save_stock_store(store)
+            flash(f"刷新任务状态失败：{exc}", "error")
 
     return redirect(next_url)
 
 
 @app.post("/transcripts/sync-active")
 def sync_active_transcripts():
-    store = load_stock_store()
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
+    scope_symbol = normalize_stock_symbol(request.form.get("scope_symbol", "")) or ""
     refreshed = 0
     completed = 0
-    failed = 0
+    terminal_failed = 0
+    sync_errors = 0
+    scope_completed = 0
+    scope_terminal_failed = 0
 
-    for transcript in store.get("transcripts", []):
-        if transcript.get("status") not in {"queued", "processing"}:
-            continue
-        if not transcript.get("provider_task_id"):
-            continue
-        try:
-            sync_transcript_job_from_tingwu(transcript)
-            refreshed += 1
-            if transcript["status"] == "completed":
-                completed += 1
-            elif transcript["status"] == "failed":
-                failed += 1
-            touch_transcript_stocks(store, transcript)
-        except Exception as exc:
-            transcript["last_error"] = str(exc)[:2000]
-            transcript["updated_at"] = now_iso()
-            failed += 1
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
 
-    save_stock_store(store)
+        for transcript in store.get("transcripts", []):
+            if transcript.get("status") not in {"queued", "processing"}:
+                continue
+            if not transcript.get("provider_task_id"):
+                continue
+            try:
+                sync_transcript_job_from_tingwu(transcript)
+                refreshed += 1
+                in_scope = not scope_symbol or transcript_matches_symbol(transcript, scope_symbol)
+                if transcript["status"] == "completed":
+                    completed += 1
+                    if in_scope:
+                        scope_completed += 1
+                elif transcript["status"] == "failed":
+                    terminal_failed += 1
+                    if in_scope:
+                        scope_terminal_failed += 1
+                touch_transcript_stocks(store, transcript)
+            except Exception as exc:
+                transcript["last_error"] = str(exc)[:2000]
+                transcript["updated_at"] = now_iso()
+                sync_errors += 1
+
+        save_stock_store(store)
+        transcript_cards = build_transcript_cards(store, symbol_filter=scope_symbol or None)
+    counts = build_transcript_stats_payload(transcript_cards)
+
+    if expects_json_response():
+        has_terminal_updates = scope_completed > 0 or scope_terminal_failed > 0
+        should_reload = has_terminal_updates
+        return jsonify(
+            {
+                "ok": True,
+                "refreshed": refreshed,
+                "completed": completed,
+                "failed": terminal_failed,
+                "sync_errors": sync_errors,
+                "counts": counts,
+                "has_terminal_updates": has_terminal_updates,
+                "should_reload": should_reload,
+                "polled_at": now_iso(),
+            }
+        )
 
     if refreshed:
-        flash(f"已轮询 {refreshed} 个进行中任务，其中完成 {completed} 个，失败 {failed} 个。", "success")
+        flash(
+            f"已轮询 {refreshed} 个进行中任务，其中完成 {completed} 个，失败 {terminal_failed} 个。",
+            "success",
+        )
+    elif sync_errors:
+        flash(f"轮询时有 {sync_errors} 个任务暂时同步失败，请稍后再试。", "error")
     else:
         flash("当前没有需要轮询的进行中任务。", "success")
     return redirect(next_url)
@@ -8203,38 +13581,100 @@ def download_transcript_source(transcript_id: str):
     )
 
 
-@app.post("/transcripts/<transcript_id>/delete")
-def delete_transcript_job(transcript_id: str):
+@app.post("/transcripts/<transcript_id>/category")
+def update_transcript_category(transcript_id: str):
+    next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
+    scope_symbol = normalize_stock_symbol(request.form.get("scope_symbol", "")) or ""
+    raw_category = str(request.form.get("category") or "").strip()
+    if raw_category not in TRANSCRIPT_CATEGORY_META:
+        message = "无效的转录分类。"
+        if expects_json_response():
+            return jsonify({"ok": False, "message": message}), 400
+        flash(message, "error")
+        return redirect(next_url)
+
+    next_category = raw_category
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        transcript["category"] = next_category
+        transcript["updated_at"] = now_iso()
+        touch_transcript_stocks(store, transcript)
+        save_stock_store(store)
+
+        category_payload = build_transcript_category_payload(next_category)
+        message = f"已切换到“{category_payload['label']}”。"
+
+        if expects_json_response():
+            transcript_cards = build_transcript_cards(store, symbol_filter=scope_symbol or None)
+            return jsonify(
+                {
+                    "ok": True,
+                    "transcript_id": transcript_id,
+                    "category": category_payload,
+                    "counts": build_transcript_stats_payload(transcript_cards),
+                }
+            )
+
+    flash(message, "success")
+    return redirect(next_url)
+
+
+@app.get("/transcripts/<transcript_id>/export.pdf")
+def export_transcript_pdf(transcript_id: str):
     store = load_stock_store()
     transcript = get_transcript_entry(store, transcript_id)
-    linked_symbols = transcript_linked_symbols(transcript)
-    append_to_trash(
-        store,
-        create_trash_entry(
-            "transcript",
-            transcript,
-            symbol=str(linked_symbols[0] if linked_symbols else ""),
-            title=transcript.get("title") or transcript.get("original_name") or "会议转录",
-        ),
-    )
-    store["transcripts"] = [
-        item for item in store.get("transcripts", []) if item["id"] != transcript_id
-    ]
-    touch_transcript_stocks(store, transcript)
-    save_stock_store(store)
-    message = "会议转录任务已移入回收站。"
 
-    if expects_json_response():
-        transcript_cards = build_transcript_cards(store)
-        return jsonify(
-            {
-                "ok": True,
-                "message": message,
-                "deleted_id": transcript_id,
-                "trash_count": len(store.get("trash", [])),
-                "counts": build_transcript_stats_payload(transcript_cards),
-            }
+    try:
+        pdf_buffer, download_name = build_transcript_pdf_buffer(transcript)
+    except RuntimeError as exc:
+        flash(str(exc), "error")
+        next_url = request.args.get("next") or url_for("transcripts_page")
+        return redirect(safe_next_url(next_url, url_for("transcripts_page")))
+
+    return send_file(
+        pdf_buffer,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=download_name,
+        max_age=0,
+    )
+
+
+@app.post("/transcripts/<transcript_id>/delete")
+def delete_transcript_job(transcript_id: str):
+    scope_symbol = normalize_stock_symbol(request.form.get("scope_symbol", "")) or ""
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        linked_symbols = transcript_linked_symbols(transcript)
+        append_to_trash(
+            store,
+            create_trash_entry(
+                "transcript",
+                transcript,
+                symbol=str(linked_symbols[0] if linked_symbols else ""),
+                title=transcript.get("title") or transcript.get("original_name") or "会议转录",
+            ),
         )
+        store["transcripts"] = [
+            item for item in store.get("transcripts", []) if item["id"] != transcript_id
+        ]
+        touch_transcript_stocks(store, transcript)
+        save_stock_store(store)
+        message = "会议转录任务已移入回收站。"
+
+        if expects_json_response():
+            transcript_cards = build_transcript_cards(store, symbol_filter=scope_symbol or None)
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": message,
+                    "deleted_id": transcript_id,
+                    "trash_count": len(store.get("trash", [])),
+                    "counts": build_transcript_stats_payload(transcript_cards),
+                }
+            )
 
     flash(message, "success")
     return redirect(safe_next_url(request.form.get("next_url"), url_for("transcripts_page")))
@@ -8278,6 +13718,18 @@ def stocks_calendar_modal() -> str:
 def stock_detail(symbol: str) -> str:
     symbol = require_stock_symbol(symbol)
     store = load_stock_store()
+    if not build_stock_earnings_view(ensure_stock_entry(store, symbol)).get("has_date"):
+        try:
+            earnings_info = fetch_next_stock_earnings(symbol)
+        except Exception:
+            earnings_info = None
+        if earnings_info:
+            with STOCK_STORE_LOCK:
+                writable_store = load_stock_store()
+                apply_stock_earnings_snapshot(writable_store, symbol, earnings_info)
+                save_stock_store(writable_store)
+            store = load_stock_store()
+
     detail = build_stock_detail(store, symbol)
     stock_calendar = build_activity_calendar_context(
         build_stock_activity(store, symbol_filter=symbol),
@@ -8300,6 +13752,26 @@ def stock_detail(symbol: str) -> str:
         return_to=request.full_path if request.query_string else request.path,
         **build_navigation_context(active_page="stocks", stock_store=store),
     )
+
+
+@app.post("/stocks/<symbol>/earnings/sync")
+def sync_stock_earnings(symbol: str):
+    symbol = require_stock_symbol(symbol)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("stock_detail", symbol=symbol))
+
+    try:
+        earnings_info = fetch_next_stock_earnings(symbol)
+    except Exception as exc:
+        flash(f"{symbol} 的业绩期同步失败：{exc}", "error")
+        return redirect(next_url)
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        apply_stock_earnings_snapshot(store, symbol, earnings_info)
+        save_stock_store(store)
+
+    flash(f"{symbol} 的下一次业绩已同步，并写入日程。", "success")
+    return redirect(next_url)
 
 
 @app.post("/stocks/groups")
@@ -8768,6 +14240,11 @@ def delete_stock_file(symbol: str, file_id: str):
 def raw_report(filename: str):
     report_path = validate_report_name(filename)
     return send_from_directory(REPORTS_DIR, report_path.name, as_attachment=False)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return send_from_directory(app.static_folder, "mindmap-studio-favicon.svg", mimetype="image/svg+xml")
 
 
 if __name__ == "__main__":

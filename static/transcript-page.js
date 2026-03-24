@@ -1,6 +1,20 @@
 (function () {
   const MODAL_TRANSITION_MS = 220;
   const REMOVE_TRANSITION_MS = 180;
+  const TRANSCRIPT_CATEGORY_LABELS = {
+    work: "工作",
+    reading: "阅读",
+  };
+  let activeTranscriptCategoryFilter = "";
+
+  function getTranscriptScopeSymbol() {
+    const scopeNode = document.querySelector("[data-transcript-scope-symbol]");
+    if (!(scopeNode instanceof HTMLElement)) {
+      return "";
+    }
+
+    return String(scopeNode.getAttribute("data-transcript-scope-symbol") || "").trim().toUpperCase();
+  }
 
   function setGroupDisabled(group, disabled) {
     group.classList.toggle("is-disabled", disabled);
@@ -289,9 +303,8 @@
       return card.getAttribute("data-transcript-linked") === "true";
     }).length;
     const active = cards.filter(function (card) {
-      const statusNode = card.querySelector(".status-pill");
-      const statusText = statusNode ? statusNode.textContent.trim() : "";
-      return statusText === "排队中" || statusText === "转录中";
+      const status = card.getAttribute("data-transcript-status") || "";
+      return status === "queued" || status === "processing";
     }).length;
 
     return {
@@ -303,10 +316,182 @@
     };
   }
 
-  function updateCountNodes(selector, value) {
+  function computeCategoryCountsFromDom() {
+    const countsByCategory = {};
+    document.querySelectorAll("[data-transcript-category-card]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const key = card.getAttribute("data-transcript-category-card") || "";
+      if (!key) {
+        return;
+      }
+
+      countsByCategory[key] = {
+        total: 0,
+        completed: 0,
+        queue: 0,
+      };
+    });
+
+    document.querySelectorAll("[data-transcript-card]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const key = card.getAttribute("data-transcript-category") || "work";
+      if (!countsByCategory[key]) {
+        countsByCategory[key] = {
+          total: 0,
+          completed: 0,
+          queue: 0,
+        };
+      }
+
+      countsByCategory[key].total += 1;
+      if (card.getAttribute("data-transcript-group") === "completed") {
+        countsByCategory[key].completed += 1;
+      } else {
+        countsByCategory[key].queue += 1;
+      }
+    });
+
+    return countsByCategory;
+  }
+
+  function getTranscriptCategoryLabel(category) {
+    return TRANSCRIPT_CATEGORY_LABELS[category] || TRANSCRIPT_CATEGORY_LABELS.work;
+  }
+
+  function normalizeTranscriptCategoryFilter(category) {
+    return Object.prototype.hasOwnProperty.call(TRANSCRIPT_CATEGORY_LABELS, category) ? category : "";
+  }
+
+  function updateTranscriptCategoryChip(node, category) {
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+
+    node.classList.remove("is-work", "is-reading");
+    node.classList.add(`is-${category}`);
+    node.setAttribute("data-transcript-category", category);
+    node.textContent = getTranscriptCategoryLabel(category);
+  }
+
+  function updateTranscriptCategoryChipCollection(nodes, transcriptId, category) {
+    nodes.forEach(function (node) {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+
+      if ((node.getAttribute("data-transcript-id") || "") !== transcriptId) {
+        return;
+      }
+
+      updateTranscriptCategoryChip(node, category);
+    });
+  }
+
+  function setTranscriptCategoryBusy(transcriptId, isBusy) {
+    document.querySelectorAll("[data-transcript-category-switcher]").forEach(function (node) {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+
+      if ((node.getAttribute("data-transcript-id") || "") !== transcriptId) {
+        return;
+      }
+
+      if (isBusy) {
+        node.setAttribute("aria-busy", "true");
+      } else {
+        node.removeAttribute("aria-busy");
+      }
+    });
+
+    document.querySelectorAll("[data-transcript-category-set]").forEach(function (node) {
+      if (!(node instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      if ((node.getAttribute("data-transcript-id") || "") !== transcriptId) {
+        return;
+      }
+
+      node.disabled = isBusy;
+      node.classList.toggle("is-updating", isBusy);
+      if (isBusy) {
+        node.setAttribute("aria-busy", "true");
+      } else {
+        node.removeAttribute("aria-busy");
+      }
+    });
+  }
+
+  function updateTranscriptCategoryButtonCollection(nodes, transcriptId, category) {
+    nodes.forEach(function (node) {
+      if (!(node instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      if ((node.getAttribute("data-transcript-id") || "") !== transcriptId) {
+        return;
+      }
+
+      const targetCategory = node.getAttribute("data-transcript-category-set") || "";
+      const isActive = targetCategory === category;
+      node.classList.toggle("is-active", isActive);
+      node.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+
+  function applyTranscriptCategory(transcriptId, category) {
+    document.querySelectorAll("[data-transcript-card]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      if ((card.getAttribute("data-transcript-id") || "") !== transcriptId) {
+        return;
+      }
+
+      card.setAttribute("data-transcript-category", category);
+    });
+
+    updateTranscriptCategoryChipCollection(
+      document.querySelectorAll("[data-transcript-category-chip]"),
+      transcriptId,
+      category
+    );
+    updateTranscriptCategoryButtonCollection(
+      document.querySelectorAll("[data-transcript-category-set]"),
+      transcriptId,
+      category
+    );
+
+    const template = document.getElementById(`transcript-reader-${transcriptId}`);
+    if (template instanceof HTMLTemplateElement) {
+      updateTranscriptCategoryChipCollection(
+        template.content.querySelectorAll("[data-transcript-category-chip]"),
+        transcriptId,
+        category
+      );
+      updateTranscriptCategoryButtonCollection(
+        template.content.querySelectorAll("[data-transcript-category-set]"),
+        transcriptId,
+        category
+      );
+    }
+
+    applyTranscriptCategoryFilter();
+    syncTranscriptStats();
+  }
+
+  function updateCountNodes(selector, value, unit) {
     document.querySelectorAll(selector).forEach(function (node) {
       if (node instanceof HTMLElement) {
-        node.textContent = node.classList.contains("summary-count") ? `${value}` : `${value} 个`;
+        node.textContent = node.classList.contains("summary-count") ? `${value}` : `${value} ${unit}`;
       }
     });
   }
@@ -314,7 +499,11 @@
   function syncQueueEmptyState() {
     const list = document.querySelector("[data-transcript-queue-list]");
     const empty = document.querySelector("[data-transcript-queue-empty]");
-    const count = document.querySelectorAll("[data-transcript-card][data-transcript-group='queue']").length;
+    const count = Array.from(document.querySelectorAll("[data-transcript-card][data-transcript-group='queue']")).filter(
+      function (card) {
+        return card instanceof HTMLElement && !card.hidden;
+      }
+    ).length;
 
     if (list instanceof HTMLElement) {
       list.hidden = count === 0;
@@ -327,7 +516,11 @@
   function syncCompletedEmptyState() {
     const list = document.querySelector("[data-transcript-completed-list]");
     const empty = document.querySelector("[data-transcript-completed-empty]");
-    const count = document.querySelectorAll("[data-transcript-card][data-transcript-group='completed']").length;
+    const count = Array.from(
+      document.querySelectorAll("[data-transcript-card][data-transcript-group='completed']")
+    ).filter(function (card) {
+      return card instanceof HTMLElement && !card.hidden;
+    }).length;
 
     if (list instanceof HTMLElement) {
       list.hidden = count === 0;
@@ -346,21 +539,95 @@
     syncForm.hidden = !counts.active;
   }
 
+  function syncTranscriptCategoryCards(nextCountsByCategory) {
+    const countsByCategory = nextCountsByCategory || computeCategoryCountsFromDom();
+
+    document.querySelectorAll("[data-transcript-category-card]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const key = card.getAttribute("data-transcript-category-card") || "";
+      const counts = countsByCategory[key] || { total: 0, completed: 0, queue: 0 };
+
+      const totalNode = card.querySelector("[data-transcript-category-total]");
+      if (totalNode instanceof HTMLElement) {
+        totalNode.textContent = `${counts.total}`;
+      }
+
+      const completedNode = card.querySelector("[data-transcript-category-completed]");
+      if (completedNode instanceof HTMLElement) {
+        completedNode.textContent = `${counts.completed}`;
+      }
+
+      const queueNode = card.querySelector("[data-transcript-category-queue]");
+      if (queueNode instanceof HTMLElement) {
+        queueNode.textContent = `${counts.queue}`;
+      }
+    });
+  }
+
+  function syncTranscriptCategoryFilterCards() {
+    const activeFilter = normalizeTranscriptCategoryFilter(activeTranscriptCategoryFilter);
+
+    document.querySelectorAll("[data-transcript-category-filter]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const key = card.getAttribute("data-transcript-category-filter") || "";
+      const isActive = Boolean(activeFilter) && key === activeFilter;
+      card.classList.toggle("is-filter-active", isActive);
+      card.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+
+  function applyTranscriptCategoryFilter() {
+    const activeFilter = normalizeTranscriptCategoryFilter(activeTranscriptCategoryFilter);
+
+    document.querySelectorAll("[data-transcript-card]").forEach(function (card) {
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const category = card.getAttribute("data-transcript-category") || "work";
+      const shouldHide = Boolean(activeFilter) && category !== activeFilter;
+      card.hidden = shouldHide;
+      card.setAttribute("aria-hidden", shouldHide ? "true" : "false");
+    });
+
+    syncTranscriptCategoryFilterCards();
+    syncQueueEmptyState();
+    syncCompletedEmptyState();
+  }
+
+  function setTranscriptCategoryFilter(nextFilter) {
+    const normalizedFilter = normalizeTranscriptCategoryFilter(nextFilter);
+    if (!normalizedFilter) {
+      return;
+    }
+
+    activeTranscriptCategoryFilter =
+      activeTranscriptCategoryFilter === normalizedFilter ? "" : normalizedFilter;
+    applyTranscriptCategoryFilter();
+  }
+
   function syncTranscriptStats(nextCounts) {
     const counts = nextCounts || computeCountsFromDom();
 
-    updateCountNodes("[data-transcript-completed-count]", counts.completed);
-    updateCountNodes("[data-transcript-queue-count]", counts.queue);
-    updateCountNodes("[data-transcript-linked-count]", counts.linked);
+    updateCountNodes("[data-transcript-completed-count]", counts.completed, "条");
+    updateCountNodes("[data-transcript-queue-count]", counts.queue, "条");
+    updateCountNodes("[data-transcript-linked-count]", counts.linked, "只");
 
     const totalLabel = document.querySelector("[data-transcript-total-label]");
     if (totalLabel instanceof HTMLElement) {
-      totalLabel.textContent = `当前已存 ${counts.total} 个转录任务`;
+      totalLabel.textContent = `当前已存 ${counts.total} 条转录任务`;
     }
 
     syncQueueEmptyState();
     syncCompletedEmptyState();
     syncSyncButton(counts);
+    syncTranscriptCategoryCards();
   }
 
   function removeTranscriptCard(card, transcriptId, counts, message) {
@@ -379,6 +646,10 @@
     if (detachedTemplate instanceof HTMLElement && !card.contains(detachedTemplate)) {
       detachedTemplate.remove();
     }
+    const detachedContentTemplate = document.getElementById(`transcript-content-${transcriptId}`);
+    if (detachedContentTemplate instanceof HTMLElement && !card.contains(detachedContentTemplate)) {
+      detachedContentTemplate.remove();
+    }
 
     window.setTimeout(function () {
       card.remove();
@@ -387,6 +658,384 @@
         showFlash("success", message);
       }
     }, REMOVE_TRANSITION_MS);
+  }
+
+  function setupCategoryToggles() {
+    const pendingUpdates = new Set();
+
+    document.addEventListener(
+      "click",
+      function (event) {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+
+        const button = target.closest("[data-transcript-category-set]");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const transcriptId = button.getAttribute("data-transcript-id") || "";
+        const desiredCategory = button.getAttribute("data-transcript-category-set") || "";
+        const switcher = button.closest("[data-transcript-category-switcher]");
+        const actionUrl = switcher instanceof HTMLElement ? switcher.getAttribute("data-transcript-category-url") || "" : "";
+        const activeChip = document.querySelector(
+          `[data-transcript-category-chip][data-transcript-id='${transcriptId}']`
+        );
+        const currentCategory =
+          activeChip instanceof HTMLElement ? activeChip.getAttribute("data-transcript-category") || "work" : "work";
+        const scopeSymbol = getTranscriptScopeSymbol();
+
+        if (!transcriptId || !actionUrl || !desiredCategory || pendingUpdates.has(transcriptId)) {
+          return;
+        }
+
+        if (desiredCategory === currentCategory) {
+          return;
+        }
+
+        pendingUpdates.add(transcriptId);
+        setTranscriptCategoryBusy(transcriptId, true);
+
+        fetch(actionUrl, {
+          method: "POST",
+          body: new URLSearchParams(
+            Object.assign(
+              {
+                category: desiredCategory,
+              },
+              scopeSymbol
+                ? {
+                    scope_symbol: scopeSymbol,
+                  }
+                : {}
+            )
+          ),
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            Accept: "application/json",
+          },
+          cache: "no-store",
+        })
+          .then(function (response) {
+            return response
+              .json()
+              .catch(function () {
+                return null;
+              })
+              .then(function (payload) {
+                if (!response.ok || !payload || payload.ok !== true) {
+                  throw new Error((payload && payload.message) || "切换分类失败，请稍后再试。");
+                }
+                return payload;
+              });
+          })
+          .then(function (payload) {
+            const appliedCategory =
+              payload &&
+              payload.category &&
+              typeof payload.category.key === "string" &&
+              payload.category.key
+                ? payload.category.key
+                : desiredCategory;
+            applyTranscriptCategory(transcriptId, appliedCategory);
+          })
+          .catch(function (error) {
+            showFlash("error", error instanceof Error ? error.message : "切换分类失败，请稍后再试。");
+          })
+          .finally(function () {
+            pendingUpdates.delete(transcriptId);
+            setTranscriptCategoryBusy(transcriptId, false);
+          });
+      },
+      true
+    );
+
+    document.addEventListener(
+      "keydown",
+      function (event) {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+
+        if (!target.closest("[data-transcript-category-set]")) {
+          return;
+        }
+
+        if (event.key === "Enter" || event.key === " ") {
+          event.stopPropagation();
+        }
+      },
+      true
+    );
+  }
+
+  function setupCategoryFilters() {
+    document.addEventListener("click", function (event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      const card = target.closest("[data-transcript-category-filter]");
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      const nextFilter = card.getAttribute("data-transcript-category-filter") || "";
+      if (!nextFilter) {
+        return;
+      }
+
+      event.preventDefault();
+      setTranscriptCategoryFilter(nextFilter);
+    });
+
+    document.addEventListener("keydown", function (event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      const card = target.closest("[data-transcript-category-filter]");
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+
+      const nextFilter = card.getAttribute("data-transcript-category-filter") || "";
+      if (!nextFilter) {
+        return;
+      }
+
+      event.preventDefault();
+      setTranscriptCategoryFilter(nextFilter);
+    });
+
+    syncTranscriptCategoryFilterCards();
+  }
+
+  function hydrateTranscriptContentHosts(root) {
+    if (!root || typeof root.querySelectorAll !== "function") {
+      return;
+    }
+
+    root.querySelectorAll("[data-transcript-content-host]").forEach(function (host) {
+      if (!(host instanceof HTMLElement) || host.dataset.transcriptContentReady === "true") {
+        return;
+      }
+
+      const transcriptId = host.getAttribute("data-transcript-content-host") || "";
+      if (!transcriptId) {
+        return;
+      }
+
+      const template = document.getElementById(`transcript-content-${transcriptId}`);
+      if (!(template instanceof HTMLTemplateElement)) {
+        return;
+      }
+
+      host.innerHTML = template.innerHTML;
+      host.dataset.transcriptContentReady = "true";
+    });
+  }
+
+  function setupTranscriptContentHydration() {
+    document.querySelectorAll("details[data-transcript-card]").forEach(function (card) {
+      if (!(card instanceof HTMLDetailsElement)) {
+        return;
+      }
+
+      if (card.open) {
+        hydrateTranscriptContentHosts(card);
+      }
+
+      card.addEventListener("toggle", function () {
+        if (card.open) {
+          hydrateTranscriptContentHosts(card);
+        }
+      });
+    });
+
+    const readerContent = document.querySelector("[data-reader-content]");
+    if (!(readerContent instanceof HTMLElement) || typeof MutationObserver === "undefined") {
+      return;
+    }
+
+    const observer = new MutationObserver(function () {
+      hydrateTranscriptContentHosts(readerContent);
+    });
+    observer.observe(readerContent, {
+      childList: true,
+      subtree: true,
+    });
+    hydrateTranscriptContentHosts(readerContent);
+  }
+
+  function setupAutoSyncPolling() {
+    const syncForm = document.querySelector("form[data-transcript-sync-form]");
+    if (!(syncForm instanceof HTMLFormElement) || !syncForm.action) {
+      return;
+    }
+
+    const rawPollSeconds = Number.parseInt(syncForm.getAttribute("data-transcript-poll-seconds") || "12", 10);
+    const pollIntervalMs = Math.max(6, Number.isFinite(rawPollSeconds) ? rawPollSeconds : 12) * 1000;
+    let timerId = 0;
+    let activeController = null;
+
+    function isOnline() {
+      return typeof navigator === "undefined" || typeof navigator.onLine !== "boolean" || navigator.onLine;
+    }
+
+    function hasActiveTranscripts() {
+      return Array.from(document.querySelectorAll("[data-transcript-card]")).some(function (card) {
+        if (!(card instanceof HTMLElement)) {
+          return false;
+        }
+
+        const status = card.getAttribute("data-transcript-status") || "";
+        return status === "queued" || status === "processing";
+      });
+    }
+
+    function clearTimer() {
+      if (!timerId) {
+        return;
+      }
+
+      window.clearTimeout(timerId);
+      timerId = 0;
+    }
+
+    function scheduleNextPoll() {
+      if (timerId || document.hidden || !isOnline() || !hasActiveTranscripts()) {
+        return;
+      }
+
+      timerId = window.setTimeout(function () {
+        timerId = 0;
+        poll();
+      }, pollIntervalMs);
+    }
+
+    function stopPolling() {
+      clearTimer();
+      if (activeController instanceof AbortController) {
+        activeController.abort();
+        activeController = null;
+      }
+    }
+
+    function handlePayload(payload) {
+      if (!payload || payload.ok !== true) {
+        scheduleNextPoll();
+        return;
+      }
+
+      if (payload.should_reload) {
+        window.location.reload();
+        return;
+      }
+
+      if (payload.counts) {
+        syncTranscriptStats(payload.counts);
+      }
+
+      if (!payload.counts || !payload.counts.active) {
+        stopPolling();
+        return;
+      }
+
+      scheduleNextPoll();
+    }
+
+    function poll() {
+      if (activeController || document.hidden || !isOnline()) {
+        scheduleNextPoll();
+        return;
+      }
+
+      if (!hasActiveTranscripts()) {
+        stopPolling();
+        return;
+      }
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(function () {
+        controller.abort();
+      }, Math.max(8000, pollIntervalMs));
+
+      activeController = controller;
+      fetch(syncForm.action, {
+        method: "POST",
+        body: new FormData(syncForm),
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      })
+        .then(function (response) {
+          return response
+            .json()
+            .catch(function () {
+              return null;
+            })
+            .then(function (payload) {
+              if (!response.ok) {
+                return null;
+              }
+
+              return payload;
+            });
+        })
+        .then(handlePayload)
+        .catch(function (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            return;
+          }
+
+          scheduleNextPoll();
+        })
+        .finally(function () {
+          window.clearTimeout(timeoutId);
+          if (activeController === controller) {
+            activeController = null;
+          }
+        });
+    }
+
+    poll();
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        stopPolling();
+        return;
+      }
+
+      poll();
+    });
+
+    window.addEventListener("online", function () {
+      poll();
+    });
+
+    window.addEventListener("pageshow", function () {
+      poll();
+    });
+
+    window.addEventListener("beforeunload", function () {
+      stopPolling();
+    });
   }
 
   function setupDeleteForms() {
@@ -464,7 +1113,11 @@
     }
 
     setupComposerModal();
+    setupCategoryFilters();
+    setupCategoryToggles();
     setupDeleteForms();
+    setupTranscriptContentHydration();
     syncTranscriptStats();
+    setupAutoSyncPolling();
   });
 })();

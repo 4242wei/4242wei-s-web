@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>活动日历</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='calendar-page.js', v='20260316-inline2') }}" defer></script>
 </head>
 <body>
@@ -16,21 +16,13 @@
       <section class="stock-hero panel calendar-hero" data-calendar-page-hero>
         <div class="stock-hero-copy">
           <p class="eyebrow">活动日历</p>
-          <h2>按天查看有股票的研究活动，并快速切换到任意年月。</h2>
+          <h2>日历总览</h2>
           <p class="story-dek">
             左边专注看整月分布，右边直接看当天具体条目。切换日期时会在当前页面内更新，
             不再把你拉回顶部。
           </p>
           <div class="story-actions">
             <a class="button button-primary" href="{{ url_for('stocks_workspace') }}">返回股票页</a>
-            <a
-              class="button button-secondary"
-              href="{{ url_for('stocks_calendar') }}"
-              data-calendar-launch
-              data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
-            >
-              打开弹窗日历
-            </a>
           </div>
         </div>
 
@@ -263,3 +255,4 @@
   </div>
 </body>
 </html>
+

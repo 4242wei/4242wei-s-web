@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 研究助手</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='ai-chat.js') }}?v=20260316-scope3" defer></script>
 </head>
 <body>
@@ -15,7 +15,7 @@
     <section class="panel ai-hero">
       <div class="ai-hero-copy">
         <p class="eyebrow">AI 研究助手</p>
-        <h2>像和 GPT 对话一样提问，但答案会优先来自你的网页资料库。</h2>
+        <h2>AI 问答</h2>
         <p class="story-dek">
           后端会先整理报告、个股笔记、研究资料和会议转录，再把当前范围内的知识正文交给只读模式的 Codex。它更适合回看时间线、找遗漏、做阶段对比，不会修改网页文件。
         </p>
@@ -52,7 +52,7 @@
               data-ai-scope-reset
               {% if not ai_scope_summary.has_filters %}hidden{% endif %}
             >
-              恢全站
+              恢复全站
             </button>
             {% if pending_message and active_session %}
               <form action="{{ url_for('stop_ai_message', message_id=pending_message.id) }}" method="post">
@@ -372,7 +372,7 @@
             </div>
 
             <div class="story-actions ai-scope-actions">
-              <button class="button button-ghost" type="button" data-ai-scope-reset>恢全站范围</button>
+              <button class="button button-ghost" type="button" data-ai-scope-reset>恢复全站范围</button>
               <button class="button button-primary" type="submit">保存这个范围</button>
             </div>
           </form>
@@ -382,3 +382,4 @@
   </div>
 </body>
 </html>
+

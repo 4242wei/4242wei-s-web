@@ -1,0 +1,184 @@
+{% if preview_kind == "note" and note %}
+  <article class="reader-sheet reader-sheet-note">
+    <div class="reader-sheet-head">
+      <div class="reader-sheet-head-copy">
+        <p class="eyebrow">研究笔记</p>
+        <h3>{{ note.display_title }}</h3>
+        <p class="reader-sheet-meta-line">{{ note.symbol }} · {{ note.display_created_at }}</p>
+      </div>
+      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭资料" data-reader-close>×</button>
+    </div>
+    {% if note.source_file_name_display %}
+      <div class="card-inline-meta reader-sheet-support">
+        <span class="meta-chip">关联文件</span>
+        {% if note.source_file %}
+          <a class="text-link" href="{{ url_for('download_stock_file', symbol=note.symbol, file_id=note.source_file.id) }}">{{ note.source_file_name_display }}</a>
+        {% else %}
+          <span class="section-caption">{{ note.source_file_name_display }}</span>
+        {% endif %}
+      </div>
+    {% endif %}
+    {% if note.tags %}
+      <div class="chip-row item-tag-row">
+        {% for tag in note.tags %}
+          <span class="detail-chip">#{{ tag }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <div class="reader-section-marker"><span>正文</span></div>
+    <div class="reader-sheet-stage">
+      <div class="reader-sheet-body reader-sheet-prose rich-output">{{ note.content_html | safe }}</div>
+    </div>
+  </article>
+{% elif preview_kind == "file" and file_entry %}
+  <article class="reader-sheet reader-sheet-file">
+    <div class="reader-sheet-head">
+      <div class="reader-sheet-head-copy">
+        <p class="eyebrow">研究资料</p>
+        <h3>{{ file_entry.original_name }}</h3>
+        <p class="reader-sheet-meta-line">{{ stock_symbol }} · {{ file_entry.display_uploaded_at }}</p>
+      </div>
+      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭资料" data-reader-close>×</button>
+    </div>
+    <div class="card-link-row reader-sheet-support">
+      <span class="meta-chip">{{ stock_symbol }}</span>
+      {% if file_entry.is_image_previewable %}
+        <span class="meta-chip">图片预览</span>
+      {% elif file_entry.is_text_previewable %}
+        <span class="meta-chip">文字预览</span>
+      {% else %}
+        <span class="meta-chip">下载查看</span>
+      {% endif %}
+      <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock_symbol, file_id=file_entry.id) }}">下载文件</a>
+      {% if is_truncated %}
+        <span class="meta-chip">内容已截断</span>
+      {% endif %}
+    </div>
+    {% if file_entry.description %}
+      <p class="field-help">{{ file_entry.description }}</p>
+    {% endif %}
+    <div class="reader-section-marker"><span>{% if file_entry.is_previewable %}正文{% else %}说明{% endif %}</span></div>
+    <div class="reader-sheet-stage file-preview-body">
+      {% if file_entry.is_image_previewable and preview_note_html %}
+        <div class="reader-sheet-body reader-sheet-prose file-preview-copy rich-output">
+          {{ preview_note_html | safe }}
+        </div>
+      {% endif %}
+
+      {% if file_entry.is_image_previewable %}
+        <div class="file-preview-media">
+          <img class="file-preview-image" src="{{ image_url }}" alt="{{ file_entry.original_name }}">
+        </div>
+      {% elif file_entry.is_text_previewable %}
+        <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
+          <pre class="text-preview">{{ preview_text }}</pre>
+        </div>
+      {% else %}
+        <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
+          <p>这个文件类型暂时不支持页内预览，先在这里保留标题和说明，真正查看时直接下载就行。</p>
+        </div>
+      {% endif %}
+    </div>
+  </article>
+{% elif preview_kind == "transcript" and transcript %}
+  <article class="reader-sheet reader-sheet-transcript">
+    <div class="reader-sheet-head">
+      <div class="reader-sheet-head-copy">
+        <p class="eyebrow">会议转录</p>
+        <h3>{{ transcript.display_title }}</h3>
+        <p class="reader-sheet-meta-line">上传于 {{ transcript.display_created_at }} · 会议日期 {{ transcript.meeting_date_label }}</p>
+      </div>
+      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭资料" data-reader-close>×</button>
+    </div>
+
+    <div class="card-inline-meta reader-sheet-support">
+      <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
+      <span class="meta-chip">{{ transcript.original_name }}</span>
+      {% if transcript.linked_symbols %}
+        <span class="meta-chip">关联股票 {{ transcript.linked_symbols_label }}</span>
+      {% endif %}
+      <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+    </div>
+
+    {% if transcript.tags %}
+      <div class="chip-row item-tag-row">
+        {% for tag in transcript.tags %}
+          <span class="detail-chip">#{{ tag }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if transcript.feature_chips %}
+      <div class="card-inline-meta">
+        {% for chip in transcript.feature_chips %}
+          <span class="meta-chip">{{ chip }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if transcript.last_error %}
+      <p class="field-help">最近错误：{{ transcript.last_error }}</p>
+    {% endif %}
+
+    <div class="reader-section-marker"><span>正文</span></div>
+    <div class="reader-sheet-stage">
+      <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
+    </div>
+  </article>
+{% elif preview_kind == "schedule" and schedule_item %}
+  <article class="reader-sheet reader-sheet-note">
+    <div class="reader-sheet-head">
+      <div class="reader-sheet-head-copy">
+        <p class="eyebrow">日程安排</p>
+        <h3>{{ schedule_item.title }}</h3>
+        <p class="reader-sheet-meta-line">{{ schedule_item.scheduled_date }} · {{ schedule_item.display_time }}</p>
+      </div>
+      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭资料" data-reader-close>×</button>
+    </div>
+
+    <div class="card-inline-meta reader-sheet-support">
+      <span class="meta-chip">{{ schedule_item.kind_label }}</span>
+      <span class="status-pill is-{{ schedule_item.status_tone }}">{{ schedule_item.status_label }}</span>
+      <span class="meta-chip">{{ schedule_item.priority_label }}</span>
+      {% if schedule_item.company_label %}<span class="meta-chip">{{ schedule_item.company_label }}</span>{% endif %}
+      {% if schedule_item.symbol %}<span class="meta-chip">{{ schedule_item.symbol }}</span>{% endif %}
+    </div>
+
+    {% if schedule_item.tags %}
+      <div class="chip-row item-tag-row">
+        {% for tag in schedule_item.tags %}
+          <span class="detail-chip">#{{ tag }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <div class="experts-preview-summary-grid">
+      <article>
+        <span class="mini-label">时间</span>
+        <strong>{{ schedule_item.display_time }}</strong>
+      </article>
+      <article>
+        <span class="mini-label">地点</span>
+        <strong>{{ schedule_item.location or "待补充" }}</strong>
+      </article>
+    </div>
+
+    <div class="reader-section-marker"><span>备注</span></div>
+    <div class="reader-sheet-stage">
+      <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
+        <p>{{ schedule_item.note or schedule_item.summary or "这条日程还没有补充更多说明。" }}</p>
+      </div>
+    </div>
+  </article>
+{% else %}
+  <article class="reader-sheet reader-sheet-note">
+    <div class="reader-sheet-head">
+      <div class="reader-sheet-head-copy">
+        <p class="eyebrow">资料预览</p>
+        <h3>当前无法打开这条资料</h3>
+        <p class="reader-sheet-meta-line">你可以稍后再试，或回到专家页重新勾稽一次。</p>
+      </div>
+      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭资料" data-reader-close>×</button>
+    </div>
+  </article>
+{% endif %}

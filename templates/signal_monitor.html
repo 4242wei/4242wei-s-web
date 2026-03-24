@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>信息监控</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-signal-groups1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260318-signal-groups1') }}" defer></script>
 </head>
@@ -16,7 +16,7 @@
     <section class="stock-hero panel signal-hero">
       <div class="stock-hero-copy">
         <p class="eyebrow">信息监控</p>
-        <h2>单独监控外部信号，再把变化沉淀成独立的观察记录。</h2>
+        <h2>信号监控</h2>
         <p class="story-dek">
           这里和正式研究隔离开，只负责抓取大 V / 公开账号的新发言，再交给 Codex 做变化归纳。
           结果会写进 <span class="inline-path">{{ signal_reports_dir }}</span>，不会污染你正式的研究资料库。

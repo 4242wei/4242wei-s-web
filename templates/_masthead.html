@@ -3,9 +3,12 @@
   "monitor": "Monitor",
   "signals": "信息监控",
   "stocks": "股票工作台",
+  "schedule": "日程",
+  "experts": "专家记录",
   "transcripts": "语音转录",
   "exports": "导出",
   "ai": "AI",
+  "mindmaps": "研究导图",
   "calendar": "活动日历",
   "search": "全局搜索",
   "trash": "回收站",
@@ -15,21 +18,31 @@
   {"key": "monitor", "label": "Monitor", "short": "监", "href": url_for("monitor_page")},
   {"key": "signals", "label": "信息监控", "short": "信", "href": url_for("signal_monitor_page")},
   {"key": "stocks", "label": "股票工作台", "short": "股", "href": url_for("stocks_workspace")},
+  {"key": "schedule", "label": "日程", "short": "程", "href": url_for("schedule_page")},
+  {"key": "experts", "label": "专家记录", "short": "专", "href": url_for("experts_page")},
   {"key": "transcripts", "label": "语音转录", "short": "录", "href": url_for("transcripts_page")},
   {"key": "exports", "label": "导出", "short": "导", "href": url_for("export_center_page")},
   {"key": "ai", "label": "AI", "short": "AI", "href": url_for("ai_workspace")},
+  {"key": "mindmaps", "label": "研究导图", "short": "图", "href": url_for("mindmap_workspace")},
   {"key": "search", "label": "全局搜索", "short": "搜", "href": url_for("global_search")},
   {"key": "trash", "label": "回收站", "short": "回", "href": url_for("trash_page")},
 ] %}
 {% set theme_options = [
   {"key": "cloud-blue", "label": "云岸淡蓝", "caption": "云岸淡蓝，晨雾、海风和柔白纸面。", "swatches": ["#edf3ff", "#fbfdff", "#cfdcff"]},
-  {"key": "summer-sunset", "label": "夏日日落橘", "caption": "浅橙、暖白和一点晚霞金。", "swatches": ["#fff1de", "#fffaf4", "#ffd7a8"]},
-  {"key": "westlake-snow", "label": "西湖雪日白", "caption": "冰湖浅蓝、雪雾白和远山冷青灰。", "swatches": ["#eef6ff", "#fbfdff", "#c0d2ea"]},
+  {"key": "race", "label": "RACE", "caption": "", "swatches": ["#fff7f0", "#d70f1f", "#b90b19", "#ffd339"]},
+  {"key": "summer-sunset", "label": "夏日日落橘", "caption": "橘海余晖、盐白天光和远处刚起的深蓝时分。", "swatches": ["#fff4e8", "#ffd8ab", "#f08a43", "#6b89b8"]},
+  {"key": "summer-night-breeze", "label": "夏夜晚风", "caption": "街灯琥珀、深蓝天幕和小城夏夜的风。", "swatches": ["#fff2e1", "#ffb877", "#466b97", "#24344c"]},
+  {"key": "seaside-blue-hour", "label": "海风蓝调", "caption": "余晖刚退、地平线一线紫粉，海边空气已经慢慢转深蓝。", "swatches": ["#fff6eb", "#ffb57c", "#7f76c8", "#2f58a4", "#11244e"]},
+  {"key": "westlake-snow", "label": "西湖雪日白", "caption": "晴雪天光、雾蓝远山、冰湖留白和冷静纸面。", "swatches": ["#fbfdff", "#eef5fd", "#dee9f6", "#b6c7dc", "#70849e"]},
   {"key": "spring-moss", "label": "春色新绿", "caption": "薄雾青绿与安静纸白。", "swatches": ["#eef8f1", "#fbfdf9", "#c7e3cb"]},
   {"key": "plum-rain", "label": "梅雨青岚", "caption": "潮湿青灰和柔蓝空气。", "swatches": ["#edf4f8", "#fbfcfd", "#cad9e3"]},
+  {"key": "jiangnan-drizzle", "label": "江南烟雨", "caption": "水巷灰青、纸窗雾白和檐下的轻雨。", "swatches": ["#f7fbfa", "#d7e3df", "#94a9aa", "#6d8188"]},
   {"key": "golden-mist", "label": "金风晴岚", "caption": "淡天青、远山蓝和银杏金，像秋日薄光落在雾里。", "swatches": ["#eef6fb", "#fffdf6", "#ebd06a"]},
   {"key": "starlit-nebula", "label": "星云静夜", "caption": "深蓝边缘、银紫星雾和安静纸白。", "swatches": ["#eef2ff", "#fbfcff", "#cfcff8"]},
+  {"key": "starry-night", "label": "星月夜", "caption": "钴蓝夜空、旋涡云流和金色星月，灵感取自《星月夜》。", "swatches": ["#0f274f", "#1d4776", "#f1d27d", "#fbf7eb"]},
   {"key": "autumn-amber", "label": "秋山暖茶", "caption": "茶棕、栗金和轻暖米纸。", "swatches": ["#fbf0e3", "#fffaf2", "#d8b78b"]},
+  {"key": "monet-parasol", "label": "莫奈晴风", "caption": "高空云白、伞面柔粉、草地新绿和被风抬起的午后蓝，灵感取自《撑阳伞的女人》。", "swatches": ["#fbfdf7", "#d9eef8", "#81abd2", "#9dc986", "#f2c4c2"]},
+  {"key": "impression-sunrise", "label": "印象日出", "caption": "港口晨雾、蓝灰水面、橙色日轮和薄雾里的反光，灵感取自《印象·日出》。", "swatches": ["#f7faf8", "#d8e7ea", "#89a7bd", "#5d748d", "#ef9357"]},
 ] %}
 {% set current_page_title = page_titles.get(active_page, "报告归档") %}
 
@@ -128,8 +141,6 @@
         href="{{ url_for('stocks_calendar') }}"
         title="活动日历"
         aria-label="打开活动日历"
-        data-calendar-launch
-        data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M7 3V6"></path>
@@ -155,7 +166,7 @@
     </div>
     <div class="masthead-meta">
       <span>{{ nav_reports_count }} 篇报告</span>
-      <span>{{ nav_stock_count }} 只股票 | {{ nav_favorites_count }} 只自选 | {{ nav_group_count }} 个分组 | {{ nav_transcript_count }} 个转录任务 | {{ nav_trash_count }} 个回收站条目</span>
+      <span>{{ nav_stock_count }} 只股票 | {{ nav_favorites_count }} 只自选 | {{ nav_group_count }} 个分组 | {{ nav_schedule_count }} 条待处理日程 | {{ nav_expert_count }} 位专家 | {{ nav_transcript_count }} 个转录任务 | {{ nav_trash_count }} 个回收站条目</span>
     </div>
   </div>
   <nav class="masthead-nav masthead-nav--fallback" aria-label="主导航">

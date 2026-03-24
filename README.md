@@ -2,6 +2,16 @@
 
 This project turns a folder of Markdown files into a simple website.
 
+## Structure Guide
+
+To keep the web app growing without quietly accumulating technical debt, see:
+
+- [docs/WEB_STRUCTURE.md](docs/WEB_STRUCTURE.md)
+- [GITHUB_SHARE_GUIDE.md](GITHUB_SHARE_GUIDE.md)
+- [docs/CODEX_DEPLOY.md](docs/CODEX_DEPLOY.md)
+
+These docs record the current page/module boundaries, data-store ownership, the code-only sharing rules, and the safe deployment path for another user or another Codex instance.
+
 By default, `start.bat` points the site at:
 
 ```text
@@ -149,3 +159,5 @@ REPORTS_DIR=D:\their\reports\folder
 If they want to enable Tingwu / OSS on their own machine, they should also put their own local credentials into `.env.local`.
 
 For the full code-only sharing guide, see [GITHUB_SHARE_GUIDE.md](GITHUB_SHARE_GUIDE.md).
+
+If another user or another Codex instance needs a clean deployment guide for this repo, use [docs/CODEX_DEPLOY.md](docs/CODEX_DEPLOY.md).

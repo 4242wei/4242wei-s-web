@@ -5,6 +5,7 @@
     <option value="h3">小标题</option>
     <option value="blockquote">引用</option>
   </select>
+
   <select class="rich-select" data-editor-font>
     <option value="">字体</option>
     <option value="'Segoe UI Variable Text', 'PingFang SC', 'Microsoft YaHei UI', sans-serif">无衬线</option>
@@ -23,6 +24,7 @@
     <option value="Arial, Helvetica, sans-serif">Arial</option>
     <option value="'Courier New', Consolas, monospace">等宽</option>
   </select>
+
   <select class="rich-select" data-editor-font-size>
     <option value="">字号</option>
     <option value="12px">12</option>
@@ -33,6 +35,7 @@
     <option value="28px">28</option>
     <option value="36px">36</option>
   </select>
+
   <button class="rich-tool" type="button" title="加粗" aria-label="加粗" data-editor-command="bold"><strong>B</strong></button>
   <button class="rich-tool" type="button" title="斜体" aria-label="斜体" data-editor-command="italic"><em>I</em></button>
   <button class="rich-tool" type="button" title="下划线" aria-label="下划线" data-editor-command="underline"><u>U</u></button>
@@ -40,8 +43,9 @@
   <button class="rich-tool" type="button" title="左对齐" aria-label="左对齐" data-editor-command="justifyLeft">左</button>
   <button class="rich-tool" type="button" title="居中" aria-label="居中" data-editor-command="justifyCenter">中</button>
   <button class="rich-tool" type="button" title="右对齐" aria-label="右对齐" data-editor-command="justifyRight">右</button>
-  <button class="rich-tool" type="button" data-editor-command="insertUnorderedList">• 列表</button>
-  <button class="rich-tool" type="button" data-editor-command="insertOrderedList">1. 列表</button>
+  <button class="rich-tool" type="button" title="无序列表" aria-label="无序列表" data-editor-command="insertUnorderedList">• 列表</button>
+  <button class="rich-tool" type="button" title="有序列表" aria-label="有序列表" data-editor-command="insertOrderedList">1. 列表</button>
+
   <div class="rich-color-palette">
     <span class="rich-palette-label">字色</span>
     <button class="rich-swatch rich-swatch-text" type="button" title="深灰" aria-label="深灰字色" data-editor-color-command="foreColor" data-editor-color-value="#1f2f49" style="--swatch:#1f2f49;"></button>
@@ -55,6 +59,7 @@
       <input type="color" value="#1f2f49" data-editor-color="foreColor">
     </label>
   </div>
+
   <div class="rich-color-palette">
     <span class="rich-palette-label">底色</span>
     <button class="rich-swatch" type="button" title="浅黄" aria-label="浅黄底色" data-editor-color-command="hiliteColor" data-editor-color-value="#fff1a8" style="--swatch:#fff1a8;"></button>
@@ -68,9 +73,11 @@
       <input type="color" value="#fff1a8" data-editor-color="hiliteColor">
     </label>
   </div>
+
   <label class="rich-tool rich-tool-upload" title="插入图片">
     <span>插图</span>
     <input type="file" accept="image/*" multiple data-editor-image-input>
   </label>
+
   <button class="rich-tool" type="button" data-editor-command="removeFormat">清除格式</button>
 </div>

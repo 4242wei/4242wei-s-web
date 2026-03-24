@@ -6,6 +6,8 @@ pypdf==6.8.0
 python-docx==1.2.0
 python-dotenv==1.2.2
 requests==2.32.5
+selenium==4.41.0
 oss2==2.19.1
 alibabacloud-tea-openapi==0.4.3
 alibabacloud-tingwu20230930==2.0.24
+reportlab==4.4.4

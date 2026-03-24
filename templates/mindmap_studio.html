@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mindmap Studio</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='mindmap-studio-favicon.svg', v='20260324-studio2') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='mindmap-studio.css', v='20260324-studio2') }}">
+  <script src="{{ url_for('static', filename='mindmap-studio.js', v='20260324-studio2') }}" defer></script>
+</head>
+<body class="studio-body">
+  <div
+    class="studio-app"
+    data-studio-root
+    data-bootstrap-url="{{ mindmap_studio_bootstrap_url }}"
+    data-create-url="{{ mindmap_studio_create_url }}"
+    data-current-url="{{ mindmap_studio_current_url }}"
+    data-save-url-template="{{ url_for('save_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-duplicate-url-template="{{ url_for('duplicate_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-delete-url-template="{{ url_for('delete_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-export-url-template="{{ url_for('export_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-requested-doc="{{ requested_document_id }}"
+  >
+    <aside class="studio-rail">
+      <div class="studio-brand-block">
+        <p class="studio-eyebrow">Lab Surface</p>
+        <h1>Mindmap Studio</h1>
+        <p class="studio-muted">
+          独立孵化中的专业导图工作台。先不挂主站导航，但数据结构和画布形式已经按网页嵌入做了适配。
+        </p>
+      </div>
+
+      <section class="studio-section">
+        <div class="studio-section-head">
+          <h2>新建模板</h2>
+        </div>
+        <div class="studio-template-grid" data-studio-template-grid></div>
+      </section>
+
+      <section class="studio-section studio-section-grow">
+        <div class="studio-section-head">
+          <h2>文档</h2>
+          <button class="studio-mini-button" type="button" data-studio-refresh>刷新</button>
+        </div>
+        <div class="studio-document-list" data-studio-document-list></div>
+      </section>
+
+      <section class="studio-section studio-section-foot">
+        <div class="studio-kv">
+          <span>适配目标</span>
+          <strong>网页嵌入 / 独立窗口 / 未来生成参考</strong>
+        </div>
+        <div class="studio-kv">
+          <span>设计重点</span>
+          <strong>基线快照、可编辑链条、验证层分离</strong>
+        </div>
+      </section>
+    </aside>
+
+    <main class="studio-main">
+      <header class="studio-header">
+        <div class="studio-header-copy">
+          <p class="studio-eyebrow">工作台</p>
+          <div class="studio-title-row">
+            <input class="studio-title-input" type="text" value="" placeholder="导图标题" data-studio-document-title>
+            <span class="studio-save-state" data-studio-save-state>加载中</span>
+          </div>
+          <p class="studio-muted" data-studio-document-meta>
+            这里会显示布局、基线和最后编辑时间。
+          </p>
+        </div>
+
+        <div class="studio-header-actions">
+          <label class="studio-field studio-field-compact">
+            <span>布局</span>
+            <select data-studio-layout-select></select>
+          </label>
+          <label class="studio-field studio-field-compact">
+            <span>主题</span>
+            <select data-studio-theme-select></select>
+          </label>
+          <label class="studio-field studio-field-compact">
+            <span>画面</span>
+            <select data-studio-surface-select></select>
+          </label>
+          <label class="studio-field studio-field-compact">
+            <span>密度</span>
+            <select data-studio-density-select></select>
+          </label>
+          <button class="studio-button" type="button" data-studio-baseline>记录当前为基线</button>
+          <button class="studio-button" type="button" data-studio-duplicate>复制</button>
+          <button class="studio-button studio-button-danger" type="button" data-studio-delete>删除</button>
+          <button class="studio-button studio-button-primary" type="button" data-studio-export>导出 JSON</button>
+        </div>
+      </header>
+
+      <section class="studio-canvas-shell">
+        <div class="studio-canvas-head">
+          <div class="studio-canvas-copy">
+            <h2 data-studio-canvas-heading>结构视图</h2>
+            <p class="studio-muted" data-studio-canvas-description>
+              XMind 风格主视图会根据布局类型切换：分叉导图、逻辑链和分栏链路。
+            </p>
+          </div>
+          <div class="studio-canvas-tools">
+            <div class="studio-stat-row" data-studio-stat-row></div>
+            <div class="studio-zoom-controls">
+              <button class="studio-mini-button" type="button" data-studio-zoom-out>-</button>
+              <button class="studio-mini-button" type="button" data-studio-zoom-reset>100%</button>
+              <button class="studio-mini-button" type="button" data-studio-zoom-in>+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-surface-frame" data-studio-surface-frame>
+          <div class="studio-surface-toolbar">
+            <div class="studio-pill-row">
+              <span class="studio-pill" data-studio-baseline-pill>无生成基线</span>
+              <span class="studio-pill" data-studio-reference-pill>无参考导图</span>
+            </div>
+            <div class="studio-surface-actions">
+              <button class="studio-mini-button" type="button" data-studio-toggle-relations>隐藏关系线</button>
+              <button class="studio-mini-button" type="button" data-studio-recenter>重新居中</button>
+            </div>
+          </div>
+
+          <div class="studio-map-viewport" data-studio-map-viewport>
+            <div class="studio-map-scaler" data-studio-map-scaler>
+              <svg class="studio-relationship-layer" data-studio-branch-links aria-hidden="true"></svg>
+              <svg class="studio-relationship-layer studio-relationship-overlay" data-studio-relations aria-hidden="true"></svg>
+              <div class="studio-map-canvas" data-studio-map-canvas></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="studio-inspector">
+      <section class="studio-panel">
+        <p class="studio-eyebrow">节点检查器</p>
+        <h2 data-studio-node-heading>选择一个节点</h2>
+        <p class="studio-muted" data-studio-node-meta>
+          编辑后的内容会和生成基线分离，默认按“待验证”处理。
+        </p>
+
+        <div class="studio-action-row">
+          <button class="studio-button studio-button-primary" type="button" data-studio-add-child>加子节点</button>
+          <button class="studio-button" type="button" data-studio-add-sibling>加同级</button>
+          <button class="studio-button" type="button" data-studio-move-up>上移</button>
+          <button class="studio-button" type="button" data-studio-move-down>下移</button>
+          <button class="studio-button" type="button" data-studio-toggle-collapse>折叠</button>
+          <button class="studio-button studio-button-danger" type="button" data-studio-remove-node>删除</button>
+        </div>
+      </section>
+
+      <section class="studio-panel studio-panel-form">
+        <label class="studio-field">
+          <span>标题</span>
+          <input type="text" data-studio-node-label>
+        </label>
+        <label class="studio-field">
+          <span>摘要</span>
+          <textarea rows="2" data-studio-node-summary></textarea>
+        </label>
+        <label class="studio-field">
+          <span>扩展备注</span>
+          <textarea rows="5" data-studio-node-note></textarea>
+        </label>
+        <div class="studio-form-grid">
+          <label class="studio-field">
+            <span>节点类型</span>
+            <select data-studio-node-kind></select>
+          </label>
+          <label class="studio-field">
+            <span>验证状态</span>
+            <select data-studio-node-verify></select>
+          </label>
+        </div>
+        <div class="studio-form-grid">
+          <label class="studio-field">
+            <span>分支方向</span>
+            <select data-studio-node-side>
+              <option value="left">左侧</option>
+              <option value="right">右侧</option>
+            </select>
+          </label>
+          <label class="studio-field">
+            <span>来源</span>
+            <input type="text" data-studio-node-origin readonly>
+          </label>
+        </div>
+        <div class="studio-form-grid">
+          <label class="studio-field">
+            <span>时间锚点</span>
+            <input type="text" placeholder="例如：2026Q2 / 3月电话会后" data-studio-node-time>
+          </label>
+          <label class="studio-field">
+            <span>来源快照节点</span>
+            <input type="text" data-studio-node-snapshot readonly>
+          </label>
+        </div>
+        <label class="studio-field">
+          <span>关联股票</span>
+          <input type="text" placeholder="AMD, NVDA" data-studio-node-symbols>
+        </label>
+        <label class="studio-field">
+          <span>标签</span>
+          <input type="text" placeholder="需求, 供给, 风险" data-studio-node-tags>
+        </label>
+      </section>
+
+      <section class="studio-panel">
+        <div class="studio-section-head">
+          <h2>关系线</h2>
+        </div>
+        <div class="studio-form-grid">
+          <label class="studio-field">
+            <span>目标节点</span>
+            <select data-studio-relation-target></select>
+          </label>
+          <label class="studio-field">
+            <span>关系类型</span>
+            <select data-studio-relation-tone></select>
+          </label>
+        </div>
+        <label class="studio-field">
+          <span>关系标签</span>
+          <input type="text" placeholder="支撑 / 冲突 / 传导" data-studio-relation-label>
+        </label>
+        <button class="studio-button studio-button-primary" type="button" data-studio-add-relation>增加关系线</button>
+        <div class="studio-relation-list" data-studio-relation-list></div>
+      </section>
+
+      <section class="studio-panel">
+        <div class="studio-section-head">
+          <h2>参考导图</h2>
+        </div>
+        <p class="studio-muted">
+          后续生成可以把这里选中的旧导图当参考，但不会自动覆盖当前编辑层。
+        </p>
+        <div class="studio-reference-list" data-studio-reference-list></div>
+      </section>
+
+      <section class="studio-panel">
+        <div class="studio-section-head">
+          <h2>生成基线</h2>
+        </div>
+        <div class="studio-baseline-box" data-studio-baseline-box>
+          <p class="studio-muted">当前还没有记录生成基线。</p>
+        </div>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

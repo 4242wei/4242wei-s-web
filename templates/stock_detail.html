@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ stock.symbol }} - 股票工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-tabs.js', v='20260316-tabsfix2') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260317-searchjump1') }}" defer></script>
@@ -22,6 +22,33 @@
         <p class="story-dek">
           这里负责沉淀这只股票的笔记、资料、转录和活动轨迹。阅读、录入与整理被拆成更清楚的层次，长期积累也不会显乱。
         </p>
+        <div class="stock-earnings-banner">
+          <div class="stock-earnings-copy">
+            <p class="stock-earnings-title">{{ stock.next_earnings.headline }}</p>
+            <p class="section-caption">
+              {% if stock.next_earnings.has_date %}
+                同步于 {{ stock.next_earnings.display_last_synced_at }}
+                {% if stock.next_earnings.source_label %}
+                  · 来源：
+                  {% if stock.next_earnings.source_url %}
+                    <a class="text-link" href="{{ stock.next_earnings.source_url }}" target="_blank" rel="noreferrer">{{ stock.next_earnings.source_label }}</a>
+                  {% else %}
+                    {{ stock.next_earnings.source_label }}
+                  {% endif %}
+                {% endif %}
+                {% if stock.next_earnings.is_estimated %}
+                  · 若公司后续正式公告不同，请以公告为准
+                {% endif %}
+              {% else %}
+                还没有同步到下一次业绩期，点右侧按钮即可补上。
+              {% endif %}
+            </p>
+          </div>
+          <form action="{{ url_for('sync_stock_earnings', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+            <input type="hidden" name="next_url" value="{{ return_to }}">
+            <button class="button button-secondary button-compact" type="submit">刷新业绩期</button>
+          </form>
+        </div>
         <div class="chip-row">
           {% if stock.is_favorite %}
             <span class="detail-chip is-favorite">已加入自选</span>
@@ -47,8 +74,6 @@
         <a
           class="button button-ghost"
           href="{{ url_for('stocks_calendar') }}"
-          data-calendar-launch
-          data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
         >
           打开总日历
         </a>
@@ -79,10 +104,14 @@
           <div class="stock-detail-index-head">
             <div>
               <p class="eyebrow">功能索引</p>
-              <p class="section-caption">切换查看不同区块，让个股页更清楚。</p>
+              <p class="section-caption">先添加内容，再切换研究活动与历史内容，让个股页更清楚。</p>
             </div>
           </div>
           <div class="stock-detail-tabbar" role="tablist" aria-label="{{ stock.symbol }} 功能区">
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="compose">
+              <span class="stock-detail-tab-label">添加内容</span>
+              <span class="stock-detail-tab-count">入口</span>
+            </button>
             <button class="stock-detail-tab is-active" type="button" role="tab" aria-selected="true" data-stock-detail-default data-stock-detail-panel-target="timeline">
               <span class="stock-detail-tab-label">研究活动</span>
               <span class="stock-detail-tab-count">{{ stock.timeline|length }}</span>
@@ -106,8 +135,111 @@
           </div>
         </nav>
 
+        <section class="detail-studio detail-studio-inline" id="add-content-panel" data-stock-detail-panel="compose" hidden>
+          <div class="detail-studio-grid">
+            <section class="panel tool-panel detail-composer-panel">
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">写笔记</p>
+                  <h3>添加研究笔记</h3>
+                  <p class="section-caption">支持字体、常用文字色、底色、对齐、列表和引用，录入时更接近日常文档编辑。</p>
+                </div>
+              </div>
+              <form class="stack-form tool-form" action="{{ url_for('add_stock_note', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                <input type="hidden" name="next_url" value="{{ return_to }}">
+                <label class="form-field">
+                  <span class="field-label">笔记标题</span>
+                  <input name="note_title" type="text" placeholder="例：估值更新 / 交易计划 / 风险观察">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">标签</span>
+                  <input name="note_tags" type="text" placeholder="例：催化剂, 风险, 管理层">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">记录日期</span>
+                  <input name="note_record_date" type="date" value="{{ today_date }}">
+                </label>
+
+                <div class="form-field">
+                  <span class="field-label">笔记内容</span>
+                  <div class="rich-editor" data-rich-editor>
+                    {% include "_rich_toolbar.html" %}
+                    <div
+                      class="rich-surface"
+                      contenteditable="true"
+                      data-editor-surface
+                      data-placeholder="在这里输入笔记。你可以直接加粗、斜体、下划线，改字体和颜色。"
+                    ></div>
+                    <textarea name="note_content_html" hidden data-editor-html></textarea>
+                    <textarea name="note_content" hidden data-editor-text></textarea>
+                  </div>
+                </div>
+
+                <button class="button button-primary" type="submit">保存笔记</button>
+              </form>
+            </section>
+
+            <section class="panel tool-panel detail-composer-panel">
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">上传资料</p>
+                  <h3>添加文件与评论</h3>
+                  <p class="section-caption">既可以保存原文件，也可以把可读取文字抽进笔记，并把你的评论放在最前面。</p>
+                </div>
+              </div>
+              <form class="stack-form tool-form" action="{{ url_for('upload_stock_file', symbol=stock.symbol) }}" method="post" enctype="multipart/form-data" data-preserve-scroll>
+                <input type="hidden" name="next_url" value="{{ return_to }}">
+                <label class="form-field">
+                  <span class="field-label">文件说明</span>
+                  <input name="file_description" type="text" placeholder="例：管理层会 / 同行对比 / 截图整理">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">标签</span>
+                  <input name="file_tags" type="text" placeholder="例：访谈, 供需, 财报">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">记录日期</span>
+                  <input name="file_record_date" type="date" value="{{ today_date }}">
+                </label>
+                <label class="form-field">
+                  <span class="field-label">评论标题</span>
+                  <input name="file_note_title" type="text" placeholder="如果要顺手生成一条笔记，可以在这里写标题">
+                </label>
+
+                <div class="form-field">
+                  <span class="field-label">我的评论</span>
+                  <div class="rich-editor" data-rich-editor>
+                    {% include "_rich_toolbar.html" %}
+                    <div
+                      class="rich-surface"
+                      contenteditable="true"
+                      data-editor-surface
+                      data-placeholder="在这里写你对文件的评论。勾选抽取文字后，你的评论会保留在最上方。"
+                    ></div>
+                    <textarea name="file_note_content_html" hidden data-editor-html></textarea>
+                    <textarea name="file_note_content" hidden data-editor-text></textarea>
+                  </div>
+                </div>
+
+                <label class="checkbox-field">
+                  <input name="extract_text_to_note" type="checkbox">
+                  <span>勾选抽取文字进入笔记</span>
+                </label>
+                <p class="field-help">支持常见文档文件，如 PDF、DOCX。若无法读取，会保留文件并提示该类型无法抽取文字。</p>
+
+                <label class="form-field">
+                  <span class="field-label">选择文件</span>
+                  <input name="research_file" type="file">
+                </label>
+
+                <button class="button button-primary" type="submit">上传资料</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
         <section class="panel record-section timeline-panel" id="stock-timeline" data-stock-detail-panel="timeline">
-          <details class="expander record-expander timeline-expander">
+          <details class="expander record-expander timeline-expander" open>
             <summary class="expander-summary">
               <div>
                 <p class="eyebrow">总时间轴</p>
@@ -189,7 +321,7 @@
 
         <section class="panel record-section" id="notes-panel" data-stock-detail-panel="notes" hidden>
           {% if stock.notes %}
-            <details class="expander record-expander">
+            <details class="expander record-expander" open>
               <summary class="expander-summary">
                 <div>
                   <p class="eyebrow">研究笔记</p>
@@ -338,14 +470,14 @@
               <span class="summary-count">{{ stock.note_count }}</span>
             </div>
             <div class="empty-inline">
-              <p>这里还没有历史笔记。你可以先在下方写下核心观点、变化点和下一步计划。</p>
+              <p>这里还没有历史笔记。你可以先到“添加内容”里写下核心观点、变化点和下一步计划。</p>
             </div>
           {% endif %}
         </section>
 
         <section class="panel record-section" id="transcripts-panel" data-stock-detail-panel="transcripts" hidden>
           {% if stock.transcripts %}
-            <details class="expander record-expander">
+            <details class="expander record-expander" open>
               <summary class="expander-summary">
                 <div>
                   <p class="eyebrow">会载</p>
@@ -385,7 +517,7 @@
                               data-reader-template="stock-transcript-reader-{{ transcript.id }}"
                               data-reader-open
                             >
-                              阅
+                              阅读全文
                             </button>
                             <form
                               action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
@@ -424,6 +556,9 @@
                         {% endif %}
 
                         <div class="card-link-row">
+                          {% if transcript.has_transcript_content %}
+                            <a class="text-link" href="{{ url_for('export_transcript_pdf', transcript_id=transcript.id, next=return_to) }}">导出 PDF</a>
+                          {% endif %}
                           <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
                           <a class="text-link" href="{{ url_for('transcripts_page', symbol=stock.symbol) }}">前往转录页</a>
                         </div>
@@ -471,6 +606,9 @@
                               <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
                             </div>
                             <div class="card-link-row reader-sheet-footer">
+                              {% if transcript.has_transcript_content %}
+                                <a class="text-link" href="{{ url_for('export_transcript_pdf', transcript_id=transcript.id, next=return_to) }}">导出 PDF</a>
+                              {% endif %}
                               <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
                             </div>
                           </article>
@@ -501,7 +639,7 @@
 
         <section class="panel record-section" id="files-panel" data-stock-detail-panel="files" hidden>
           {% if stock.files %}
-            <details class="expander record-expander">
+            <details class="expander record-expander" open>
               <summary class="expander-summary">
                 <div>
                   <p class="eyebrow">研究资料</p>
@@ -586,14 +724,14 @@
               <span class="summary-count">{{ stock.file_count }}</span>
             </div>
             <div class="empty-inline">
-              <p>这里还没有研究资料。你可以在右侧上传 PDF、Word、文字文件或图片，并选择是否抽取文字进入笔记。</p>
+              <p>这里还没有研究资料。你可以到“添加内容”里上传 PDF、Word、文字文件或图片，并选择是否抽取文字进入笔记。</p>
             </div>
           {% endif %}
         </section>
 
         <section class="panel record-section" id="related-reports" data-stock-detail-panel="reports" hidden>
           {% if related_reports %}
-            <details class="expander record-expander">
+            <details class="expander record-expander" open>
               <summary class="expander-summary">
                 <div>
                   <p class="eyebrow">关联日报</p>
@@ -638,118 +776,6 @@
           {% endif %}
         </section>
 
-        <section class="detail-studio detail-studio-inline">
-          <section class="panel detail-studio-header">
-            <div class="section-header detail-studio-heading">
-              <div>
-                <p class="eyebrow">研究工作区</p>
-                <h3>写笔记与整理资料</h3>
-                <p class="section-caption">把常用输入工具直接接在主内容后面，回看完信息就能顺手记录，不再隔着一大段空白。</p>
-              </div>
-            </div>
-          </section>
-
-          <div class="detail-studio-grid">
-            <section class="panel tool-panel detail-composer-panel">
-              <div class="section-header">
-                <div>
-                  <p class="eyebrow">写笔记</p>
-                  <h3>新建研究笔</h3>
-                  <p class="section-caption">支持字体、常用文字色、底色、对齐、列表和引用，录入时更接近日常文档编辑。</p>
-                </div>
-              </div>
-              <form class="stack-form tool-form" action="{{ url_for('add_stock_note', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
-                <input type="hidden" name="next_url" value="{{ return_to }}">
-                <label class="form-field">
-                  <span class="field-label">笔记标题</span>
-                  <input name="note_title" type="text" placeholder="例：估值更新 / 交易计划 / 风险观察">
-                </label>
-                <label class="form-field">
-                  <span class="field-label">标签</span>
-                  <input name="note_tags" type="text" placeholder="例：催化剂, 风险, 管理层">
-                </label>
-                <label class="form-field">
-                  <span class="field-label">记录日期</span>
-                  <input name="note_record_date" type="date" value="{{ today_date }}">
-                </label>
-
-                <div class="form-field">
-                  <span class="field-label">笔记内容</span>
-                  <div class="rich-editor" data-rich-editor>
-                    {% include "_rich_toolbar.html" %}
-                    <div
-                      class="rich-surface"
-                      contenteditable="true"
-                      data-editor-surface
-                      data-placeholder="在这里输入笔记。你可以直接加粗、斜体、下划线，改字体和颜色。"
-                    ></div>
-                    <textarea name="note_content_html" hidden data-editor-html></textarea>
-                    <textarea name="note_content" hidden data-editor-text></textarea>
-                  </div>
-                </div>
-
-                <button class="button button-primary" type="submit">保存笔记</button>
-              </form>
-            </section>
-
-            <section class="panel tool-panel detail-composer-panel">
-              <div class="section-header">
-                <div>
-                  <p class="eyebrow">上传资料</p>
-                  <h3>文件与评论</h3>
-                  <p class="section-caption">既可以保存原文件，也可以把可读取文字抽进笔记，并把你的评论放在最前面。</p>
-                </div>
-              </div>
-              <form class="stack-form tool-form" action="{{ url_for('upload_stock_file', symbol=stock.symbol) }}" method="post" enctype="multipart/form-data" data-preserve-scroll>
-                <input type="hidden" name="next_url" value="{{ return_to }}">
-                <label class="form-field">
-                  <span class="field-label">文件说明</span>
-                  <input name="file_description" type="text" placeholder="例：管理层会 / 同行对比 / 截图整理">
-                </label>
-                <label class="form-field">
-                  <span class="field-label">标签</span>
-                  <input name="file_tags" type="text" placeholder="例：访谈, 供需, 财报">
-                </label>
-                <label class="form-field">
-                  <span class="field-label">记录日期</span>
-                  <input name="file_record_date" type="date" value="{{ today_date }}">
-                </label>
-                <label class="form-field">
-                  <span class="field-label">评论标题</span>
-                  <input name="file_note_title" type="text" placeholder="如果要顺手生成一条笔记，可以在这里写标题">
-                </label>
-
-                <div class="form-field">
-                  <span class="field-label">我的评论</span>
-                  <div class="rich-editor" data-rich-editor>
-                    {% include "_rich_toolbar.html" %}
-                    <div
-                      class="rich-surface"
-                      contenteditable="true"
-                      data-editor-surface
-                      data-placeholder="在这里写你对文件的评论。勾选抽取文字后，你的评论会保留在最上方。"
-                    ></div>
-                    <textarea name="file_note_content_html" hidden data-editor-html></textarea>
-                    <textarea name="file_note_content" hidden data-editor-text></textarea>
-                  </div>
-                </div>
-
-                <label class="checkbox-field">
-                  <input name="extract_text_to_note" type="checkbox">
-                  <span>勾选抽取文字进入笔记</span>
-                </label>
-                <p class="field-help">支持常见文档文件，如 PDF、DOCX。若无法读取，会保留文件并提示该类型无法抽取文字。</p>
-
-                <label class="form-field">
-                  <span class="field-label">选择文件</span>
-                  <input name="research_file" type="file">
-                </label>
-
-                <button class="button button-primary" type="submit">上传资料</button>
-              </form>
-            </section>
-          </div>
-        </section>
       </section>
 
       <aside class="detail-rail-column">
@@ -758,7 +784,7 @@
             <div>
                 <p class="eyebrow">快信息</p>
                 <h3>概览与分组</h3>
-                <p class="section-caption">右侧只保留速览信息和近期活动，录入工具放到下方更顺手。</p>
+                <p class="section-caption">右侧只保留速览信息和近期活动，录入工具收进“添加内容”里会更清楚。</p>
             </div>
           </div>
           <div class="detail-side-stats">
@@ -1002,8 +1028,6 @@
             <a
               class="button button-secondary"
               href="{{ url_for('stocks_calendar') }}"
-              data-calendar-launch
-              data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
             >
               打开总活动日历
             </a>
@@ -1022,3 +1046,4 @@
   </div>
 </body>
 </html>
+

@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>专家记录</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260317-searchjump1') }}" defer></script>
+  <script src="{{ url_for('static', filename='experts-page.js', v='20260319-expertdirectorytoggle1') }}" defer></script>
+</head>
+<body>
+  {% macro expert_form(action_url, next_url, expert=None) -%}
+    <form class="stack-form experts-form" action="{{ action_url }}" method="post" data-preserve-scroll>
+      {% if next_url %}
+        <input type="hidden" name="next_url" value="{{ next_url }}">
+      {% endif %}
+      <div class="experts-form-grid">
+        <label class="form-field experts-form-span-2">
+          <span class="field-label">专家姓名</span>
+          <input name="name" type="text" value="{{ expert.name if expert else '' }}" placeholder="例：王某 / John Doe / 某封装厂前高管" required>
+        </label>
+        <label class="form-field">
+          <span class="field-label">机构 / 公司</span>
+          <input name="organization" type="text" value="{{ expert.organization if expert else '' }}" placeholder="例：某设备厂 / 独立顾问">
+        </label>
+        <label class="form-field">
+          <span class="field-label">职位 / 背景</span>
+          <input name="title" type="text" value="{{ expert.title if expert else '' }}" placeholder="例：前 CTO / 渠道负责人">
+        </label>
+        <label class="form-field">
+          <span class="field-label">分类</span>
+          <select name="category">
+            {% for option in expert_category_options %}
+              <option value="{{ option.value }}" {% if expert and option.value == expert.category %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="form-field">
+          <span class="field-label">覆盖状态</span>
+          <select name="stage">
+            {% for option in expert_stage_options %}
+              <option value="{{ option.value }}" {% if expert and option.value == expert.stage %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="form-field">
+          <span class="field-label">地区</span>
+          <input name="region" type="text" value="{{ expert.region if expert else '' }}" placeholder="例：上海 / 台北 / 美国西海岸">
+        </label>
+        <label class="form-field">
+          <span class="field-label">来源</span>
+          <input name="source" type="text" value="{{ expert.source if expert else '' }}" placeholder="例：猎头 / 券商专家库 / 老同事介绍">
+        </label>
+        <label class="form-field experts-form-span-2">
+          <span class="field-label">关联股票</span>
+          <input name="related_symbols" type="text" value="{{ expert.related_symbols | join(' ') if expert else '' }}" placeholder="例：NVDA AMD TSM">
+        </label>
+        <label class="form-field experts-form-span-2">
+          <span class="field-label">擅长主题</span>
+          <textarea name="expertise" rows="4" placeholder="例：先进封装良率 / GPU 渠道库存 / EMC 设备节奏">{{ expert.expertise if expert else '' }}</textarea>
+        </label>
+        <label class="form-field experts-form-span-2">
+          <span class="field-label">标签</span>
+          <input name="tags" type="text" value="{{ expert.tags | join(', ') if expert else '' }}" placeholder="例：HBM, 先进封装, 渠道, 服务器">
+        </label>
+        <label class="form-field experts-form-span-2">
+          <span class="field-label">联系和判断</span>
+          <textarea name="contact_notes" rows="4" placeholder="例：说话直接，但对下游库存判断有参考价值；后续想追问客户结构。">{{ expert.contact_notes if expert else '' }}</textarea>
+        </label>
+      </div>
+      <div class="card-link-row">
+        <button class="button button-primary" type="submit">{{ "保存专家档案" if expert else "加入专家记录" }}</button>
+      </div>
+    </form>
+  {%- endmacro %}
+
+  {% macro expert_directory_group(group, group_id='') -%}
+    {% set group_selected = group.experts | selectattr('is_selected') | list %}
+    <details class="experts-directory-group" data-preserve-open-state{% if group_id %} id="{{ group_id }}"{% endif %}{% if group_selected %} open{% endif %}>
+      <summary class="experts-directory-group-summary">
+        <div>
+          <p class="eyebrow">{{ group.label }}</p>
+          <strong>{{ group.count }} 位</strong>
+        </div>
+        <span class="summary-count">{{ group.count }}</span>
+      </summary>
+
+      {% if group.experts %}
+        <div class="experts-directory-list">
+          {% for expert in group.experts %}
+            <a class="experts-directory-item {% if expert.is_selected %}is-selected{% endif %}" href="{{ expert.url }}" data-preserve-scroll-link>
+              <div class="experts-directory-item-top">
+                <strong>{{ expert.name }}</strong>
+                <span class="status-pill is-{{ expert.stage_tone }}">{{ expert.stage_label }}</span>
+              </div>
+              {% if expert.identity_line %}<p class="section-caption">{{ expert.identity_line }}</p>{% endif %}
+              <div class="card-inline-meta">
+                <span class="meta-chip">访谈 {{ expert.interview_count }}</span>
+                <span class="meta-chip">资料 {{ expert.resource_count }}</span>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="section-caption experts-empty-copy">这一类还没有专家。</p>
+      {% endif %}
+    </details>
+  {%- endmacro %}
+
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel experts-hero">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">专家记录</p>
+        <h2>专家库</h2>
+        <p class="story-dek">现在把“已有专家操作台”和“新增专家”明确拆开，这样你一眼就知道自己是在维护旧档案，还是在建立新专家卡片。</p>
+        <div class="story-actions">
+          <a class="button button-secondary" href="{{ url_for('schedule_page') }}">日程</a>
+          <a class="button button-secondary" href="{{ url_for('transcripts_page') }}">会议转录</a>
+          <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">股票工作台</a>
+          <span class="button button-ghost button-static">当前已录入 {{ expert_stats.total_count }} 位专家</span>
+        </div>
+        <div class="experts-view-switch" aria-label="专家记录功能区切换">
+          <a class="experts-view-chip {% if current_expert_view == 'manage' %}is-active{% endif %}" href="{{ expert_view_links.manage }}">
+            <strong>已有专家</strong>
+            <span>进入已有专家的资料信息操作台，维护关系、访谈和勾稽内容。</span>
+          </a>
+          <a class="experts-view-chip {% if current_expert_view == 'create' %}is-active{% endif %}" href="{{ expert_view_links.create }}">
+            <strong>新增专家</strong>
+            <span>单独录入新专家档案，先建卡，再慢慢补访谈和资料。</span>
+          </a>
+        </div>
+      </div>
+
+      <aside class="stock-hero-aside">
+        <article class="mini-fact"><span class="mini-label">专家总数</span><strong>{{ expert_stats.total_count }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">稳定覆盖</span><strong>{{ expert_stats.active_count }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">待访谈</span><strong>{{ expert_stats.planned_interview_count }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">已勾稽资料</span><strong>{{ expert_stats.resource_count }}</strong></article>
+      </aside>
+    </section>
+
+    <main class="stock-layout experts-layout">
+      <section class="stock-main experts-main">
+        {% if current_expert_view == "manage" %}
+          <div class="experts-manage-shell">
+            <aside class="panel experts-directory-panel">
+              <div class="section-header experts-directory-head">
+                <div>
+                  <p class="eyebrow">已有专家</p>
+                  <h3>左边选人，右边维护</h3>
+                  <p class="section-caption">把名册和操作台拆开。先定位到某位专家，再集中处理档案、访谈和资料勾稽。</p>
+                </div>
+                <span class="summary-count">{{ expert_stats.total_count }}</span>
+              </div>
+
+              {% if expert_stats.total_count %}
+                <div class="experts-directory-stats">
+                  <article class="record-card">
+                    <span class="mini-label">重点覆盖</span>
+                    <strong>{{ expert_stats.active_count }}</strong>
+                  </article>
+                  <article class="record-card">
+                    <span class="mini-label">待访谈</span>
+                    <strong>{{ expert_stats.planned_interview_count }}</strong>
+                  </article>
+                </div>
+
+                {% if selected_expert %}
+                  <a class="record-card experts-current-focus" href="#expert-{{ selected_expert.id }}">
+                    <p class="eyebrow">当前正在维护</p>
+                    <h4>{{ selected_expert.name }}</h4>
+                    {% if selected_expert.identity_line %}<p class="section-caption">{{ selected_expert.identity_line }}</p>{% endif %}
+                    <div class="card-inline-meta">
+                      <span class="meta-chip">{{ selected_expert.category_label }}</span>
+                      <span class="status-pill is-{{ selected_expert.stage_tone }}">{{ selected_expert.stage_label }}</span>
+                    </div>
+                  </a>
+                {% endif %}
+
+                <div class="experts-directory-sections">
+                  <details class="experts-directory-supergroup" data-preserve-open-state id="experts-supergroup-stock" open>
+                    <summary class="experts-directory-supergroup-summary">
+                      <div>
+                        <p class="eyebrow">按股票分类</p>
+                        <h4>先按覆盖股票来找专家</h4>
+                        <p class="section-caption">股票按 A 到 Z 排序，方便你从具体标的快速回找对应专家。</p>
+                      </div>
+                      <span class="summary-count">{{ expert_stock_groups | length }}</span>
+                    </summary>
+                    <div class="experts-directory-supergroup-body">
+                      {% if expert_stock_groups %}
+                        <div class="experts-directory-cluster-grid">
+                          {% for group in expert_stock_groups %}
+                            {{ expert_directory_group(group, 'experts-stock-group-' ~ loop.index) }}
+                          {% endfor %}
+                        </div>
+                      {% else %}
+                        <p class="section-caption experts-empty-copy">先在专家档案里补上关联股票，这里才会自动按股票分出来。</p>
+                      {% endif %}
+                    </div>
+                  </details>
+
+                  <details class="experts-directory-supergroup" data-preserve-open-state id="experts-supergroup-type">
+                    <summary class="experts-directory-supergroup-summary">
+                      <div>
+                        <p class="eyebrow">按类型分类</p>
+                        <h4>按角色背景展开现有分类</h4>
+                        <p class="section-caption">默认先折叠，点开后再看公司/管理层、产业专家、渠道/客户这些分类小方块。</p>
+                      </div>
+                      <span class="summary-count">{{ expert_overview_groups | length }}</span>
+                    </summary>
+                    <div class="experts-directory-supergroup-body">
+                      <div class="experts-directory-cluster-grid">
+                        {% for group in expert_overview_groups %}
+                          {{ expert_directory_group(group, 'experts-type-group-' ~ loop.index) }}
+                        {% endfor %}
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <div class="experts-directory-groups" hidden>
+                  {% for group in expert_overview_groups %}
+                    {% set group_selected = group.experts | selectattr('is_selected') | list %}
+                    <details class="experts-directory-group" data-preserve-open-state {% if group_selected or (group.count and loop.index <= 2) %}open{% endif %}>
+                      <summary class="experts-directory-group-summary">
+                        <div>
+                          <p class="eyebrow">{{ group.label }}</p>
+                          <strong>{{ group.count }} 位</strong>
+                        </div>
+                        <span class="summary-count">{{ group.count }}</span>
+                      </summary>
+
+                      {% if group.experts %}
+                        <div class="experts-directory-list">
+                          {% for expert in group.experts %}
+                            <a class="experts-directory-item {% if expert.is_selected %}is-selected{% endif %}" href="{{ expert.url }}" data-preserve-scroll-link>
+                              <div class="experts-directory-item-top">
+                                <strong>{{ expert.name }}</strong>
+                                <span class="status-pill is-{{ expert.stage_tone }}">{{ expert.stage_label }}</span>
+                              </div>
+                              {% if expert.identity_line %}<p class="section-caption">{{ expert.identity_line }}</p>{% endif %}
+                              <div class="card-inline-meta">
+                                <span class="meta-chip">访谈 {{ expert.interview_count }}</span>
+                                <span class="meta-chip">资料 {{ expert.resource_count }}</span>
+                              </div>
+                            </a>
+                          {% endfor %}
+                        </div>
+                      {% else %}
+                        <p class="section-caption experts-empty-copy">这一类还没有专家。</p>
+                      {% endif %}
+                    </details>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <article class="record-card experts-empty-panel">
+                  <h4>还没有已有专家可以维护</h4>
+                  <p class="section-caption">先到上面的“新增专家”功能区录入第一位，后面这里就会变成完整的专家名册和操作台。</p>
+                  <div class="card-link-row"><a class="button button-primary" href="{{ expert_view_links.create }}">去新增专家</a></div>
+                </article>
+              {% endif %}
+            </aside>
+
+          <div class="experts-workspace">
+            {% if selected_expert and selected_expert_raw %}
+              <section class="panel experts-focus-panel" id="expert-{{ selected_expert.id }}">
+                <div class="experts-focus-head">
+                  <div>
+                    <p class="eyebrow">当前专家</p>
+                    <h3>{{ selected_expert.name }}</h3>
+                    <p class="section-caption">{% if selected_expert.identity_line %}{{ selected_expert.identity_line }} · {% endif %}最近更新 {{ selected_expert.display_updated_at }}</p>
+                    <div class="card-inline-meta experts-focus-meta">
+                      <span class="meta-chip">{{ selected_expert.category_label }}</span>
+                      <span class="status-pill is-{{ selected_expert.stage_tone }}">{{ selected_expert.stage_label }}</span>
+                      <span class="meta-chip">最近访谈 {{ selected_expert.latest_interview_label }}</span>
+                      {% if selected_expert.related_symbols_label %}<span class="meta-chip">{{ selected_expert.related_symbols_label }}</span>{% endif %}
+                    </div>
+                  </div>
+                  <div class="experts-focus-actions">
+                    <a class="button button-secondary" href="#expert-profile">编辑档案</a>
+                    <a class="button button-secondary" href="#expert-interviews">访谈</a>
+                    <a class="button button-secondary" href="#expert-resources">资料</a>
+                  </div>
+                </div>
+
+                <div class="experts-focus-metrics">
+                  <article class="mini-fact"><span class="mini-label">访谈记录</span><strong>{{ selected_expert.interview_count }}</strong></article>
+                  <article class="mini-fact"><span class="mini-label">关联资料</span><strong>{{ selected_expert.resource_count }}</strong></article>
+                  <article class="mini-fact"><span class="mini-label">关联股票</span><strong>{{ selected_expert.related_symbols | length }}</strong></article>
+                  <article class="mini-fact"><span class="mini-label">重点状态</span><strong>{{ selected_expert.stage_label }}</strong></article>
+                </div>
+
+                <article class="record-card experts-focus-brief">
+                  <p class="eyebrow">当前判断</p>
+                  <p class="card-preview-copy experts-focus-brief-copy">{{ selected_expert.brief_full }}</p>
+                </article>
+
+                <div class="experts-focus-summary-grid">
+                  <article><span class="mini-label">机构 / 公司</span><strong>{{ selected_expert.organization or '待补充' }}</strong></article>
+                  <article><span class="mini-label">职位 / 背景</span><strong>{{ selected_expert.title or '待补充' }}</strong></article>
+                  <article><span class="mini-label">地区</span><strong>{{ selected_expert.region or '待补充' }}</strong></article>
+                  <article><span class="mini-label">来源</span><strong>{{ selected_expert.source or '待补充' }}</strong></article>
+                </div>
+
+                <div class="experts-focus-copy-grid">
+                  <article class="record-card experts-focus-copy-card">
+                    <p class="eyebrow">擅长主题</p>
+                    <p class="section-caption">{{ selected_expert.expertise or '这里还没写清楚他的核心价值，建议补一段你为什么要持续跟进。' }}</p>
+                  </article>
+                  <article class="record-card experts-focus-copy-card">
+                    <p class="eyebrow">联系和判断</p>
+                    <p class="section-caption">{{ selected_expert.contact_notes or '还没有留下你的判断和后续跟进提示。' }}</p>
+                  </article>
+                </div>
+
+                {% if selected_expert.tags %}
+                  <div class="detail-chip-row">
+                    {% for tag in selected_expert.tags %}
+                      <span class="detail-chip">#{{ tag }}</span>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+
+                <form action="{{ url_for('archive_expert', expert_id=selected_expert.id) }}" method="post" data-preserve-scroll data-confirm-delete data-confirm-message="先把这位专家标记为归档吗？资料和访谈记录都会保留。">
+                  <input type="hidden" name="next_url" value="{{ page_return_url }}#expert-{{ selected_expert.id }}">
+                  <button class="button button-secondary" type="submit">标记为归档</button>
+                </form>
+              </section>
+
+              <section class="panel experts-profile-panel" id="expert-profile">
+                <div class="section-header">
+                  <div>
+                    <p class="eyebrow">专家档案</p>
+                    <h3>默认收起，只有编辑时再展开</h3>
+                    <p class="section-caption">已录入的信息已经整合到上面的专家档案卡里。这里现在只负责展开详细编辑表单。</p>
+                  </div>
+                </div>
+
+                <details class="experts-action-fold experts-profile-editor" data-preserve-open-state>
+                  <summary class="experts-action-fold-summary">
+                    <div>
+                      <p class="eyebrow">编辑档案</p>
+                      <h4>展开后再修改详细信息</h4>
+                    </div>
+                    <span class="summary-count">编辑</span>
+                  </summary>
+
+                  <section class="record-card experts-editor-card">
+                    <div class="section-header experts-subsection-head experts-editor-head">
+                      <div>
+                        <p class="eyebrow">维护档案</p>
+                        <h4>更新基础信息</h4>
+                      </div>
+                    </div>
+                    {{ expert_form(url_for('update_expert', expert_id=selected_expert.id), page_return_url ~ '#expert-profile', selected_expert_raw) }}
+                  </section>
+                </details>
+              </section>
+
+              <div class="experts-workspace-grid">
+                <section class="panel record-section experts-interviews-panel" id="expert-interviews">
+                  <div class="section-header">
+                    <div>
+                      <p class="eyebrow">访谈时间线</p>
+                      <h3>先看历史，再决定这次要不要新增</h3>
+                    </div>
+                    <span class="summary-count">{{ selected_expert_interviews | length }}</span>
+                  </div>
+
+                  <details class="experts-action-fold" data-preserve-open-state {% if not selected_expert_interviews %}open{% endif %}>
+                    <summary class="experts-action-fold-summary">
+                      <div>
+                        <p class="eyebrow">新增访谈</p>
+                        <h4>把新的专家会或跟进电话续到时间线里</h4>
+                      </div>
+                      <span class="summary-count">填写</span>
+                    </summary>
+
+                    <form class="stack-form experts-form experts-interview-create-form" action="{{ url_for('create_expert_interview', expert_id=selected_expert.id) }}" method="post" data-preserve-scroll>
+                      <input type="hidden" name="next_url" value="{{ page_return_url }}#expert-interviews">
+                      <div class="experts-form-grid">
+                        <label class="form-field experts-form-span-2"><span class="field-label">访谈标题</span><input name="title" type="text" placeholder="例：英伟达供应链跟进 / 设备资本开支复盘" required></label>
+                        <label class="form-field"><span class="field-label">访谈类型</span><select name="kind">{% for option in expert_interview_kind_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></label>
+                        <label class="form-field"><span class="field-label">状态</span><select name="status">{% for option in expert_interview_status_options %}<option value="{{ option.value }}" {% if option.value == 'completed' %}selected{% endif %}>{{ option.label }}</option>{% endfor %}</select></label>
+                        <label class="form-field experts-form-span-2"><span class="field-label">日期</span><input name="interview_date" type="date" value="{{ today_date }}" required></label>
+                        <label class="form-field experts-form-span-2"><span class="field-label">本次核心结论</span><textarea name="summary" rows="4"></textarea></label>
+                        <label class="form-field experts-form-span-2"><span class="field-label">下次要追问什么</span><textarea name="follow_up" rows="3"></textarea></label>
+                        <label class="form-field experts-form-span-2"><span class="field-label">标签</span><input name="tags" type="text" placeholder="例：良率, 库存, 资本开支"></label>
+                      </div>
+                      <div class="card-link-row"><button class="button button-primary" type="submit">新增访谈记录</button></div>
+                    </form>
+                  </details>
+
+                  <div class="record-stack">
+                    {% if selected_expert_interviews %}
+                      {% for interview in selected_expert_interviews %}
+                        <article class="record-card experts-interview-card" id="interview-{{ interview.id }}">
+                          <div class="record-card-head">
+                            <div>
+                              <div class="card-inline-meta">
+                                <span class="meta-chip">{{ interview.kind_label }}</span>
+                                <span class="status-pill is-{{ interview.status_tone }}">{{ interview.status_label }}</span>
+                                <span class="meta-chip">{{ interview.display_date }}</span>
+                              </div>
+                              <h4>{{ interview.title }}</h4>
+                            </div>
+                            <form action="{{ url_for('delete_expert_interview', expert_id=selected_expert.id, interview_id=interview.id) }}" method="post" data-preserve-scroll data-confirm-delete data-confirm-message="删除这条访谈记录吗？这一步不会影响专家档案本身。">
+                              <input type="hidden" name="next_url" value="{{ page_return_url }}#expert-interviews">
+                              <button class="danger-button danger-button-compact" type="submit">删除</button>
+                            </form>
+                          </div>
+                          {% if interview.summary %}<p class="card-preview-copy">{{ interview.summary_preview }}</p>{% endif %}
+                          {% if interview.follow_up %}<p class="section-caption experts-follow-up">下次跟进：{{ interview.follow_up_preview }}</p>{% endif %}
+                        </article>
+                      {% endfor %}
+                    {% else %}
+                      <article class="record-card"><h4>这位专家还没有访谈时间线</h4><p class="section-caption">先录第一条即可。后面每次专家会、跟进电话、渠道验证都往这里续上。</p></article>
+                    {% endif %}
+                  </div>
+                </section>
+
+                <section class="panel record-section experts-resources-panel" id="expert-resources">
+                  <div class="section-header">
+                    <div>
+                      <p class="eyebrow">关联资料</p>
+                      <h3>先看已经勾上的，再调整范围</h3>
+                      <p class="section-caption">把“当前已关联”与“可勾稽候选池”拆开，避免一上来就在海量资料里找不到重点。</p>
+                    </div>
+                  </div>
+
+                  {% set linked_resources = namespace(has_items=false) %}
+                  <div class="experts-linked-groups">
+                    {% for group in selected_expert_resource_groups %}
+                      {% if group.count %}
+                        {% set linked_resources.has_items = true %}
+                        <article class="record-card experts-linked-group">
+                          <div class="experts-linked-group-head">
+                            <div>
+                              <p class="eyebrow">{{ group.label }}</p>
+                              <h4>{{ group.count }} 条已关联</h4>
+                            </div>
+                            <span class="summary-count">{{ group.count }}</span>
+                          </div>
+
+                          <div class="experts-linked-item-list">
+                            {% for item in group["items"][:3] %}
+                              <a class="experts-linked-item" href="{{ item.preview_url }}" data-reader-url>
+                                <div class="card-inline-meta">
+                                  <span class="meta-chip">{{ item.kind_label }}</span>
+                                  {% if item.symbol %}<span class="meta-chip">{{ item.symbol }}</span>{% endif %}
+                                  {% if item.status_label %}<span class="status-pill is-{{ item.status_tone }}">{{ item.status_label }}</span>{% endif %}
+                                </div>
+                                <strong>{{ item.title }}</strong>
+                                <span>{{ item.display_time }}</span>
+                              </a>
+                            {% endfor %}
+                          </div>
+
+                          {% if group.count > 3 %}
+                            <p class="section-caption experts-empty-copy">还有 {{ group.count - 3 }} 条已关联内容，展开下方“调整关联资料”可以继续查看和勾稽。</p>
+                          {% endif %}
+                        </article>
+                      {% endif %}
+                    {% endfor %}
+                  </div>
+
+                  {% if not linked_resources.has_items %}
+                    <article class="record-card">
+                      <h4>这位专家还没有关联资料</h4>
+                      <p class="section-caption">可以从下面把日程、转录和研究资料勾到这位专家下面，后面复盘会省很多时间。</p>
+                    </article>
+                  {% endif %}
+
+                  <article class="record-card experts-resource-editor-launch">
+                    <div>
+                      <p class="eyebrow">调整关联资料</p>
+                      <h4>从候选池里勾到这位专家下面</h4>
+                    </div>
+                    <button class="button button-secondary button-compact" type="button" data-experts-resource-modal-open>调整</button>
+                  </article>
+
+                  <details class="experts-action-fold experts-resource-editor" data-preserve-open-state {% if not linked_resources.has_items %}open{% endif %} hidden>
+                    <summary class="experts-action-fold-summary">
+                      <div>
+                        <p class="eyebrow">调整关联资料</p>
+                        <h4>从候选池里勾到这位专家下面</h4>
+                      </div>
+                      <span class="summary-count">调整</span>
+                    </summary>
+
+                    <form class="stack-form experts-resource-form" action="{{ url_for('update_expert_resources', expert_id=selected_expert.id) }}" method="post" data-preserve-scroll>
+                      <input type="hidden" name="next_url" value="{{ page_return_url }}#expert-resources">
+                      <div class="experts-resource-grid">
+                        {% for section in selected_expert_resource_catalog %}
+                          <details class="experts-resource-picker" data-preserve-open-state id="expert-resource-{{ section.kind }}" {% if section.count and loop.first %}open{% endif %}>
+                            <summary class="experts-resource-picker-summary"><div><p class="eyebrow">{{ section.label }}</p><h4>{{ section.count }} 条</h4></div><span class="summary-count">{{ section.count }}</span></summary>
+                            {% if section['items'] %}
+                              <div class="experts-resource-picker-body" data-preserve-scroll-shell id="expert-resource-shell-{{ section.kind }}">
+                                {% for item in section['items'] %}
+                                  <label class="experts-resource-option">
+                                    <input name="resource_ref_tokens" type="checkbox" value="{{ item.token }}" {% if item.is_selected %}checked{% endif %}>
+                                    <div>
+                                      <div class="card-inline-meta">
+                                        {% if item.symbol %}<span class="meta-chip">{{ item.symbol }}</span>{% endif %}
+                                        {% if item.status_label %}<span class="status-pill is-{{ item.status_tone }}">{{ item.status_label }}</span>{% endif %}
+                                        <span class="section-caption">{{ item.display_time }}</span>
+                                      </div>
+                                      <strong>{{ item.title }}</strong>
+                                      {% if item.summary %}<p class="section-caption">{{ item.summary }}</p>{% endif %}
+                                    </div>
+                                  </label>
+                                {% endfor %}
+                              </div>
+                            {% else %}
+                              <p class="section-caption experts-empty-copy">这一类当前还没有可勾稽的内容。</p>
+                            {% endif %}
+                          </details>
+                        {% endfor %}
+                      </div>
+                      <div class="card-link-row"><button class="button button-primary" type="submit">保存关联资料</button></div>
+                    </form>
+                  </details>
+                </section>
+              </div>
+            {% else %}
+              <section class="panel record-section experts-empty-panel">
+                <div class="section-header">
+                  <div>
+                    <p class="eyebrow">已有专家操作台</p>
+                    <h3>先从左边名册里选一位专家</h3>
+                    <p class="section-caption">选中后，右边会集中展开这位专家的档案、访谈时间线和关联资料操作区。</p>
+                  </div>
+                </div>
+                <div class="card-link-row"><a class="button button-primary" href="{{ expert_view_links.create }}">先去新增专家</a></div>
+              </section>
+            {% endif %}
+          </div>
+          </div>
+        {% else %}
+          <section class="panel record-section experts-create-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">新增专家</p>
+                <h3>先把人放进来，再慢慢补全细节</h3>
+                <p class="section-caption">这个功能区专门负责录入新专家。优先保证姓名、分类和你为什么要持续跟他聊，后面再把访谈和资料挂上去。</p>
+              </div>
+            </div>
+            {{ expert_form(url_for('create_expert'), '', None) }}
+          </section>
+
+          <section class="panel experts-create-helper-panel">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">录入提示</p>
+                <h3>新增时先抓最关键的 4 件事</h3>
+                <p class="section-caption">不用一口气填满。先把后续会影响你复盘和安排会议的信息记下来。</p>
+              </div>
+            </div>
+            <div class="experts-create-guide-grid">
+              <article class="record-card"><h4>1. 这个人为什么值得持续跟</h4><p class="section-caption">写进“擅长主题”或“联系和判断”，后面翻档案时会快很多。</p></article>
+              <article class="record-card"><h4>2. 他覆盖哪些公司或链条</h4><p class="section-caption">先把关联股票填上，后面勾稽日程、转录和资料会更聚焦。</p></article>
+              <article class="record-card"><h4>3. 他属于哪类信息源</h4><p class="section-caption">先粗分管理层、产业、渠道、供应链等，后面再细分也来得及。</p></article>
+              <article class="record-card"><h4>4. 当前是重点跟进还是观察</h4><p class="section-caption">覆盖状态先定下来，后面你看优先级时不会混乱。</p></article>
+            </div>
+          </section>
+        {% endif %}
+      </section>
+    </main>
+  </div>
+
+  {% if current_expert_view == "manage" and selected_expert %}
+    <div class="compose-overlay experts-resource-overlay" data-experts-resource-modal hidden>
+      <div class="compose-overlay-backdrop" data-experts-resource-modal-close></div>
+      <div class="compose-dialog experts-resource-dialog" role="dialog" aria-modal="true" aria-label="调整专家关联资料">
+        <div class="compose-dialog-shell panel experts-resource-dialog-shell">
+          <div class="reader-sheet-head compose-dialog-head">
+            <div>
+              <p class="eyebrow">关联资料</p>
+              <h3>在当前专家页里调整资料勾稽</h3>
+              <p class="section-caption">候选池里的内容会按资料类型分开，你可以直接在这里勾到这位专家下面，不用再挤在右下角的小区域里。</p>
+            </div>
+            <button class="button button-ghost button-compact" type="button" data-experts-resource-modal-close>关闭</button>
+          </div>
+
+          <form class="stack-form experts-resource-form" action="{{ url_for('update_expert_resources', expert_id=selected_expert.id) }}" method="post" data-preserve-scroll>
+            <input type="hidden" name="next_url" value="{{ page_return_url }}#expert-resources">
+            <div class="experts-resource-grid experts-resource-grid-modal">
+              {% for section in selected_expert_resource_catalog %}
+                <details class="experts-resource-picker" data-preserve-open-state id="expert-resource-modal-{{ section.kind }}" {% if section.count and loop.first %}open{% endif %}>
+                  <summary class="experts-resource-picker-summary"><div><p class="eyebrow">{{ section.label }}</p><h4>{{ section.count }} 条</h4></div><span class="summary-count">{{ section.count }}</span></summary>
+                  {% if section['items'] %}
+                    <div class="experts-resource-picker-body" data-preserve-scroll-shell id="expert-resource-modal-shell-{{ section.kind }}">
+                      {% for item in section['items'] %}
+                        <label class="experts-resource-option">
+                          <input name="resource_ref_tokens" type="checkbox" value="{{ item.token }}" {% if item.is_selected %}checked{% endif %}>
+                          <div>
+                            <div class="card-inline-meta">
+                              {% if item.symbol %}<span class="meta-chip">{{ item.symbol }}</span>{% endif %}
+                              {% if item.status_label %}<span class="status-pill is-{{ item.status_tone }}">{{ item.status_label }}</span>{% endif %}
+                              <span class="section-caption">{{ item.display_time }}</span>
+                            </div>
+                            <strong>{{ item.title }}</strong>
+                            {% if item.summary %}<p class="section-caption">{{ item.summary }}</p>{% endif %}
+                          </div>
+                        </label>
+                      {% endfor %}
+                    </div>
+                  {% else %}
+                    <p class="section-caption experts-empty-copy">这一类当前还没有可勾稽的内容。</p>
+                  {% endif %}
+                </details>
+              {% endfor %}
+            </div>
+            <div class="story-actions experts-resource-dialog-actions">
+              <button class="button button-ghost" type="button" data-experts-resource-modal-close>先返回</button>
+              <button class="button button-primary" type="submit">保存关联资料</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="reader-overlay" data-reader-overlay hidden>
+      <div class="reader-overlay-backdrop" data-reader-close></div>
+      <div class="reader-dialog" role="dialog" aria-modal="true" aria-label="专家资料阅读窗口">
+        <div class="reader-dialog-content" data-reader-content></div>
+      </div>
+    </div>
+  {% endif %}
+</body>
+</html>

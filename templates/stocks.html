@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>股票工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
 </head>
 <body>
@@ -15,7 +15,7 @@
     <section class="stock-hero panel">
       <div class="stock-hero-copy">
         <p class="eyebrow">股票工作台</p>
-        <h2>把分组、自选和研究记录收进同一座工作台。</h2>
+        <h2>股票总览</h2>
         <p class="story-dek">
           先整理观察名单，再进入个股页沉淀笔记、资料和会议转录。研究路径会更清晰，也更适合长期回看。
         </p>
@@ -23,11 +23,13 @@
           <a class="button button-primary" href="{{ url_for('index') }}">返回报告页</a>
           <a class="button button-secondary" href="{{ url_for('global_search') }}">全局搜索</a>
           <a class="button button-secondary" href="{{ url_for('trash_page') }}">回收站</a>
+          <form action="{{ url_for('sync_all_stock_earnings') }}" method="post">
+            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+            <button class="button button-secondary" type="submit">同步业绩期</button>
+          </form>
           <a
             class="button button-secondary"
             href="{{ url_for('stocks_calendar') }}"
-            data-calendar-launch
-            data-calendar-url="{{ url_for('stocks_calendar_modal') }}"
           >
             打开活动日历
           </a>
@@ -73,7 +75,13 @@
                       <button class="icon-button" type="submit" aria-label="移出自选">×</button>
                     </form>
                   </div>
-                  <p class="favorite-meta">{{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录 · 更新于 {{ stock.updated_label }}</p>
+                  <p class="favorite-meta">
+                    {{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录
+                    {% if stock.next_earnings.has_date %}
+                      · 下一次业绩 {{ stock.next_earnings.short_label }}
+                    {% endif %}
+                    · 更新于 {{ stock.updated_label }}
+                  </p>
                   <div class="chip-row">
                     {% for group in stock.groups[:3] %}
                       <span class="detail-chip">{{ group.name }}</span>
@@ -100,7 +108,7 @@
           </div>
 
           {% if groups %}
-            <div class="record-scroll-shell is-scrollable group-grid-shell" id="stock-group-shell" data-preserve-scroll-shell>
+            <div class="record-scroll-shell group-grid-shell" id="stock-group-shell" data-preserve-scroll-shell>
               <div class="group-grid">
                 {% for group in groups %}
                   <details class="group-card expander group-expander" id="group-{{ group.id }}" data-preserve-open-state {% if group.is_focus %}open{% endif %}>
@@ -135,105 +143,107 @@
                     </summary>
 
                     <div class="expander-body group-expander-body">
-                      <div class="group-expander-grid">
-                        <section class="group-panel-slab">
-                          <div class="group-panel-head">
+                      <div class="group-expander-workspace">
+                        <section class="group-panel-slab group-stock-slab">
+                          <div class="group-stock-section-head">
                             <div>
-                              <p class="eyebrow">分组信息</p>
-                              <h5>编辑名称和说明</h5>
+                              <p class="eyebrow">成员列表</p>
+                              <h5>{{ group.stock_count }} 只股票在这个分组里</h5>
                             </div>
-                            <span class="section-caption">这里负责定义这个分组为什么存在。</span>
+                            <form
+                              action="{{ url_for('delete_stock_group', group_id=group.id) }}"
+                              method="post"
+                              data-preserve-scroll
+                              data-confirm-delete
+                              data-confirm-message="把这个分组移入回收站吗？股票本身不会删除，后面也可以恢复分组。"
+                            >
+                              <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                              <button class="danger-button danger-button-compact" type="submit">删除分组</button>
+                            </form>
                           </div>
-                          <form class="stack-form compact-form" action="{{ url_for('update_stock_group', group_id=group.id) }}" method="post" data-preserve-scroll>
-                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
-                            <label class="form-field">
-                              <span class="field-label">分组名称</span>
-                              <input name="group_name" type="text" value="{{ group.name }}" placeholder="例：核心观察">
-                            </label>
-                            <label class="form-field">
-                              <span class="field-label">分组说明</span>
-                              <textarea name="group_description" rows="4" placeholder="写下这个分组的观察重点、阶段定义或筛选逻辑">{{ group.description }}</textarea>
-                            </label>
-                            <button class="button button-secondary" type="submit">保存分组信息</button>
-                          </form>
-                        </section>
 
-                        <section class="group-panel-slab">
-                          <div class="group-panel-head">
-                            <div>
-                              <p class="eyebrow">补充股票</p>
-                              <h5>继续加入成员</h5>
-                            </div>
-                            <span class="section-caption">一次可添加多只，也可以顺手加入自选。</span>
-                          </div>
-                          <form class="stack-form compact-form" action="{{ url_for('add_group_stocks', group_id=group.id) }}" method="post" data-preserve-scroll>
-                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
-                            <label class="form-field">
-                              <span class="field-label">添加股票代码</span>
-                              <input name="symbols" type="text" placeholder="AAPL, NVDA, FTAI">
-                            </label>
-                            <label class="checkbox-field">
-                              <input name="add_to_favorites" type="checkbox">
-                              <span>同时加入自选</span>
-                            </label>
-                            <button class="button button-primary" type="submit">加入分组</button>
-                          </form>
-                        </section>
-                      </div>
-
-                      <section class="group-panel-slab group-stock-slab">
-                        <div class="group-stock-section-head">
-                          <div>
-                            <p class="eyebrow">成员列表</p>
-                            <h5>{{ group.stock_count }} 只股票在这个分组里</h5>
-                          </div>
-                          <form
-                            action="{{ url_for('delete_stock_group', group_id=group.id) }}"
-                            method="post"
-                            data-preserve-scroll
-                            data-confirm-delete
-                            data-confirm-message="把这个分组移入回收站吗？股票本身不会删除，后面也可以恢复分组。"
-                          >
-                            <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
-                            <button class="danger-button danger-button-compact" type="submit">删除分组</button>
-                          </form>
-                        </div>
-
-                        {% if group.stocks %}
-                          <div class="record-scroll-shell group-stock-shell {% if group.stock_list_scrollable %}is-scrollable{% endif %}" id="group-stock-shell-{{ group.id }}" data-preserve-scroll-shell>
-                            {% for stock in group.stocks %}
-                              <div class="stock-row">
-                                <a class="stock-row-link" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">
-                                  <span class="stock-row-symbol">{{ stock.symbol }}</span>
-                                  <span class="stock-row-meta">{{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录</span>
-                                </a>
-                                <div class="stock-row-actions">
-                                  <form action="{{ url_for('toggle_favorite', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
-                                    <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
-                                    <button class="icon-button {% if stock.is_favorite %}is-active{% endif %}" type="submit" aria-label="切换自选">
-                                      {% if stock.is_favorite %}★{% else %}☆{% endif %}
-                                    </button>
-                                  </form>
-                                  <form
-                                    action="{{ url_for('remove_group_stock', group_id=group.id, symbol=stock.symbol) }}"
-                                    method="post"
-                                    data-preserve-scroll
-                                    data-confirm-delete
-                                    data-confirm-message="把 {{ stock.symbol }} 从当前分组中移除吗？"
-                                  >
-                                    <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
-                                    <button class="danger-button danger-button-compact" type="submit">移除</button>
-                                  </form>
+                          {% if group.stocks %}
+                            <div class="record-scroll-shell group-stock-shell {% if group.stock_list_scrollable %}is-scrollable{% endif %}" id="group-stock-shell-{{ group.id }}" data-preserve-scroll-shell>
+                              {% for stock in group.stocks %}
+                                <div class="stock-row">
+                                  <a class="stock-row-link" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">
+                                    <span class="stock-row-symbol">{{ stock.symbol }}</span>
+                                    <span class="stock-row-meta">{{ stock.note_count }} 条笔记 · {{ stock.file_count }} 个文件 · {{ stock.transcript_count }} 条转录</span>
+                                  </a>
+                                  <div class="stock-row-actions">
+                                    <form action="{{ url_for('toggle_favorite', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                                      <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                                      <button class="icon-button {% if stock.is_favorite %}is-active{% endif %}" type="submit" aria-label="切换自选">
+                                        {% if stock.is_favorite %}★{% else %}☆{% endif %}
+                                      </button>
+                                    </form>
+                                    <form
+                                      action="{{ url_for('remove_group_stock', group_id=group.id, symbol=stock.symbol) }}"
+                                      method="post"
+                                      data-preserve-scroll
+                                      data-confirm-delete
+                                      data-confirm-message="把 {{ stock.symbol }} 从当前分组中移除吗？"
+                                    >
+                                      <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                                      <button class="danger-button danger-button-compact" type="submit">移除</button>
+                                    </form>
+                                  </div>
                                 </div>
+                              {% endfor %}
+                            </div>
+                          {% else %}
+                            <div class="empty-inline">
+                              <p>这个分组里还没有股票。你可以先在右侧补充股票代码，后面再在这里维护星标和成员清单。</p>
+                            </div>
+                          {% endif %}
+                        </section>
+
+                        <div class="group-expander-side-column">
+                          <section class="group-panel-slab">
+                            <div class="group-panel-head">
+                              <div>
+                                <p class="eyebrow">分组信息</p>
+                                <h5>编辑名称和说明</h5>
                               </div>
-                            {% endfor %}
-                          </div>
-                        {% else %}
-                          <div class="empty-inline">
-                            <p>这个分组里还没有股票。你可以先在上方补充股票代码，后面再在这里维护星标和成员清单。</p>
-                          </div>
-                        {% endif %}
-                      </section>
+                              <span class="section-caption">这里负责定义这个分组为什么存在。</span>
+                            </div>
+                            <form class="stack-form compact-form" action="{{ url_for('update_stock_group', group_id=group.id) }}" method="post" data-preserve-scroll>
+                              <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                              <label class="form-field">
+                                <span class="field-label">分组名称</span>
+                                <input name="group_name" type="text" value="{{ group.name }}" placeholder="例：核心观察">
+                              </label>
+                              <label class="form-field">
+                                <span class="field-label">分组说明</span>
+                                <textarea name="group_description" rows="4" placeholder="写下这个分组的观察重点、阶段定义或筛选逻辑">{{ group.description }}</textarea>
+                              </label>
+                              <button class="button button-secondary" type="submit">保存分组信息</button>
+                            </form>
+                          </section>
+
+                          <section class="group-panel-slab">
+                            <div class="group-panel-head">
+                              <div>
+                                <p class="eyebrow">补充股票</p>
+                                <h5>继续加入成员</h5>
+                              </div>
+                              <span class="section-caption">一次可添加多只，也可以顺手加入自选。</span>
+                            </div>
+                            <form class="stack-form compact-form" action="{{ url_for('add_group_stocks', group_id=group.id) }}" method="post" data-preserve-scroll>
+                              <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
+                              <label class="form-field">
+                                <span class="field-label">添加股票代码</span>
+                                <input name="symbols" type="text" placeholder="AAPL, NVDA, FTAI">
+                              </label>
+                              <label class="checkbox-field">
+                                <input name="add_to_favorites" type="checkbox">
+                                <span>同时加入自选</span>
+                              </label>
+                              <button class="button button-primary" type="submit">加入分组</button>
+                            </form>
+                          </section>
+                        </div>
+                      </div>
                     </div>
                   </details>
                 {% endfor %}

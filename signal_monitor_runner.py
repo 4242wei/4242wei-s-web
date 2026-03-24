@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import html as html_lib
 import json
+import os
+import random
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -19,6 +22,15 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+    from selenium.webdriver.common.by import By
+except ImportError:  # pragma: no cover
+    webdriver = None
+    ChromeOptions = None
+    By = None
 
 
 REPORT_SUFFIXES = {".md", ".markdown"}
@@ -28,6 +40,13 @@ DEFAULT_WINDOW_DAYS = 7
 MIN_SOURCE_SCAN_INTERVAL_HOURS = 6
 X_TIMELINE_PAGE_SIZE = 40
 X_TIMELINE_MAX_PAGES = 4
+X_BROWSER_PAGE_LOAD_TIMEOUT = 45
+X_BROWSER_INITIAL_WAIT_SECONDS = 5.0
+X_BROWSER_WAIT_STEP_SECONDS = 1.2
+X_BROWSER_MAX_SCROLL_STEPS = 6
+X_BROWSER_MAX_IDLE_STEPS = 2
+X_BROWSER_SHOW_MORE_LIMIT = 8
+X_BROWSER_MAX_ARTICLES = 80
 
 X_USER_BY_SCREEN_NAME_FEATURES = {
     "hidden_profile_subscriptions_enabled": True,
@@ -378,6 +397,20 @@ def parse_x_created_at(raw_value: str) -> datetime | None:
     return value.astimezone(ZoneInfo("Asia/Shanghai") if ZoneInfo is not None else timezone(timedelta(hours=8)))
 
 
+def parse_x_iso_datetime(raw_value: str) -> datetime | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        value = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo("Asia/Shanghai") if ZoneInfo is not None else timezone(timedelta(hours=8)))
+
+
 def format_beijing_timestamp(value: datetime | None) -> str:
     if value is None:
         return ""
@@ -551,6 +584,380 @@ def normalize_x_tweet(tweet_result: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def parse_compact_number(raw_value: str) -> int:
+    text = str(raw_value or "").strip().replace(",", "")
+    if not text:
+        return 0
+    multiplier = 1
+    if text[-1:].lower() == "k":
+        multiplier = 1_000
+        text = text[:-1]
+    elif text[-1:].lower() == "m":
+        multiplier = 1_000_000
+        text = text[:-1]
+    elif text[-1:].lower() == "b":
+        multiplier = 1_000_000_000
+        text = text[:-1]
+    try:
+        return int(float(text) * multiplier)
+    except ValueError:
+        return 0
+
+
+def extract_metric_count(raw_value: str, label: str) -> int:
+    normalized_label = str(label or "").strip().lower()
+    label_pattern_map = {
+        "reply": r"repl(?:y|ies)",
+        "repost": r"reposts?",
+        "like": r"likes?",
+        "quote": r"quotes?",
+    }
+    label_pattern = label_pattern_map.get(normalized_label, re.escape(normalized_label))
+    match = re.search(rf"([\d.,]+[KMBkmb]?)\s+{label_pattern}", str(raw_value or ""), re.IGNORECASE)
+    if not match:
+        return 0
+    return parse_compact_number(match.group(1))
+
+
+def discover_chrome_binary() -> str | None:
+    env_names = ("CHROME_BINARY", "CHROME_PATH", "GOOGLE_CHROME_BIN")
+    candidates = [os.environ.get(name, "") for name in env_names]
+    candidates.extend(
+        [
+            shutil.which("chrome.exe") or "",
+            shutil.which("chrome") or "",
+            str(Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "Application" / "chrome.exe"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate))
+    return None
+
+
+def x_browser_headless_enabled() -> bool:
+    raw_value = str(os.environ.get("SIGNAL_MONITOR_X_BROWSER_HEADED", "")).strip().lower()
+    return raw_value not in {"1", "true", "yes", "on"}
+
+
+def jitter_sleep(base_seconds: float, spread_seconds: float = 0.35) -> None:
+    time.sleep(max(0.0, base_seconds + random.uniform(0.0, spread_seconds)))
+
+
+def build_x_browser_collector() -> dict[str, Any] | None:
+    if webdriver is None or ChromeOptions is None:
+        return None
+
+    chrome_binary = discover_chrome_binary()
+    if not chrome_binary:
+        return None
+
+    options = ChromeOptions()
+    options.binary_location = chrome_binary
+    if x_browser_headless_enabled():
+        options.add_argument("--headless=new")
+    options.add_argument("--window-size=1400,2200")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(X_BROWSER_PAGE_LOAD_TIMEOUT)
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'language', {get: () => 'en-US'});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+""",
+        },
+    )
+    try:
+        user_agent = str(driver.execute_script("return navigator.userAgent") or "").strip()
+        if user_agent:
+            driver.execute_cdp_cmd(
+                "Network.setUserAgentOverride",
+                {
+                    "userAgent": user_agent.replace("HeadlessChrome", "Chrome"),
+                    "acceptLanguage": "en-US,en",
+                    "platform": "Windows",
+                },
+            )
+    except Exception:
+        pass
+
+    return {
+        "driver": driver,
+        "binary_location": chrome_binary,
+        "headless": x_browser_headless_enabled(),
+    }
+
+
+def close_x_browser_collector(collector: dict[str, Any] | None) -> None:
+    if not isinstance(collector, dict):
+        return
+    driver = collector.get("driver")
+    if driver is None:
+        return
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
+def extract_profile_post_count(page_source: str) -> int | None:
+    match = re.search(r'"name":"(?:Tweets|Posts)","userInteractionCount":(\d+)', page_source)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def expand_visible_x_show_more(driver: Any) -> None:
+    if By is None:
+        return
+    buttons = driver.find_elements(By.CSS_SELECTOR, "button[data-testid='tweet-text-show-more-link']")
+    for button in buttons[:X_BROWSER_SHOW_MORE_LIMIT]:
+        try:
+            driver.execute_script("arguments[0].click();", button)
+            jitter_sleep(0.15, 0.1)
+        except Exception:
+            continue
+
+
+def normalize_browser_tweet(article: Any, default_handle: str) -> dict[str, Any] | None:
+    if By is None:
+        return None
+
+    time_nodes = article.find_elements(By.CSS_SELECTOR, "time")
+    if not time_nodes:
+        return None
+
+    created_at = parse_x_iso_datetime(time_nodes[0].get_attribute("datetime") or "")
+    if created_at is None:
+        return None
+
+    status_url = ""
+    try:
+        status_url = str(time_nodes[0].find_element(By.XPATH, "./ancestor::a[1]").get_attribute("href") or "").strip()
+    except Exception:
+        status_url = ""
+
+    rest_id_match = re.search(r"/status/(\d+)", status_url)
+    rest_id = rest_id_match.group(1) if rest_id_match else ""
+
+    text_parts: list[str] = []
+    for node in article.find_elements(By.CSS_SELECTOR, "div[data-testid='tweetText']"):
+        text_value = collapse_text(node.get_attribute("innerText") or node.text or "")
+        if text_value and text_value not in text_parts:
+            text_parts.append(text_value)
+    text_value = "\n".join(text_parts).strip()
+    if not text_value:
+        return None
+
+    author_handle = default_handle
+    if status_url:
+        path_parts = [part for part in urlparse(status_url).path.split("/") if part]
+        if path_parts:
+            author_handle = path_parts[0]
+
+    social_context = ""
+    try:
+        social_context = collapse_text(article.find_element(By.CSS_SELECTOR, "[data-testid='socialContext']").text)
+    except Exception:
+        social_context = ""
+
+    metrics_label = ""
+    try:
+        metrics_label = str(article.find_element(By.CSS_SELECTOR, "div[role='group'][aria-label]").get_attribute("aria-label") or "")
+    except Exception:
+        metrics_label = ""
+
+    return {
+        "rest_id": rest_id,
+        "author_handle": author_handle or default_handle,
+        "created_at": created_at,
+        "created_at_label": format_beijing_timestamp(created_at),
+        "url": status_url or f"https://x.com/{default_handle}/status/{rest_id}" if rest_id else "",
+        "text": collapse_text(text_value),
+        "is_retweet": "reposted" in social_context.lower() if social_context else False,
+        "reply_count": extract_metric_count(metrics_label, "reply"),
+        "retweet_count": extract_metric_count(metrics_label, "repost"),
+        "favorite_count": extract_metric_count(metrics_label, "like"),
+        "quote_count": extract_metric_count(metrics_label, "quote"),
+    }
+
+
+def fetch_x_browser_posts(
+    collector: dict[str, Any],
+    *,
+    handle: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, Any]:
+    if By is None:
+        raise RuntimeError("Selenium browser collector is unavailable.")
+
+    driver = collector["driver"]
+    url = f"https://x.com/{handle}"
+    driver.get(url)
+    jitter_sleep(X_BROWSER_INITIAL_WAIT_SECONDS, 0.75)
+
+    page_source = driver.page_source
+    profile_post_count = extract_profile_post_count(page_source)
+    seen_ids: set[str] = set()
+    collected: list[dict[str, Any]] = []
+    oldest_seen: datetime | None = None
+    idle_steps = 0
+
+    for _ in range(X_BROWSER_MAX_SCROLL_STEPS):
+        expand_visible_x_show_more(driver)
+        articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
+        previous_count = len(seen_ids)
+
+        for article in articles[:X_BROWSER_MAX_ARTICLES]:
+            tweet = normalize_browser_tweet(article, handle)
+            if tweet is None:
+                continue
+            tweet_key = str(tweet.get("rest_id") or tweet.get("url") or "")
+            if not tweet_key or tweet_key in seen_ids:
+                continue
+            seen_ids.add(tweet_key)
+            collected.append(tweet)
+            if oldest_seen is None or tweet["created_at"] < oldest_seen:
+                oldest_seen = tweet["created_at"]
+
+        if len(seen_ids) == previous_count:
+            idle_steps += 1
+        else:
+            idle_steps = 0
+
+        if articles:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'end'});", articles[-1])
+            except Exception:
+                pass
+
+        if oldest_seen is not None and oldest_seen <= window_start:
+            break
+        if idle_steps >= X_BROWSER_MAX_IDLE_STEPS:
+            break
+
+        jitter_sleep(X_BROWSER_WAIT_STEP_SECONDS, 0.4)
+
+    collected.sort(key=lambda item: item["created_at"], reverse=True)
+    in_window = [item for item in collected if window_start < item["created_at"] <= window_end]
+    reference_posts = [item for item in collected if item["created_at"] <= window_start][:3]
+    anti_crawl_suspected = not collected and bool(profile_post_count and profile_post_count > 0)
+
+    result = {
+        "collection_status": "anti_crawl_suspected" if anti_crawl_suspected else "ok",
+        "collection_method": "x_browser_profile_timeline",
+        "all_posts": collected,
+        "posts": in_window,
+        "reference_posts": reference_posts,
+        "fetched_count": len(collected),
+        "latest_visible_post_at": format_beijing_timestamp(collected[0]["created_at"]) if collected else "",
+        "oldest_visible_post_at": format_beijing_timestamp(collected[-1]["created_at"]) if collected else "",
+        "anti_crawl_suspected": anti_crawl_suspected,
+        "profile_post_count": profile_post_count or 0,
+        "timeline_probe_url": url,
+    }
+    if anti_crawl_suspected:
+        result["collection_error"] = (
+            f"Browser loaded the public profile and saw metadata for about {profile_post_count} posts, "
+            "but no visible timeline items or status links were rendered to the guest browser."
+        )
+    return result
+
+
+def collection_has_success(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("collection_status") or "").strip().lower()
+    return status in {"ok", "anti_crawl_suspected"}
+
+
+def merge_x_posts(*post_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for post_list in post_lists:
+        for post in post_list:
+            key = str(post.get("rest_id") or post.get("url") or f"{post.get('created_at_label')}|{post.get('text')}").strip()
+            if not key:
+                continue
+            if key not in merged:
+                merged[key] = dict(post)
+                continue
+            existing = merged[key]
+            for field, value in post.items():
+                if existing.get(field) in {"", 0, None, False} and value not in {"", 0, None, False}:
+                    existing[field] = value
+    return sorted(merged.values(), key=lambda item: item["created_at"], reverse=True)
+
+
+def combine_x_collection_results(
+    *,
+    browser_result: dict[str, Any] | None,
+    api_result: dict[str, Any] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, Any]:
+    browser_posts = browser_result.get("all_posts") if isinstance(browser_result, dict) and isinstance(browser_result.get("all_posts"), list) else []
+    api_posts = api_result.get("all_posts") if isinstance(api_result, dict) and isinstance(api_result.get("all_posts"), list) else []
+    combined_posts = merge_x_posts(browser_posts, api_posts)
+    in_window = [item for item in combined_posts if window_start < item["created_at"] <= window_end]
+    reference_posts = [item for item in combined_posts if item["created_at"] <= window_start][:3]
+
+    methods = [
+        str(result.get("collection_method") or "").strip()
+        for result in (browser_result, api_result)
+        if isinstance(result, dict) and str(result.get("collection_method") or "").strip()
+    ]
+    anti_crawl_suspected = bool(
+        isinstance(browser_result, dict)
+        and browser_result.get("anti_crawl_suspected")
+        and not combined_posts
+    )
+
+    warnings: list[str] = []
+    for label, result in (("browser", browser_result), ("guest_api", api_result)):
+        if not isinstance(result, dict):
+            continue
+        error_text = str(result.get("collection_error") or "").strip()
+        if error_text:
+            warnings.append(f"{label}: {error_text}")
+
+    if combined_posts or collection_has_success(browser_result) or collection_has_success(api_result):
+        status = "anti_crawl_suspected" if anti_crawl_suspected else "ok"
+    else:
+        status = "error"
+
+    return {
+        "collection_status": status,
+        "collection_method": "+".join(dict.fromkeys(methods)) or "unknown",
+        "collection_error": " | ".join(warnings),
+        "all_posts": combined_posts,
+        "posts": in_window,
+        "reference_posts": reference_posts,
+        "fetched_count": len(combined_posts),
+        "latest_visible_post_at": format_beijing_timestamp(combined_posts[0]["created_at"]) if combined_posts else "",
+        "oldest_visible_post_at": format_beijing_timestamp(combined_posts[-1]["created_at"]) if combined_posts else "",
+        "anti_crawl_suspected": anti_crawl_suspected,
+        "browser_visible_post_count": int(browser_result.get("fetched_count") or 0) if isinstance(browser_result, dict) else 0,
+        "api_visible_post_count": int(api_result.get("fetched_count") or 0) if isinstance(api_result, dict) else 0,
+        "profile_post_count": int(browser_result.get("profile_post_count") or 0) if isinstance(browser_result, dict) else 0,
+    }
+
+
 def fetch_x_public_posts(
     client: dict[str, Any],
     *,
@@ -703,6 +1110,18 @@ def build_prompt(
         collected_lines.append(f"- Direct collection method: {source.get('collection_method') or 'unknown'}")
         if source.get("collection_error"):
             collected_lines.append(f"- Direct collection error: {source['collection_error']}")
+        if source.get("anti_crawl_suspected"):
+            collected_lines.append("- Anti-crawl suspicion: yes. The public profile metadata loaded, but the visible guest timeline still came back empty.")
+        if source.get("profile_post_count"):
+            collected_lines.append(f"- Profile metadata post count: {source.get('profile_post_count')}")
+        if source.get("browser_visible_post_count") or source.get("api_visible_post_count"):
+            collected_lines.append(
+                f"- Visible posts fetched by method: browser={source.get('browser_visible_post_count') or 0}, guest_api={source.get('api_visible_post_count') or 0}"
+            )
+        if source.get("latest_visible_post_at"):
+            collected_lines.append(f"- Latest visible post timestamp: {source.get('latest_visible_post_at')}")
+        if source.get("oldest_visible_post_at"):
+            collected_lines.append(f"- Oldest visible post timestamp: {source.get('oldest_visible_post_at')}")
 
         posts = source.get("posts") if isinstance(source.get("posts"), list) else []
         if posts:
@@ -903,42 +1322,107 @@ def main() -> int:
     x_client: dict[str, Any] | None = None
     needs_live_search = False
     scanned_sources: list[dict[str, Any]] = []
-    for source in sources:
-        if not source.get("should_scan", True):
-            source["collection_status"] = "cooldown"
-            source["collection_method"] = "cooldown_skip"
-            source["posts"] = []
-            source["reference_posts"] = []
-            continue
+    x_browser: dict[str, Any] | None = None
+    browser_boot_error = ""
+    try:
+        x_browser = build_x_browser_collector()
+    except Exception as exc:
+        browser_boot_error = str(exc)
 
-        if source.get("source_type") == "x" and source.get("handle"):
-            try:
-                if x_client is None:
-                    x_client = build_x_public_client()
-                source.update(
-                    fetch_x_public_posts(
+    try:
+        for source in sources:
+            if not source.get("should_scan", True):
+                source["collection_status"] = "cooldown"
+                source["collection_method"] = "cooldown_skip"
+                source["posts"] = []
+                source["reference_posts"] = []
+                continue
+
+            if source.get("source_type") == "x" and source.get("handle"):
+                handle = str(source.get("handle") or "").strip()
+                browser_result: dict[str, Any] | None = None
+                api_result: dict[str, Any] | None = None
+
+                if x_browser is not None:
+                    try:
+                        browser_result = fetch_x_browser_posts(
+                            x_browser,
+                            handle=handle,
+                            window_start=source["window_start"],
+                            window_end=source["window_end"],
+                        )
+                    except Exception as exc:
+                        browser_result = {
+                            "collection_status": "error",
+                            "collection_method": "x_browser_profile_timeline",
+                            "collection_error": str(exc),
+                            "all_posts": [],
+                            "posts": [],
+                            "reference_posts": [],
+                            "fetched_count": 0,
+                            "latest_visible_post_at": "",
+                            "oldest_visible_post_at": "",
+                            "anti_crawl_suspected": False,
+                            "profile_post_count": 0,
+                        }
+                elif browser_boot_error:
+                    browser_result = {
+                        "collection_status": "error",
+                        "collection_method": "x_browser_profile_timeline",
+                        "collection_error": browser_boot_error,
+                        "all_posts": [],
+                        "posts": [],
+                        "reference_posts": [],
+                        "fetched_count": 0,
+                        "latest_visible_post_at": "",
+                        "oldest_visible_post_at": "",
+                        "anti_crawl_suspected": False,
+                        "profile_post_count": 0,
+                    }
+
+                try:
+                    if x_client is None:
+                        x_client = build_x_public_client()
+                    api_result = fetch_x_public_posts(
                         x_client,
-                        handle=str(source.get("handle") or "").strip(),
+                        handle=handle,
+                        window_start=source["window_start"],
+                        window_end=source["window_end"],
+                    )
+                except Exception as exc:
+                    api_result = {
+                        "collection_status": "error",
+                        "collection_method": "x_public_guest_api",
+                        "collection_error": str(exc),
+                        "all_posts": [],
+                        "posts": [],
+                        "reference_posts": [],
+                        "fetched_count": 0,
+                        "latest_visible_post_at": "",
+                        "oldest_visible_post_at": "",
+                    }
+
+                source.update(
+                    combine_x_collection_results(
+                        browser_result=browser_result,
+                        api_result=api_result,
                         window_start=source["window_start"],
                         window_end=source["window_end"],
                     )
                 )
-            except Exception as exc:
-                source["collection_status"] = "error"
-                source["collection_method"] = "x_public_guest_api"
-                source["collection_error"] = str(exc)
+                if source.get("collection_status") == "error":
+                    needs_live_search = True
+            else:
+                source["collection_status"] = "search_fallback"
+                source["collection_method"] = "codex_live_search"
                 source["posts"] = []
                 source["reference_posts"] = []
+                source["collection_error"] = "Direct collection is not implemented for this source type."
                 needs_live_search = True
-        else:
-            source["collection_status"] = "search_fallback"
-            source["collection_method"] = "codex_live_search"
-            source["posts"] = []
-            source["reference_posts"] = []
-            source["collection_error"] = "Direct collection is not implemented for this source type."
-            needs_live_search = True
 
-        scanned_sources.append(source)
+            scanned_sources.append(source)
+    finally:
+        close_x_browser_collector(x_browser)
 
     previous_excerpt = read_previous_report_excerpt(previous_report_path)
     prompt = build_prompt(

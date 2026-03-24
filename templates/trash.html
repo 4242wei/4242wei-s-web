@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>回收站</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260318-westlakesnow1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='trash-page.js', v='20260316-monitor-trash') }}" defer></script>
 </head>
@@ -16,7 +16,7 @@
     <section class="stock-hero panel trash-hero">
       <div class="stock-hero-copy">
         <p class="eyebrow">回收站</p>
-        <h2>先放进回收站，再决定是否真的删掉。</h2>
+        <h2>待恢复项</h2>
         <p class="story-dek">恢复放在前面，永久删除留在最后一步。这样误删不会立刻把研究记录清空。</p>
       </div>
       <aside class="stock-hero-aside">
@@ -163,3 +163,4 @@
   </div>
 </body>
 </html>
+
