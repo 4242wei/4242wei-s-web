@@ -4,7 +4,7 @@
     return;
   }
 
-  const allContentKinds = ["report", "note", "file", "transcript"];
+  const allContentKinds = ["report", "note", "file", "earnings_call", "transcript"];
   const kindLabels = {
     root: "主轴",
     theme: "分支",
@@ -27,6 +27,7 @@
   const modelSelect = root.querySelector("[data-mindmap-model-select]");
   const reasoningSelect = root.querySelector("[data-mindmap-reasoning-select]");
   const submitButton = composerForm ? composerForm.querySelector("button[type='submit']") : null;
+  const defaultSubmitLabel = submitButton ? submitButton.textContent.trim() : "生成思维图";
 
   const hiddenScopeFields = {
     useStockScope: composerForm ? composerForm.querySelector("[data-ai-scope-hidden='use_stock_scope']") : null,
@@ -192,7 +193,7 @@
   }
 
   function parseContentKinds(rawValue) {
-    const parsed = (String(rawValue || "").toLowerCase().match(/report|note|file|transcript/g) || []).filter(function (
+    const parsed = (String(rawValue || "").toLowerCase().match(/earnings_call|report|note|file|transcript/g) || []).filter(function (
       value,
       index,
       list
@@ -298,6 +299,22 @@
     if (hiddenScopeFields.selectedDate) {
       hiddenScopeFields.selectedDate.value = scope.selectedDate || "";
     }
+  }
+
+  function validateScopeForSubmit(scope) {
+    if (scope.useStockScope && !(scope.symbols || []).length) {
+      return "请至少选择一只股票。";
+    }
+    if (!(scope.contentKinds || []).length) {
+      return "请至少选择一种资料类型。";
+    }
+    if (scope.useDateScope && (!scope.startDate || !scope.endDate)) {
+      return "请先补全起止日期。";
+    }
+    if (scope.useDateScope && scope.startDate > scope.endDate) {
+      return "起始日期不能晚于结束日期。";
+    }
+    return "";
   }
 
   function updateSummary(summary) {
@@ -543,6 +560,7 @@
     }
     const formData = new FormData();
     formData.set("session_id", "");
+    formData.set("scope_owner", "mindmap");
     formData.set("use_stock_scope", scope.useStockScope ? "1" : "0");
     formData.set("content_kinds", (scope.contentKinds || []).join(", "));
     formData.set("symbols", (scope.symbols || []).join(", "));
@@ -1495,6 +1513,26 @@
   if (modelSelect instanceof HTMLSelectElement) {
     modelSelect.addEventListener("change", syncReasoningOptions);
     syncReasoningOptions();
+  }
+
+  if (composerForm instanceof HTMLFormElement && submitButton instanceof HTMLButtonElement) {
+    composerForm.addEventListener(
+      "submit",
+      function (event) {
+        const scope = currentScopeState();
+        applyScopeToHidden(scope);
+        const validationMessage = validateScopeForSubmit(scope);
+        if (!validationMessage) {
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        submitButton.disabled = false;
+        submitButton.textContent = defaultSubmitLabel;
+        showFlash("error", validationMessage);
+      },
+      true
+    );
   }
 
   if (composerForm instanceof HTMLFormElement && submitButton instanceof HTMLButtonElement) {

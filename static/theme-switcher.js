@@ -1,6 +1,6 @@
 (function () {
   const STORAGE_KEY = "workspace-theme";
-  const DEFAULT_THEME = "cloud-blue";
+  const DEFAULT_THEME = "seaside-blue-hour";
 
   function safeReadTheme() {
     try {
@@ -82,7 +82,7 @@
 
       if (activeCard instanceof HTMLElement) {
         if (labelNode instanceof HTMLElement) {
-          labelNode.textContent = activeCard.getAttribute("data-theme-label") || "云岸淡蓝";
+          labelNode.textContent = activeCard.getAttribute("data-theme-label") || "海风蓝调";
         }
         if (captionNode instanceof HTMLElement) {
           captionNode.textContent = activeCard.getAttribute("data-theme-caption") || "";

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>资料导出</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
   <script src="{{ url_for('static', filename='export-center.js', v='20260316-range2') }}" defer></script>
 </head>
 <body>
@@ -17,7 +17,7 @@
         <p class="eyebrow">导出给 GPT</p>
         <h2>导出中心</h2>
         <p class="story-dek">
-          先导出摘要包建立上下文，再按需补原始正文、日报或会议音频。这样更稳，也更方便对照原文。
+          先导出摘要包建立上下文，再按需补原始正文、日报、电话会议或会议音频。这样更稳，也更方便对照原文。
         </p>
       </div>
       <aside class="export-hero-stats">
@@ -55,7 +55,7 @@
             <input type="hidden" name="content_mode" value="summary_plus_raw">
             <div class="ai-export-card-copy">
               <strong>本周资料包</strong>
-              <span>近 7 天的日报、笔记、研究资料和会议转录</span>
+              <span>近 7 天的日报、笔记、研究资料、电话会议和会议转录</span>
             </div>
             <button class="button button-secondary button-compact" type="submit">导出本周包</button>
           </form>
@@ -82,14 +82,14 @@
             <input type="hidden" name="include_source_media" value="1">
             <input type="hidden" name="content_mode" value="summary_plus_raw">
             <label class="form-field">
-              <span class="field-label">某只股票近 7 天转录</span>
+              <span class="field-label">某只股票近 7 天会议资料</span>
               <select name="symbol">
                 {% for option in stock_options %}
                   <option value="{{ option.symbol }}" {% if option.symbol == default_export_symbol %}selected{% endif %}>{{ option.display_name }}</option>
                 {% endfor %}
               </select>
             </label>
-            <button class="button button-secondary button-compact" type="submit">导出转录包</button>
+            <button class="button button-secondary button-compact" type="submit">导出会议资料包</button>
           </form>
         </div>
       </article>
@@ -167,6 +167,7 @@
               <label><input type="checkbox" name="include_reports" value="1" checked data-ai-export-type="reports"> 日报</label>
               <label><input type="checkbox" name="include_notes" value="1" checked data-ai-export-type="notes"> 笔记</label>
               <label><input type="checkbox" name="include_files" value="1" checked data-ai-export-type="files"> 研究资料</label>
+              <label><input type="checkbox" name="include_earnings_calls" value="1" checked data-ai-export-type="earnings_calls"> 电话会议</label>
               <label><input type="checkbox" name="include_transcripts" value="1" checked data-ai-export-type="transcripts"> 会议转录</label>
             </div>
           </div>
@@ -199,4 +200,3 @@
   </div>
 </body>
 </html>
-

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>语音转录工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260316-readerrefresh1') }}" defer></script>
   <script src="{{ url_for('static', filename='transcript-page.js', v='20260323-categoryfilter3') }}" defer></script>
@@ -188,10 +188,26 @@
                     >
                       阅读全文
                     </button>
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      data-reader-template="transcript-link-editor-{{ transcript.id }}"
+                      data-reader-open
+                    >
+                      调整关联
+                    </button>
                     {% if transcript.has_transcript_content %}
                       <a class="text-link" href="{{ url_for('export_transcript_pdf', transcript_id=transcript.id, next=url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page')) }}">导出 PDF</a>
                     {% endif %}
                     <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      data-reader-template="transcript-link-editor-{{ transcript.id }}"
+                      data-reader-open
+                    >
+                      调整关联
+                    </button>
                     <form
                       action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
                       method="post"
@@ -284,6 +300,41 @@
                     {% endif %}
                     <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
                   </div>
+                </article>
+              </template>
+              <template id="transcript-link-editor-{{ transcript.id }}">
+                <article class="reader-sheet reader-sheet-transcript">
+                  <div class="reader-sheet-head">
+                    <div class="reader-sheet-head-copy">
+                      <p class="eyebrow">关联股票</p>
+                      <h3>{{ transcript.display_title }}</h3>
+                      <p class="reader-sheet-meta-line">把这条转录同步到一个或多个已存在的股票工作台。</p>
+                    </div>
+                    <button class="icon-button reader-sheet-close" type="button" aria-label="关闭关联股票窗口" data-reader-close>×</button>
+                  </div>
+
+                  <form class="stack-form compact-form" action="{{ url_for('update_transcript_links', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                    <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
+                    {% if preferred_symbol %}
+                      <input type="hidden" name="scope_symbol" value="{{ preferred_symbol }}">
+                    {% endif %}
+
+                    <label class="checkbox-field">
+                      <input name="link_to_stock" type="checkbox" {% if transcript.linked_symbols %}checked{% endif %}>
+                      <span>同步到股票工作台</span>
+                    </label>
+
+                    <label class="form-field">
+                      <span class="field-label">股票代码</span>
+                      <input name="linked_symbols_text" type="text" value="{{ transcript.linked_symbols_form_value }}" placeholder="例：FTAI; GE; NVDA">
+                      <span class="field-help">支持一个或多个股票代码，使用分号、逗号或空格分隔；仅支持已存在于股票工作台的代码。</span>
+                    </label>
+
+                    <div class="card-link-row reader-sheet-footer">
+                      <button class="button button-primary button-compact" type="submit">保存关联</button>
+                      <button class="button button-secondary button-compact" type="button" data-reader-close>取消</button>
+                    </div>
+                  </form>
                 </article>
               </template>
               <template id="transcript-content-{{ transcript.id }}">{{ transcript.reader_content_html | safe }}</template>
@@ -508,6 +559,41 @@
                       <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
                     </div>
                 </article>
+                </template>
+                <template id="transcript-link-editor-{{ transcript.id }}">
+                  <article class="reader-sheet reader-sheet-transcript">
+                    <div class="reader-sheet-head">
+                      <div class="reader-sheet-head-copy">
+                        <p class="eyebrow">关联股票</p>
+                        <h3>{{ transcript.display_title }}</h3>
+                        <p class="reader-sheet-meta-line">把这条转录同步到一个或多个已存在的股票工作台。</p>
+                      </div>
+                      <button class="icon-button reader-sheet-close" type="button" aria-label="关闭关联股票窗口" data-reader-close>×</button>
+                    </div>
+
+                    <form class="stack-form compact-form" action="{{ url_for('update_transcript_links', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                      <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
+                      {% if preferred_symbol %}
+                        <input type="hidden" name="scope_symbol" value="{{ preferred_symbol }}">
+                      {% endif %}
+
+                      <label class="checkbox-field">
+                        <input name="link_to_stock" type="checkbox" {% if transcript.linked_symbols %}checked{% endif %}>
+                        <span>同步到股票工作台</span>
+                      </label>
+
+                      <label class="form-field">
+                        <span class="field-label">股票代码</span>
+                        <input name="linked_symbols_text" type="text" value="{{ transcript.linked_symbols_form_value }}" placeholder="例：FTAI; GE; NVDA">
+                        <span class="field-help">支持一个或多个股票代码，使用分号、逗号或空格分隔；仅支持已存在于股票工作台的代码。</span>
+                      </label>
+
+                      <div class="card-link-row reader-sheet-footer">
+                        <button class="button button-primary button-compact" type="submit">保存关联</button>
+                        <button class="button button-secondary button-compact" type="button" data-reader-close>取消</button>
+                      </div>
+                    </form>
+                  </article>
                 </template>
                 <template id="transcript-content-{{ transcript.id }}">{{ transcript.reader_content_html | safe }}</template>
               </article>

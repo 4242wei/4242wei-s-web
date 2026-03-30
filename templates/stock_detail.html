@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ stock.symbol }} - 股票工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260324-mindmap1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-tabs.js', v='20260316-tabsfix2') }}" defer></script>
-  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260317-searchjump1') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260330-earningscall1') }}" defer></script>
   <script src="{{ url_for('static', filename='rich-editor.js', v='20260316-richmedia') }}" defer></script>
 </head>
 <body>
@@ -119,6 +119,10 @@
             <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="notes">
               <span class="stock-detail-tab-label">研究笔记</span>
               <span class="stock-detail-tab-count">{{ stock.note_count }}</span>
+            </button>
+            <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="earnings-calls">
+              <span class="stock-detail-tab-label">电话会议</span>
+              <span class="stock-detail-tab-count">{{ stock.earnings_call_count }}</span>
             </button>
             <button class="stock-detail-tab" type="button" role="tab" aria-selected="false" data-stock-detail-panel-target="transcripts">
               <span class="stock-detail-tab-label">会议转录</span>
@@ -475,6 +479,167 @@
           {% endif %}
         </section>
 
+        <section class="panel record-section" id="earnings-calls-panel" data-stock-detail-panel="earnings-calls" hidden>
+          {% if stock.earnings_calls %}
+            <details class="expander record-expander" open>
+              <summary class="expander-summary">
+                <div>
+                  <p class="eyebrow">电话会议</p>
+                  <h3>近两年财报电话会</h3>
+                  <p class="section-caption">优先收录适合长期更新的完整财报电话会议文本，点击阅读会在当前页弹出全文。</p>
+                </div>
+                <div class="expander-meta">
+                  <span class="summary-count">{{ stock.earnings_call_count }}</span>
+                  <span class="expander-toggle">
+                    <span class="expander-closed-label">展开</span>
+                    <span class="expander-open-label">收起</span>
+                  </span>
+                </div>
+              </summary>
+
+              <div class="expander-body record-expander-body">
+                <div class="card-link-row">
+                  <p class="field-help">
+                    最近同步 {{ stock.earnings_call_sync.display_last_synced_at }}
+                    {% if stock.earnings_call_sync.source_label %}
+                      · 来源：
+                      {% if stock.earnings_call_sync.source_url %}
+                        <a class="text-link" href="{{ stock.earnings_call_sync.source_url }}" target="_blank" rel="noreferrer">{{ stock.earnings_call_sync.source_label }}</a>
+                      {% else %}
+                        {{ stock.earnings_call_sync.source_label }}
+                      {% endif %}
+                    {% endif %}
+                    · 范围：近两年财报电话会议
+                  </p>
+                  <form action="{{ url_for('sync_stock_earnings_calls', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                    <input type="hidden" name="next_url" value="{{ return_to }}">
+                    <button class="button button-secondary button-compact" type="submit">刷新电话会议</button>
+                  </form>
+                </div>
+                {% if stock.earnings_call_sync.last_error %}
+                  <p class="field-help">最近错误：{{ stock.earnings_call_sync.last_error }}</p>
+                {% endif %}
+
+                <div class="record-scroll-shell{% if stock.earnings_call_count > 6 %} is-scrollable{% endif %}">
+                  <div class="record-stack">
+                    {% for call in stock.earnings_calls %}
+                      <article class="record-card transcript-record-card" id="earnings-call-{{ call.id }}">
+                        <div class="record-card-head">
+                          <div>
+                            <div class="card-inline-meta transcript-card-meta-row">
+                              <span class="meta-chip">{{ call.source_short_label or call.source_label or "Pineify" }}</span>
+                              {% if call.source_query_label %}
+                                <span class="meta-chip">{{ call.source_query_label }}</span>
+                              {% endif %}
+                            </div>
+                            <h4>{{ call.display_title }}</h4>
+                            <p class="section-caption">电话会日期 {{ call.display_call_date }} · 收录时间 {{ call.display_published_at }}</p>
+                          </div>
+                          <div class="card-link-row">
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="stock-earnings-call-reader-{{ call.id }}"
+                              data-reader-open
+                            >
+                              阅读全文
+                            </button>
+                            {% if call.source_url %}
+                              <a class="text-link" href="{{ call.source_url }}" target="_blank" rel="noreferrer">原始来源</a>
+                            {% endif %}
+                          </div>
+                        </div>
+
+                        {% if call.quality_chips %}
+                          <div class="card-inline-meta">
+                            {% for chip in call.quality_chips %}
+                              <span class="meta-chip">{{ chip }}</span>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+
+                        <p class="card-preview-copy">{{ call.summary_excerpt }}</p>
+                        {% if call.quality_notes %}
+                          <p class="field-help">校验说明：{{ call.quality_notes | join(" · ") }}</p>
+                        {% endif %}
+
+                        <template id="stock-earnings-call-reader-{{ call.id }}">
+                          <article class="reader-sheet reader-sheet-transcript">
+                            <div class="reader-sheet-head">
+                              <div class="reader-sheet-head-copy">
+                                <p class="eyebrow">电话会议</p>
+                                <h3>{{ call.display_title }}</h3>
+                                <p class="reader-sheet-meta-line">电话会日期 {{ call.display_call_date }} · 收录时间 {{ call.display_published_at }}</p>
+                              </div>
+                              <button class="icon-button reader-sheet-close" type="button" aria-label="关闭电话会议" data-reader-close>×</button>
+                            </div>
+
+                            <div class="card-inline-meta reader-sheet-support">
+                              <span class="meta-chip">{{ call.source_label or "Pineify" }}</span>
+                              {% if call.source_query_label %}
+                                <span class="meta-chip">{{ call.source_query_label }}</span>
+                              {% endif %}
+                              {% if call.call_date_label %}
+                                <span class="meta-chip">电话会 {{ call.call_date_label }}</span>
+                              {% endif %}
+                            </div>
+
+                            {% if call.quality_chips %}
+                              <div class="card-inline-meta">
+                                {% for chip in call.quality_chips %}
+                                  <span class="meta-chip">{{ chip }}</span>
+                                {% endfor %}
+                              </div>
+                            {% endif %}
+
+                            {% if call.quality_notes %}
+                              <p class="field-help">校验说明：{{ call.quality_notes | join(" · ") }}</p>
+                            {% endif %}
+
+                            <div class="reader-section-marker"><span>正文</span></div>
+                            <div class="reader-sheet-stage">
+                              <div class="reader-sheet-body reader-sheet-prose rich-output">{{ call.reader_content_html | safe }}</div>
+                            </div>
+                            <div class="card-link-row reader-sheet-footer">
+                              {% if call.source_url %}
+                                <a class="text-link" href="{{ call.source_url }}" target="_blank" rel="noreferrer">打开原始来源</a>
+                              {% endif %}
+                            </div>
+                          </article>
+                        </template>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </details>
+          {% else %}
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">电话会议</p>
+                <h3>近两年财报电话会</h3>
+                <p class="section-caption">这里会保留适合长期更新的完整财报电话会议文本，方便和研究笔记放在同一页阅读。</p>
+              </div>
+              <span class="summary-count">{{ stock.earnings_call_count }}</span>
+            </div>
+            <div class="empty-inline">
+              <p>这里还没有同步到适合展示的电话会议内容。你可以先刷新一次，系统会优先抓取近两年的完整财报电话会。</p>
+              <div class="card-link-row">
+                <form action="{{ url_for('sync_stock_earnings_calls', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+                  <input type="hidden" name="next_url" value="{{ return_to }}">
+                  <button class="button button-secondary button-compact" type="submit">立即同步电话会议</button>
+                </form>
+                {% if stock.earnings_call_sync.source_url %}
+                  <a class="text-link" href="{{ stock.earnings_call_sync.source_url }}" target="_blank" rel="noreferrer">查看来源</a>
+                {% endif %}
+              </div>
+              {% if stock.earnings_call_sync.last_error %}
+                <p class="field-help">最近错误：{{ stock.earnings_call_sync.last_error }}</p>
+              {% endif %}
+            </div>
+          {% endif %}
+        </section>
+
         <section class="panel record-section" id="transcripts-panel" data-stock-detail-panel="transcripts" hidden>
           {% if stock.transcripts %}
             <details class="expander record-expander" open>
@@ -518,6 +683,14 @@
                               data-reader-open
                             >
                               阅读全文
+                            </button>
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="stock-transcript-link-editor-{{ transcript.id }}"
+                              data-reader-open
+                            >
+                              调整关联
                             </button>
                             <form
                               action="{{ url_for('delete_transcript_job', transcript_id=transcript.id) }}"
@@ -611,6 +784,38 @@
                               {% endif %}
                               <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
                             </div>
+                          </article>
+                        </template>
+                        <template id="stock-transcript-link-editor-{{ transcript.id }}">
+                          <article class="reader-sheet reader-sheet-transcript">
+                            <div class="reader-sheet-head">
+                              <div class="reader-sheet-head-copy">
+                                <p class="eyebrow">关联股票</p>
+                                <h3>{{ transcript.display_title }}</h3>
+                                <p class="reader-sheet-meta-line">把这条转录同步到一个或多个已存在的股票工作台。</p>
+                              </div>
+                              <button class="icon-button reader-sheet-close" type="button" aria-label="关闭关联股票窗口" data-reader-close>×</button>
+                            </div>
+
+                            <form class="stack-form compact-form" action="{{ url_for('update_transcript_links', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                              <input type="hidden" name="next_url" value="{{ return_to }}">
+
+                              <label class="checkbox-field">
+                                <input name="link_to_stock" type="checkbox" {% if transcript.linked_symbols %}checked{% endif %}>
+                                <span>同步到股票工作台</span>
+                              </label>
+
+                              <label class="form-field">
+                                <span class="field-label">股票代码</span>
+                                <input name="linked_symbols_text" type="text" value="{{ transcript.linked_symbols_form_value }}" placeholder="例：FTAI; GE; NVDA">
+                                <span class="field-help">支持一个或多个股票代码，使用分号、逗号或空格分隔；仅支持已存在于股票工作台的代码。</span>
+                              </label>
+
+                              <div class="card-link-row reader-sheet-footer">
+                                <button class="button button-primary button-compact" type="submit">保存关联</button>
+                                <button class="button button-secondary button-compact" type="button" data-reader-close>取消</button>
+                              </div>
+                            </form>
                           </article>
                         </template>
                       </article>
@@ -1046,4 +1251,3 @@
   </div>
 </body>
 </html>
-

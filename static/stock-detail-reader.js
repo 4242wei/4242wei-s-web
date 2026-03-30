@@ -132,6 +132,9 @@
     if (kind === "transcript") {
       return `transcript-${itemId}`;
     }
+    if (kind === "earnings_call") {
+      return `earnings-call-${itemId}`;
+    }
     return "";
   }
 
@@ -182,8 +185,12 @@
         if (button instanceof HTMLElement) {
           openOverlay(document.getElementById(`note-reader-${itemId}`)?.innerHTML || "");
         }
-      } else if (kind === "transcript") {
-        const template = document.getElementById(`stock-transcript-reader-${itemId}`);
+      } else if (kind === "transcript" || kind === "earnings_call") {
+        const template = document.getElementById(
+          kind === "earnings_call"
+            ? `stock-earnings-call-reader-${itemId}`
+            : `stock-transcript-reader-${itemId}`
+        );
         if (template instanceof HTMLTemplateElement) {
           openOverlay(template.innerHTML);
         }

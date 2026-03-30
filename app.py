@@ -27,7 +27,6 @@ import bleach
 import markdown
 import requests
 from bleach.css_sanitizer import CSSSanitizer
-from docx import Document
 from dotenv import load_dotenv
 from flask import (
     Flask,
@@ -37,32 +36,19 @@ from flask import (
     redirect,
     render_template,
     request,
+    session,
     send_file,
     send_from_directory,
     url_for,
 )
-from pypdf import PdfReader
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env.local", override=False)
 load_dotenv(BASE_DIR / ".env", override=False)
 
-from oss_client import (
-    build_oss_status,
-    build_signed_url,
-    delete_uploaded_object,
-    probe_oss_bridge,
-    upload_file_for_tingwu,
-)
 from monitor_runner import check_codex_login as check_monitor_codex_login
 from monitor_runner import discover_codex_path as discover_monitor_codex_path
-from tingwu_client import (
-    build_tingwu_status,
-    fetch_result_documents,
-    get_task_info,
-    submit_offline_task,
-)
 REPORT_SUFFIXES = {".md", ".markdown"}
 MARKDOWN_EXTENSIONS = ["extra", "toc", "sane_lists", "nl2br"]
 FILENAME_DATETIME_PATTERNS = [
@@ -129,6 +115,7 @@ FILE_TYPE_LABELS = {
 }
 TAG_SPLIT_PATTERN = re.compile(r"[\n,，;；]+")
 SEARCH_KIND_META = {
+    "earnings_call": {"label": "电话会议", "tone": "transcript"},
     "note": {"label": "研究笔记", "tone": "note"},
     "file": {"label": "研究资料", "tone": "file"},
     "transcript": {"label": "会议转录", "tone": "transcript"},
@@ -140,6 +127,7 @@ AI_SCOPE_CONTENT_KIND_META = {
     "report": "日报",
     "note": "笔记",
     "file": "文件",
+    "earnings_call": "电话会议",
     "transcript": "转录",
 }
 AI_SCOPE_DEFAULT_CONTENT_KINDS = tuple(AI_SCOPE_CONTENT_KIND_META.keys())
@@ -556,9 +544,10 @@ MINDMAP_POLL_INTERVAL_SECONDS = int(os.getenv("MINDMAP_POLL_INTERVAL_SECONDS", "
 MINDMAP_STALE_JOB_SECONDS = int(os.getenv("MINDMAP_STALE_JOB_SECONDS", "120"))
 TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS", "12"))
 AI_PROMPT_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("AI_PROMPT_KNOWLEDGE_CHAR_LIMIT", "40000"))
-MINDMAP_PIPELINE_VERSION = "20260324-research-v2"
-MINDMAP_PROMPT_VERSION = "20260324-two-step-v1"
+MINDMAP_PIPELINE_VERSION = "20260330-research-v3"
+MINDMAP_PROMPT_VERSION = "20260330-two-step-v2"
 MINDMAP_SCHEMA_VERSION = "20260324-schema-v2"
+MINDMAP_SCOPE_DRAFT_SESSION_KEY = "mindmap_scope_draft"
 MINDMAP_MAX_CURATED_SOURCES = 28
 MINDMAP_RECENT_WINDOW_DAYS = 45
 AI_SESSION_LOCK = threading.RLock()
@@ -572,8 +561,11 @@ MINDMAP_ACTIVE_TASKS: set[str] = set()
 MINDMAP_STOP_REQUESTS: set[str] = set()
 MINDMAP_STUDIO_LOCK = threading.RLock()
 STOCK_STORE_LOCK = threading.RLock()
+STOCK_STORE_CACHE_LOCK = threading.RLock()
+STOCK_STORE_CACHE: dict[str, Any] = {"signature": None, "data": None}
 MINDMAP_KIND_PRIORITY = {
     "report": 1.1,
+    "earnings_call": 1.05,
     "transcript": 1.0,
     "note": 0.92,
     "file": 0.84,
@@ -609,12 +601,114 @@ REPORT_INDEX_CACHE: dict[str, Any] = {
 }
 REPORT_HTML_CACHE: dict[tuple[str, int, int], str] = {}
 REPORT_HTML_RENDER_VERSION = 3
+PDF_READER_CLASS: Any | None = None
+DOCX_DOCUMENT_CLASS: Any | None = None
+OSS_CLIENT_API: dict[str, Any] | None = None
+TINGWU_CLIENT_API: dict[str, Any] | None = None
 DEFAULT_MONITOR_SOURCE_DIR = Path(r"D:\工作\FTAI")
 ORIGINAL_MONITOR_CONFIG_PATH = DEFAULT_MONITOR_SOURCE_DIR / "stock_monitor_config.json"
 MONITOR_DATA_DIR = BASE_DIR / "data" / "monitor"
 MONITOR_CONFIG_PATH = MONITOR_DATA_DIR / "config.json"
 MONITOR_RUNTIME_PATH = MONITOR_DATA_DIR / "runtime.json"
 MONITOR_RUNNER_PATH = BASE_DIR / "monitor_runner.py"
+
+
+def get_pdf_reader_class() -> Any:
+    global PDF_READER_CLASS
+    if PDF_READER_CLASS is None:
+        from pypdf import PdfReader as pdf_reader_class
+
+        PDF_READER_CLASS = pdf_reader_class
+    return PDF_READER_CLASS
+
+
+def get_docx_document_class() -> Any:
+    global DOCX_DOCUMENT_CLASS
+    if DOCX_DOCUMENT_CLASS is None:
+        from docx import Document as docx_document_class
+
+        DOCX_DOCUMENT_CLASS = docx_document_class
+    return DOCX_DOCUMENT_CLASS
+
+
+def get_oss_client_api() -> dict[str, Any]:
+    global OSS_CLIENT_API
+    if OSS_CLIENT_API is None:
+        from oss_client import (
+            build_oss_status as build_oss_status_impl,
+            build_signed_url as build_signed_url_impl,
+            delete_uploaded_object as delete_uploaded_object_impl,
+            probe_oss_bridge as probe_oss_bridge_impl,
+            upload_file_for_tingwu as upload_file_for_tingwu_impl,
+        )
+
+        OSS_CLIENT_API = {
+            "build_oss_status": build_oss_status_impl,
+            "build_signed_url": build_signed_url_impl,
+            "delete_uploaded_object": delete_uploaded_object_impl,
+            "probe_oss_bridge": probe_oss_bridge_impl,
+            "upload_file_for_tingwu": upload_file_for_tingwu_impl,
+        }
+    return OSS_CLIENT_API
+
+
+def build_oss_status() -> dict[str, Any]:
+    return get_oss_client_api()["build_oss_status"]()
+
+
+def build_signed_url(*, bucket_name: str, object_key: str) -> dict[str, Any]:
+    return get_oss_client_api()["build_signed_url"](bucket_name=bucket_name, object_key=object_key)
+
+
+def delete_uploaded_object(*, bucket_name: str, object_key: str) -> None:
+    get_oss_client_api()["delete_uploaded_object"](bucket_name=bucket_name, object_key=object_key)
+
+
+def probe_oss_bridge() -> dict[str, Any]:
+    return get_oss_client_api()["probe_oss_bridge"]()
+
+
+def upload_file_for_tingwu(path: Path, *, original_name: str, transcript_id: str) -> dict[str, Any]:
+    return get_oss_client_api()["upload_file_for_tingwu"](
+        path,
+        original_name=original_name,
+        transcript_id=transcript_id,
+    )
+
+
+def get_tingwu_client_api() -> dict[str, Any]:
+    global TINGWU_CLIENT_API
+    if TINGWU_CLIENT_API is None:
+        from tingwu_client import (
+            build_tingwu_status as build_tingwu_status_impl,
+            fetch_result_documents as fetch_result_documents_impl,
+            get_task_info as get_task_info_impl,
+            submit_offline_task as submit_offline_task_impl,
+        )
+
+        TINGWU_CLIENT_API = {
+            "build_tingwu_status": build_tingwu_status_impl,
+            "fetch_result_documents": fetch_result_documents_impl,
+            "get_task_info": get_task_info_impl,
+            "submit_offline_task": submit_offline_task_impl,
+        }
+    return TINGWU_CLIENT_API
+
+
+def build_tingwu_status() -> dict[str, Any]:
+    return get_tingwu_client_api()["build_tingwu_status"]()
+
+
+def fetch_result_documents(result_urls: dict[str, Any]) -> dict[str, Any]:
+    return get_tingwu_client_api()["fetch_result_documents"](result_urls)
+
+
+def get_task_info(task_id: str) -> dict[str, Any]:
+    return get_tingwu_client_api()["get_task_info"](task_id)
+
+
+def submit_offline_task(transcript: dict[str, Any], *, file_url: str) -> dict[str, Any]:
+    return get_tingwu_client_api()["submit_offline_task"](transcript, file_url=file_url)
 MONITOR_LOGS_DIR = BASE_DIR / "logs" / "monitor"
 MONITOR_PROMPTS_DIR = MONITOR_DATA_DIR / "prompts"
 MONITOR_TRASH_DIR = MONITOR_DATA_DIR / "trash_reports"
@@ -786,7 +880,81 @@ def extract_title(content: str, fallback: str) -> str:
     return fallback
 
 
+def compact_report_summary_text(text: str, *, limit: int = 180) -> str:
+    compact = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    compact = re.sub(r"`([^`]*)`", r"\1", compact)
+    compact = re.sub(r"\s+", " ", compact).strip(" -:;")
+    if len(compact) > limit:
+        return compact[:limit].rstrip() + "..."
+    return compact
+
+
+def collect_report_section_bullets(content: str, heading: str) -> list[str]:
+    bullets: list[str] = []
+    heading_marker = f"## {heading}"
+    in_section = False
+
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("## "):
+            if stripped == heading_marker:
+                in_section = True
+                continue
+            if in_section:
+                break
+        if in_section and stripped.startswith("- "):
+            bullets.append(stripped[2:].strip())
+
+    return bullets
+
+
+def extract_monitor_report_summary(content: str) -> str:
+    head = content[:320]
+    if "# Stock Monitor Report" not in head and "Stock Monitor Report" not in head:
+        return ""
+
+    summary_parts: list[str] = []
+    run_summary_bullets = collect_report_section_bullets(content, "Run Summary")
+    high_signal_line = next(
+        (
+            compact_report_summary_text(item.split(":", 1)[1])
+            for item in run_summary_bullets
+            if item.lower().startswith("high-signal changes:") and ":" in item
+        ),
+        "",
+    )
+    if high_signal_line:
+        summary_parts.append(f"高信号：{high_signal_line}")
+
+    signal_board = collect_report_section_bullets(content, "Signal Board")
+    meaningful_signal_board = [
+        compact_report_summary_text(item)
+        for item in signal_board
+        if not re.search(r":\s*(?:none|无|无实质|没有)\s*$", item, re.IGNORECASE)
+    ]
+    if meaningful_signal_board:
+        summary_parts.append("；".join(meaningful_signal_board[:2]))
+
+    if not summary_parts:
+        top_changes = collect_report_section_bullets(content, "Top Changes")
+        meaningful_top_changes = [
+            compact_report_summary_text(item)
+            for item in top_changes
+            if "no stock had a material company-level change" not in item.lower()
+        ]
+        if meaningful_top_changes:
+            summary_parts.append("；".join(meaningful_top_changes[:2]))
+
+    if summary_parts:
+        return compact_report_summary_text("；".join(summary_parts), limit=210)
+    return ""
+
+
 def extract_summary(content: str) -> str:
+    monitor_summary = extract_monitor_report_summary(content)
+    if monitor_summary:
+        return monitor_summary
+
     for line in content.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -901,6 +1069,33 @@ def build_stock_earnings_view(entry: dict[str, Any]) -> dict[str, Any]:
         "short_label": format_month_day_label(next_date),
         "full_label": next_date or "待同步",
         "headline": f"下一次业绩：{format_month_day_label(next_date)}",
+        "display_last_synced_at": (
+            format_iso_timestamp(info["last_synced_at"]) if info["last_synced_at"] else "未同步"
+        ),
+    }
+
+
+def normalize_stock_earnings_call_sync_info(raw_info: Any) -> dict[str, Any]:
+    source = raw_info if isinstance(raw_info, dict) else {}
+    try:
+        lookback_days = max(0, int(source.get("lookback_days") or 730))
+    except (TypeError, ValueError):
+        lookback_days = 730
+
+    return {
+        "source_label": str(source.get("source_label") or "").strip()[:80],
+        "source_url": str(source.get("source_url") or "").strip()[:600],
+        "last_synced_at": str(source.get("last_synced_at") or "").strip()[:40],
+        "last_error": str(source.get("last_error") or "").strip()[:2000],
+        "lookback_days": lookback_days,
+    }
+
+
+def build_stock_earnings_call_sync_view(entry: dict[str, Any]) -> dict[str, Any]:
+    info = normalize_stock_earnings_call_sync_info(entry.get("earnings_call_sync"))
+    return {
+        **info,
+        "has_synced": bool(info["last_synced_at"]),
         "display_last_synced_at": (
             format_iso_timestamp(info["last_synced_at"]) if info["last_synced_at"] else "未同步"
         ),
@@ -1138,7 +1333,7 @@ def prepare_note_payload(html_value: str, fallback_text: str) -> tuple[str, str]
 
 
 def extract_pdf_text(path: Path) -> str:
-    reader = PdfReader(str(path))
+    reader = get_pdf_reader_class()(str(path))
     chunks = []
     for page in reader.pages:
         text = (page.extract_text() or "").strip()
@@ -1149,7 +1344,7 @@ def extract_pdf_text(path: Path) -> str:
 
 
 def extract_docx_text(path: Path) -> str:
-    document = Document(str(path))
+    document = get_docx_document_class()(str(path))
     chunks: list[str] = []
 
     for paragraph in document.paragraphs:
@@ -1339,12 +1534,12 @@ def normalize_choice_list(raw_values: Any, allowed_values: set[str]) -> list[str
 
 def normalize_ai_scope_content_kinds(raw_values: Any) -> list[str]:
     if isinstance(raw_values, str):
-        values = re.findall(r"report|note|file|transcript", raw_values.lower())
+        values = re.findall(r"earnings_call|report|note|file|transcript", raw_values.lower())
     elif isinstance(raw_values, (list, tuple, set)):
         values: list[Any] = []
         for raw_value in raw_values:
             if isinstance(raw_value, str):
-                values.extend(re.findall(r"report|note|file|transcript", raw_value.lower()))
+                values.extend(re.findall(r"earnings_call|report|note|file|transcript", raw_value.lower()))
             else:
                 values.append(raw_value)
     else:
@@ -1817,6 +2012,7 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
         "linked_symbol": linked_symbol,
         "linked_symbols": linked_symbols,
         "linked_symbols_label": "；".join(linked_symbols),
+        "linked_symbols_form_value": "; ".join(linked_symbols),
         "linked_symbol_count": len(linked_symbols),
         "linked_search_symbol": linked_search_symbol,
         "display_title": entry["title"] or fallback_title(Path(entry["original_name"])),
@@ -2713,9 +2909,13 @@ def transcript_matches_symbol(entry: dict[str, Any], symbol: str | None) -> bool
     return normalized_symbol in transcript_linked_symbols(entry)
 
 
-def touch_transcript_stocks(store: dict[str, Any], transcript: dict[str, Any]) -> None:
-    for symbol in transcript_linked_symbols(transcript):
+def touch_stock_symbols(store: dict[str, Any], symbols: list[str]) -> None:
+    for symbol in normalize_stock_symbol_list(symbols):
         touch_stock(store, symbol)
+
+
+def touch_transcript_stocks(store: dict[str, Any], transcript: dict[str, Any]) -> None:
+    touch_stock_symbols(store, transcript_linked_symbols(transcript))
 
 
 def ordered_unique(values: list[str]) -> list[str]:
@@ -3842,18 +4042,96 @@ def stock_entry_template(symbol: str) -> dict[str, Any]:
         "created_at": stamp,
         "updated_at": stamp,
         "earnings": normalize_stock_earnings_info({}),
+        "earnings_calls": [],
+        "earnings_call_sync": normalize_stock_earnings_call_sync_info({}),
         "notes": [],
         "files": [],
     }
 
 
-def normalize_note(raw_note: Any) -> dict[str, Any] | None:
+def normalize_stock_earnings_call_entry(raw_call: Any, *, trust_saved_html: bool = False) -> dict[str, Any] | None:
+    if not isinstance(raw_call, dict):
+        return None
+
+    raw_html = str(raw_call.get("transcript_html") or "").strip()
+    transcript_text = trim_note_content(str(raw_call.get("transcript_text") or "").strip())
+    transcript_html = raw_html if trust_saved_html and raw_html else (sanitize_note_html(raw_html) if raw_html else "")
+    if transcript_html and not transcript_text:
+        transcript_text = trim_note_content(note_html_to_text(transcript_html))
+    if transcript_text and not transcript_html:
+        transcript_html = plain_text_to_html(transcript_text)
+    if not transcript_text and not transcript_html:
+        return None
+
+    title = str(raw_call.get("title") or raw_call.get("original_title") or "").strip()[:200]
+    if not title:
+        return None
+
+    summary_text = trim_note_content(str(raw_call.get("summary_text") or "").strip())
+    saved_summary_excerpt = str(raw_call.get("summary_excerpt") or "").strip()
+    summary_excerpt = (
+        saved_summary_excerpt[:240]
+        if trust_saved_html and saved_summary_excerpt
+        else summarize_text_block(summary_text or transcript_text)
+    )
+    try:
+        word_count = max(0, int(raw_call.get("word_count") or 0))
+    except (TypeError, ValueError):
+        word_count = 0
+    try:
+        speaker_turn_count = max(0, int(raw_call.get("speaker_turn_count") or 0))
+    except (TypeError, ValueError):
+        speaker_turn_count = 0
+    try:
+        fiscal_year = int(raw_call.get("fiscal_year") or 0)
+    except (TypeError, ValueError):
+        fiscal_year = 0
+    try:
+        fiscal_quarter = int(raw_call.get("fiscal_quarter") or 0)
+    except (TypeError, ValueError):
+        fiscal_quarter = 0
+
+    return {
+        "id": str(raw_call.get("id") or uuid.uuid4().hex[:12]).strip()[:40],
+        "title": title,
+        "original_title": str(raw_call.get("original_title") or title).strip()[:220],
+        "source_label": str(raw_call.get("source_label") or "").strip()[:80],
+        "source_short_label": str(raw_call.get("source_short_label") or "").strip()[:40],
+        "source_url": str(raw_call.get("source_url") or "").strip()[:600],
+        "source_query_label": str(raw_call.get("source_query_label") or "").strip()[:120],
+        "published_at": str(raw_call.get("published_at") or "").strip()[:40],
+        "published_date": normalize_date_field(raw_call.get("published_date")),
+        "call_date": normalize_date_field(raw_call.get("call_date")),
+        "call_date_label": str(raw_call.get("call_date_label") or "").strip()[:80],
+        "summary_text": summary_text,
+        "summary_excerpt": summary_excerpt,
+        "transcript_html": transcript_html,
+        "transcript_text": transcript_text,
+        "word_count": word_count,
+        "speaker_turn_count": speaker_turn_count,
+        "has_question_section": bool(raw_call.get("has_question_section")),
+        "is_complete": bool(raw_call.get("is_complete", True)),
+        "quality_notes": [
+            str(item).strip()[:120]
+            for item in raw_call.get("quality_notes", [])
+            if str(item).strip()
+        ],
+        "fiscal_year": fiscal_year,
+        "fiscal_quarter": fiscal_quarter,
+    }
+
+
+def normalize_note(raw_note: Any, *, trust_saved_html: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw_note, dict):
         return None
 
     raw_html = str(raw_note.get("content_html") or "").strip()
     legacy_content = str(raw_note.get("content") or "").strip()
-    content_html = sanitize_note_html(raw_html) if raw_html else plain_text_to_html(trim_note_content(legacy_content))
+    content_html = (
+        raw_html
+        if trust_saved_html and raw_html
+        else (sanitize_note_html(raw_html) if raw_html else plain_text_to_html(trim_note_content(legacy_content)))
+    )
     content_text = trim_note_content(
         str(raw_note.get("content_text") or "").strip() or note_html_to_text(content_html)
     )
@@ -3898,7 +4176,7 @@ def normalize_file_entry(raw_file: Any) -> dict[str, Any] | None:
     }
 
 
-def normalize_transcript_entry(raw_transcript: Any) -> dict[str, Any] | None:
+def normalize_transcript_entry(raw_transcript: Any, *, trust_saved_html: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw_transcript, dict):
         return None
 
@@ -3925,7 +4203,11 @@ def normalize_transcript_entry(raw_transcript: Any) -> dict[str, Any] | None:
 
     raw_transcript_html = str(raw_transcript.get("transcript_html") or "").strip()
     transcript_text = trim_note_content(str(raw_transcript.get("transcript_text") or "").strip())
-    transcript_html = sanitize_note_html(raw_transcript_html) if raw_transcript_html else ""
+    transcript_html = (
+        raw_transcript_html
+        if trust_saved_html and raw_transcript_html
+        else (sanitize_note_html(raw_transcript_html) if raw_transcript_html else "")
+    )
     if not transcript_html and transcript_text:
         transcript_html = plain_text_to_html(transcript_text)
     if transcript_html and not transcript_text:
@@ -4067,7 +4349,7 @@ def normalize_signal_report_payload(raw_payload: Any) -> dict[str, Any] | None:
     }
 
 
-def normalize_trash_entry(raw_entry: Any) -> dict[str, Any] | None:
+def normalize_trash_entry(raw_entry: Any, *, trust_saved_html: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw_entry, dict):
         return None
 
@@ -4076,11 +4358,11 @@ def normalize_trash_entry(raw_entry: Any) -> dict[str, Any] | None:
     normalized_payload: dict[str, Any] | None = None
 
     if item_type == "note":
-        normalized_payload = normalize_note(payload)
+        normalized_payload = normalize_note(payload, trust_saved_html=trust_saved_html)
     elif item_type == "file":
         normalized_payload = normalize_file_entry(payload)
     elif item_type == "transcript":
-        normalized_payload = normalize_transcript_entry(payload)
+        normalized_payload = normalize_transcript_entry(payload, trust_saved_html=trust_saved_html)
     elif item_type == "group":
         normalized_payload = normalize_group_entry(payload)
     elif item_type == "schedule_item":
@@ -4115,7 +4397,7 @@ def normalize_trash_entry(raw_entry: Any) -> dict[str, Any] | None:
     }
 
 
-def normalize_stock_store(data: Any) -> dict[str, Any]:
+def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[str, Any]:
     source = data if isinstance(data, dict) else {}
     groups: list[dict[str, Any]] = []
 
@@ -4137,7 +4419,7 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
     transcripts = [
         transcript
         for raw_transcript in raw_transcripts
-        if (transcript := normalize_transcript_entry(raw_transcript)) is not None
+        if (transcript := normalize_transcript_entry(raw_transcript, trust_saved_html=trust_saved_html)) is not None
     ]
     experts = [
         expert
@@ -4152,7 +4434,7 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
     trash = [
         trash_entry
         for raw_entry in source.get("trash", [])
-        if (trash_entry := normalize_trash_entry(raw_entry)) is not None
+        if (trash_entry := normalize_trash_entry(raw_entry, trust_saved_html=trust_saved_html)) is not None
     ]
 
     stocks: dict[str, dict[str, Any]] = {}
@@ -4169,10 +4451,24 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
                 entry["created_at"] = str(raw_entry.get("created_at") or entry["created_at"])
                 entry["updated_at"] = str(raw_entry.get("updated_at") or entry["updated_at"])
                 entry["earnings"] = normalize_stock_earnings_info(raw_entry.get("earnings"))
+                entry["earnings_calls"] = [
+                    call
+                    for raw_call in raw_entry.get("earnings_calls", [])
+                    if (
+                        call := normalize_stock_earnings_call_entry(
+                            raw_call,
+                            trust_saved_html=trust_saved_html,
+                        )
+                    )
+                    is not None
+                ]
+                entry["earnings_call_sync"] = normalize_stock_earnings_call_sync_info(
+                    raw_entry.get("earnings_call_sync")
+                )
                 entry["notes"] = [
                     note
                     for raw_note in raw_entry.get("notes", [])
-                    if (note := normalize_note(raw_note)) is not None
+                    if (note := normalize_note(raw_note, trust_saved_html=trust_saved_html)) is not None
                 ]
                 entry["files"] = [
                     file_entry
@@ -4200,17 +4496,40 @@ def normalize_stock_store(data: Any) -> dict[str, Any]:
     }
 
 
+def get_stock_store_signature() -> tuple[str, int, int]:
+    try:
+        stat_result = STOCK_STORE_PATH.stat()
+    except OSError:
+        return ("missing", 0, 0)
+    return ("file", int(stat_result.st_mtime_ns), int(stat_result.st_size))
+
+
 def load_stock_store() -> dict[str, Any]:
     STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not STOCK_STORE_PATH.exists():
-        return normalize_stock_store({})
+    signature = get_stock_store_signature()
 
-    try:
-        raw_data = json.loads(STOCK_STORE_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return normalize_stock_store({})
+    with STOCK_STORE_CACHE_LOCK:
+        cached_signature = STOCK_STORE_CACHE.get("signature")
+        cached_data = STOCK_STORE_CACHE.get("data")
+        if cached_signature == signature and isinstance(cached_data, dict):
+            return deepcopy(cached_data)
 
-    return normalize_stock_store(raw_data)
+    if signature[0] == "missing":
+        normalized = normalize_stock_store({}, trust_saved_html=True)
+    else:
+        try:
+            raw_data = json.loads(STOCK_STORE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            normalized = normalize_stock_store({}, trust_saved_html=True)
+        else:
+            normalized = normalize_stock_store(raw_data, trust_saved_html=True)
+
+    refreshed_signature = get_stock_store_signature()
+    with STOCK_STORE_CACHE_LOCK:
+        STOCK_STORE_CACHE["signature"] = refreshed_signature
+        STOCK_STORE_CACHE["data"] = normalized
+
+    return deepcopy(normalized)
 
 
 def save_stock_store(store: dict[str, Any]) -> None:
@@ -4219,6 +4538,9 @@ def save_stock_store(store: dict[str, Any]) -> None:
     temp_path = STOCK_STORE_PATH.with_suffix(".tmp")
     temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(STOCK_STORE_PATH)
+    with STOCK_STORE_CACHE_LOCK:
+        STOCK_STORE_CACHE["signature"] = get_stock_store_signature()
+        STOCK_STORE_CACHE["data"] = normalized
 
 
 def list_stock_symbols(store: dict[str, Any]) -> list[str]:
@@ -4287,6 +4609,16 @@ def fetch_next_stock_earnings(symbol: str) -> dict[str, Any]:
             errors.append(f"{source_label}: {exc}")
 
     raise RuntimeError("；".join(errors) or "未找到可用的业绩日期来源")
+
+
+def fetch_recent_stock_earnings_calls(
+    symbol: str,
+    *,
+    existing_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    from earnings_calls import fetch_recent_earnings_calls
+
+    return fetch_recent_earnings_calls(symbol, existing_calls=existing_calls)
 
 
 def build_managed_earnings_schedule_title(symbol: str) -> str:
@@ -4389,6 +4721,54 @@ def apply_stock_earnings_snapshot(
     upsert_stock_earnings_schedule_item(store, symbol, normalized)
 
 
+def apply_stock_earnings_call_snapshot(
+    store: dict[str, Any],
+    symbol: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    entry = ensure_stock_entry(store, symbol)
+    raw_calls = payload.get("calls", []) if isinstance(payload, dict) else []
+    calls = [
+        call
+        for raw_call in raw_calls
+        if (call := normalize_stock_earnings_call_entry(raw_call)) is not None
+    ]
+    entry["earnings_calls"] = calls
+    entry["earnings_call_sync"] = normalize_stock_earnings_call_sync_info(
+        {
+            "source_label": payload.get("source_label") if isinstance(payload, dict) else "",
+            "source_url": payload.get("source_url") if isinstance(payload, dict) else "",
+            "lookback_days": payload.get("lookback_days") if isinstance(payload, dict) else 730,
+            "last_synced_at": now_iso(),
+            "last_error": "",
+        }
+    )
+    touch_stock(store, symbol)
+    return entry
+
+
+def note_stock_earnings_call_sync_failure(
+    store: dict[str, Any],
+    symbol: str,
+    error_message: str,
+    *,
+    source_label: str = "",
+    source_url: str = "",
+    lookback_days: int = 730,
+) -> None:
+    entry = ensure_stock_entry(store, symbol)
+    current = normalize_stock_earnings_call_sync_info(entry.get("earnings_call_sync"))
+    entry["earnings_call_sync"] = normalize_stock_earnings_call_sync_info(
+        {
+            "source_label": source_label or current.get("source_label") or "",
+            "source_url": source_url or current.get("source_url") or "",
+            "lookback_days": lookback_days or current.get("lookback_days") or 730,
+            "last_synced_at": now_iso(),
+            "last_error": error_message,
+        }
+    )
+
+
 def collect_stock_earnings_snapshots(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
     snapshots: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
@@ -4482,6 +4862,7 @@ def build_stock_card(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "note_count": len(entry.get("notes", [])),
         "file_count": len(entry.get("files", [])),
         "transcript_count": transcript_count_for_symbol(store, symbol),
+        "earnings_call_count": len(entry.get("earnings_calls", [])),
         "updated_label": format_iso_timestamp(entry.get("updated_at")),
         "next_earnings": build_stock_earnings_view(entry),
         "groups": memberships,
@@ -5176,6 +5557,53 @@ def build_expert_resource_catalog(
     )
 
     transcript_items: list[dict[str, Any]] = []
+    for call in []:
+            if selected_kind and selected_kind != "earnings_call":
+                continue
+            if normalized_symbol and symbol != normalized_symbol:
+                continue
+            if normalized_tag:
+                continue
+
+            search_text = " ".join(
+                [
+                    symbol,
+                    str(call.get("display_title") or ""),
+                    str(call.get("original_title") or ""),
+                    str(call.get("transcript_text") or ""),
+                    str(call.get("source_query_label") or ""),
+                ]
+            )
+            if terms and not text_contains_all_terms(search_text, terms):
+                continue
+
+            results.append(
+                {
+                    "kind": "earnings_call",
+                    "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                    "kind_tone": SEARCH_KIND_META["earnings_call"]["tone"],
+                    "title": call["display_title"],
+                    "summary": build_match_excerpt(
+                        call.get("transcript_text") or "",
+                        terms,
+                        call["summary_excerpt"],
+                    ),
+                    "symbol": symbol,
+                    "display_time": call.get("display_call_date") or call.get("display_published_at"),
+                    "sort_value": coerce_sort_timestamp(call.get("call_date") or call.get("published_at")),
+                    "tags": [],
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="earnings-calls",
+                        item_kind="earnings_call",
+                        item_id=str(call.get("id") or ""),
+                        anchor=f"earnings-call-{call.get('id')}",
+                    ),
+                    "secondary_url": call.get("source_url") or "",
+                    "secondary_label": "原始来源",
+                }
+            )
+
     for transcript in build_transcript_cards(store):
         linked_symbols = transcript.get("linked_symbols", [])
         symbol_match_rank = 0 if not preferred_symbols or preferred_symbols.intersection(linked_symbols) else 1
@@ -5575,6 +6003,122 @@ def build_stock_tag_summary(store: dict[str, Any], symbol: str | None = None) ->
     return collect_tag_counts(items)
 
 
+def build_stock_earnings_call_cards(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = entry.get("earnings_calls", [])
+    if not isinstance(raw_calls, list):
+        raw_calls = []
+
+    calls = [raw_call for raw_call in raw_calls if isinstance(raw_call, dict)]
+    calls.sort(
+        key=lambda item: (
+            str(item.get("call_date") or item.get("published_at") or ""),
+            str(item.get("title") or ""),
+        ),
+        reverse=True,
+    )
+
+    cards: list[dict[str, Any]] = []
+    for call in calls:
+        quality_chips = build_stock_earnings_call_quality_chips(call)
+
+        display_call_date = call.get("call_date") or ""
+        if not display_call_date and call.get("published_at"):
+            display_call_date = format_iso_timestamp(call.get("published_at"))
+
+        cards.append(
+            {
+                **call,
+                "display_title": call.get("title") or call.get("original_title") or "电话会议",
+                "display_call_date": display_call_date or "待补充",
+                "display_published_at": (
+                    format_iso_timestamp(call.get("published_at")) if call.get("published_at") else "待补充"
+                ),
+                "reader_content_html": call.get("transcript_html")
+                or plain_text_to_html(call.get("transcript_text") or ""),
+                "summary_excerpt": call.get("summary_excerpt")
+                or summarize_text_block(call.get("summary_text") or call.get("transcript_text") or ""),
+                "quality_chips": quality_chips,
+            }
+        )
+
+    return cards
+
+
+def build_stock_earnings_call_quality_chips(call: dict[str, Any]) -> list[str]:
+    chips: list[str] = []
+    if call.get("is_complete"):
+        chips.append("已校验正文")
+    if call.get("has_question_section"):
+        chips.append("含问答")
+    if call.get("speaker_turn_count"):
+        chips.append(f"{call['speaker_turn_count']} 轮发言")
+    if call.get("word_count"):
+        chips.append(f"{call['word_count']} 词")
+    return chips
+
+
+def build_stock_earnings_call_material_item(symbol: str, call: dict[str, Any]) -> dict[str, Any]:
+    call_id = str(call.get("id") or "").strip()
+    call_date = normalize_date_field(call.get("call_date")) or ""
+    published_at = str(call.get("published_at") or "").strip()
+    published_date = normalize_date_field(call.get("published_date")) or iso_to_date(published_at) or ""
+    try:
+        detail_url = url_for("stock_detail", symbol=symbol)
+    except RuntimeError:
+        detail_url = f"/stocks/{symbol}"
+    if call_id:
+        detail_url = f"{detail_url}#earnings-call-{call_id}"
+
+    fiscal_year = max(0, int(call.get("fiscal_year") or 0))
+    fiscal_quarter = max(0, int(call.get("fiscal_quarter") or 0))
+    fiscal_label = ""
+    if fiscal_year and fiscal_quarter:
+        fiscal_label = f"FY{fiscal_year} Q{fiscal_quarter}"
+    elif fiscal_year:
+        fiscal_label = f"FY{fiscal_year}"
+    elif fiscal_quarter:
+        fiscal_label = f"Q{fiscal_quarter}"
+
+    display_time = call_date
+    if not display_time:
+        display_time = format_iso_timestamp(published_at) if published_at else (published_date or "待补充")
+
+    return {
+        "symbol": symbol,
+        "id": call_id,
+        "title": str(call.get("title") or call.get("original_title") or "电话会议").strip()[:200],
+        "original_title": str(call.get("original_title") or call.get("title") or "").strip()[:220],
+        "call_date": call_date,
+        "published_at": published_at,
+        "published_date": published_date,
+        "display_time": display_time,
+        "sort_value": coerce_sort_timestamp(call_date or published_at or published_date),
+        "summary": str(call.get("summary_excerpt") or "").strip()
+        or summarize_text_block(call.get("summary_text") or call.get("transcript_text") or ""),
+        "summary_text": trim_note_content(str(call.get("summary_text") or "").strip()),
+        "transcript_text": trim_note_content(str(call.get("transcript_text") or "").strip()),
+        "source_label": str(call.get("source_label") or "").strip()[:80],
+        "source_url": str(call.get("source_url") or "").strip()[:600],
+        "source_query_label": str(call.get("source_query_label") or "").strip()[:120],
+        "quality_notes": [
+            str(item).strip()[:120]
+            for item in call.get("quality_notes", [])
+            if str(item).strip()
+        ],
+        "quality_chips": build_stock_earnings_call_quality_chips(call),
+        "is_complete": bool(call.get("is_complete")),
+        "has_question_section": bool(call.get("has_question_section")),
+        "speaker_turn_count": max(0, int(call.get("speaker_turn_count") or 0)),
+        "word_count": max(0, int(call.get("word_count") or 0)),
+        "fiscal_year": fiscal_year,
+        "fiscal_quarter": fiscal_quarter,
+        "fiscal_label": fiscal_label,
+        "detail_url": detail_url,
+        "detail_label": "打开电话会议",
+        "activity_date": call_date or published_date or iso_to_date(published_at) or "",
+    }
+
+
 def build_stock_timeline(
     store: dict[str, Any],
     symbol: str,
@@ -5773,6 +6317,10 @@ def split_search_terms(query: str) -> list[str]:
     return parts if len(parts) > 1 else [compact]
 
 
+def fold_search_terms(terms: list[str]) -> list[str]:
+    return [term.casefold() for term in terms if term]
+
+
 def build_stock_detail_deep_link(
     *,
     symbol: str,
@@ -5795,9 +6343,19 @@ def build_stock_detail_deep_link(
     return target
 
 
-def text_contains_all_terms(text: str, terms: list[str]) -> bool:
-    haystack = text.casefold()
-    return all(term.casefold() in haystack for term in terms)
+def text_contains_all_terms(
+    text: str,
+    terms: list[str],
+    *,
+    text_casefolded: str | None = None,
+    folded_terms: list[str] | None = None,
+) -> bool:
+    normalized_terms = folded_terms if folded_terms is not None else fold_search_terms(terms)
+    if not normalized_terms:
+        return True
+
+    haystack = text_casefolded if text_casefolded is not None else text.casefold()
+    return all(term in haystack for term in normalized_terms)
 
 
 def build_match_excerpt(text: str, terms: list[str], fallback: str, limit: int = 180) -> str:
@@ -5835,6 +6393,7 @@ def build_global_search_context(
     tag_filter: str,
 ) -> dict[str, Any]:
     terms = split_search_terms(query)
+    folded_terms = fold_search_terms(terms)
     normalized_symbol = normalize_stock_symbol(symbol_filter or "") or ""
     normalized_tag = normalize_tag_value(tag_filter) or ""
     selected_kind = kind_filter if kind_filter in SEARCH_KIND_META else ""
@@ -5858,7 +6417,12 @@ def build_global_search_context(
                 continue
             if normalized_tag and not tag_match(tags, normalized_tag):
                 continue
-            if terms and not text_contains_all_terms(search_text, terms):
+            if terms and not text_contains_all_terms(
+                search_text,
+                terms,
+                text_casefolded=search_text.casefold(),
+                folded_terms=folded_terms,
+            ):
                 continue
 
             results.append(
@@ -5903,7 +6467,12 @@ def build_global_search_context(
                 continue
             if normalized_tag and not tag_match(tags, normalized_tag):
                 continue
-            if terms and not text_contains_all_terms(search_text, terms):
+            if terms and not text_contains_all_terms(
+                search_text,
+                terms,
+                text_casefolded=search_text.casefold(),
+                folded_terms=folded_terms,
+            ):
                 continue
 
             results.append(
@@ -5938,6 +6507,58 @@ def build_global_search_context(
                 }
             )
 
+        for call in build_stock_earnings_call_cards(entry):
+            if selected_kind and selected_kind != "earnings_call":
+                continue
+            if normalized_symbol and symbol != normalized_symbol:
+                continue
+            if normalized_tag:
+                continue
+
+            search_text = " ".join(
+                [
+                    symbol,
+                    str(call.get("display_title") or ""),
+                    str(call.get("original_title") or ""),
+                    str(call.get("transcript_text") or ""),
+                    str(call.get("source_query_label") or ""),
+                ]
+            )
+            if terms and not text_contains_all_terms(
+                search_text,
+                terms,
+                text_casefolded=search_text.casefold(),
+                folded_terms=folded_terms,
+            ):
+                continue
+
+            results.append(
+                {
+                    "kind": "earnings_call",
+                    "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                    "kind_tone": SEARCH_KIND_META["earnings_call"]["tone"],
+                    "title": call["display_title"],
+                    "summary": build_match_excerpt(
+                        call.get("transcript_text") or "",
+                        terms,
+                        call["summary_excerpt"],
+                    ),
+                    "symbol": symbol,
+                    "display_time": call.get("display_call_date") or call.get("display_published_at"),
+                    "sort_value": coerce_sort_timestamp(call.get("call_date") or call.get("published_at")),
+                    "tags": [],
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="earnings-calls",
+                        item_kind="earnings_call",
+                        item_id=str(call.get("id") or ""),
+                        anchor=f"earnings-call-{call.get('id')}",
+                    ),
+                    "secondary_url": call.get("source_url") or "",
+                    "secondary_label": "鍘熷鏉ユ簮",
+                }
+            )
+
     for transcript in build_transcript_cards(store):
         if selected_kind and selected_kind != "transcript":
             continue
@@ -5961,7 +6582,12 @@ def build_global_search_context(
             continue
         if normalized_tag and not tag_match(tags, normalized_tag):
             continue
-        if terms and not text_contains_all_terms(search_text, terms):
+        if terms and not text_contains_all_terms(
+            search_text,
+            terms,
+            text_casefolded=search_text.casefold(),
+            folded_terms=folded_terms,
+        ):
             continue
 
         results.append(
@@ -6013,7 +6639,12 @@ def build_global_search_context(
             continue
         if normalized_tag and not tag_match(tags, normalized_tag):
             continue
-        if terms and not text_contains_all_terms(search_text, terms):
+        if terms and not text_contains_all_terms(
+            search_text,
+            terms,
+            text_casefolded=search_text.casefold(),
+            folded_terms=folded_terms,
+        ):
             continue
 
         schedule_date = str(schedule_item.get("scheduled_date") or "")
@@ -6057,11 +6688,16 @@ def build_global_search_context(
     for report in reports:
         if selected_kind and selected_kind != "report":
             continue
-        content = read_report_text(REPORTS_DIR / report["filename"])
+        content = str(report.get("content") or "") or read_report_text(REPORTS_DIR / report["filename"])
         combined_text = " ".join([report["title"], report["summary"], report["filename"], content])
         if normalized_symbol and report_symbol_pattern and not report_symbol_pattern.search(combined_text):
             continue
-        if terms and not text_contains_all_terms(combined_text, terms):
+        if terms and not text_contains_all_terms(
+            combined_text,
+            terms,
+            text_casefolded=combined_text.casefold(),
+            folded_terms=folded_terms,
+        ):
             continue
         if normalized_tag:
             continue
@@ -6219,6 +6855,7 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
     notes = sorted(entry["notes"], key=lambda item: item["created_at"], reverse=True)
     files = sorted(entry["files"], key=lambda item: item["uploaded_at"], reverse=True)
     transcripts = build_transcript_cards(store, symbol_filter=symbol)
+    earnings_calls = build_stock_earnings_call_cards(entry)
     file_lookup = {file_entry["id"]: file_entry for file_entry in files}
     related_reports = find_related_reports(symbol)
 
@@ -6256,6 +6893,8 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
             for file_entry in files
         ],
         "transcripts": transcripts,
+        "earnings_calls": earnings_calls,
+        "earnings_call_sync": build_stock_earnings_call_sync_view(entry),
         "related_reports": related_reports,
         "timeline": build_stock_timeline(store, symbol, related_reports=related_reports),
         "tag_summary": build_stock_tag_summary(store, symbol)[:12],
@@ -6818,6 +7457,71 @@ def normalize_ai_scope_settings(
     }
 
 
+def extract_mindmap_scope_request_payload(source: Any) -> dict[str, Any]:
+    if not hasattr(source, "get"):
+        return {}
+
+    return {
+        "use_stock_scope": source.get("use_stock_scope"),
+        "scope_symbols": source.get("scope_symbols", ""),
+        "scope_content_kinds": source.get("scope_content_kinds", ""),
+        "use_date_scope": source.get("use_date_scope"),
+        "scope_start_date": source.get("scope_start_date"),
+        "scope_end_date": source.get("scope_end_date"),
+        "scope_preview_month": source.get("scope_preview_month"),
+        "scope_selected_date": source.get("scope_selected_date"),
+    }
+
+
+def save_mindmap_scope_draft(scope_settings: dict[str, Any] | None) -> None:
+    if not scope_settings:
+        session.pop(MINDMAP_SCOPE_DRAFT_SESSION_KEY, None)
+        return
+
+    session[MINDMAP_SCOPE_DRAFT_SESSION_KEY] = normalize_ai_scope_settings(scope_settings)
+    session.modified = True
+
+
+def load_mindmap_scope_draft(*, known_symbols: set[str] | None = None) -> dict[str, Any] | None:
+    raw_scope = session.get(MINDMAP_SCOPE_DRAFT_SESSION_KEY)
+    if not isinstance(raw_scope, dict):
+        return None
+
+    try:
+        return normalize_ai_scope_settings(raw_scope, known_symbols=known_symbols)
+    except ValueError:
+        return None
+
+
+def should_use_mindmap_scope_draft_fallback(
+    submitted_scope: dict[str, Any],
+    draft_scope: dict[str, Any] | None,
+) -> bool:
+    if not draft_scope:
+        return False
+
+    use_stock_scope = is_truthy_flag(submitted_scope.get("use_stock_scope"))
+    submitted_symbols = normalize_stock_symbol_list(submitted_scope.get("scope_symbols", ""))
+    if use_stock_scope and not submitted_symbols and draft_scope.get("use_stock_scope") and draft_scope.get("symbols"):
+        return True
+
+    submitted_content_kinds = normalize_ai_scope_content_kinds(submitted_scope.get("scope_content_kinds", ""))
+    if not submitted_content_kinds and draft_scope.get("content_kinds"):
+        return True
+
+    use_date_scope = is_truthy_flag(submitted_scope.get("use_date_scope"))
+    submitted_start_date = normalize_date_field(submitted_scope.get("scope_start_date"))
+    submitted_end_date = normalize_date_field(submitted_scope.get("scope_end_date"))
+    if use_date_scope and (
+        not submitted_start_date
+        or not submitted_end_date
+        or submitted_start_date > submitted_end_date
+    ):
+        return True
+
+    return False
+
+
 def build_ai_scope_time_bounds(scope_settings: dict[str, Any]) -> tuple[float | None, float | None]:
     if not scope_settings.get("use_date_scope"):
         return None, None
@@ -6905,6 +7609,7 @@ def collect_ai_scope_materials(
 
     notes: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
+    earnings_calls: list[dict[str, Any]] = []
     transcripts: list[dict[str, Any]] = []
 
     symbols = selected_symbols if selected_symbols else sorted(list_stock_symbols(store))
@@ -6981,6 +7686,13 @@ def collect_ai_scope_materials(
                     }
                 )
 
+        if "earnings_call" in selected_kind_set:
+            for call in entry["earnings_calls"]:
+                call_item = build_stock_earnings_call_material_item(item_symbol, call)
+                if not in_scope_range(float(call_item.get("sort_value") or 0)):
+                    continue
+                earnings_calls.append(call_item)
+
     if "transcript" in selected_kind_set:
         for transcript in store.get("transcripts", []):
             linked_symbols = transcript_linked_symbols(transcript)
@@ -7024,12 +7736,14 @@ def collect_ai_scope_materials(
     report_items.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     notes.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     files.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
+    earnings_calls.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     transcripts.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
 
     included_symbols = ordered_unique(
         selected_symbols
         + [item["symbol"] for item in notes if item.get("symbol")]
         + [item["symbol"] for item in files if item.get("symbol")]
+        + [item["symbol"] for item in earnings_calls if item.get("symbol")]
         + [linked_symbol for item in transcripts for linked_symbol in item.get("linked_symbols", [])]
     )
 
@@ -7038,11 +7752,13 @@ def collect_ai_scope_materials(
         "reports": report_items,
         "notes": notes,
         "files": files,
+        "earnings_calls": earnings_calls,
         "transcripts": transcripts,
         "included_symbols": included_symbols,
         "report_count": len(report_items),
         "note_count": len(notes),
         "file_count": len(files),
+        "earnings_call_count": len(earnings_calls),
         "transcript_count": len(transcripts),
     }
 
@@ -7109,6 +7825,25 @@ def build_ai_scope_activity(materials: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    for call in materials["earnings_calls"]:
+        activity_date = str(call.get("activity_date") or "")
+        if not activity_date:
+            continue
+        entries.append(
+            {
+                "date": activity_date,
+                "timestamp": call["call_date"] or call["published_at"],
+                "kind": "earnings_call",
+                "kind_label": "电话会议",
+                "symbol": call["symbol"],
+                "title": call["title"],
+                "summary": call["summary"],
+                "display_time": call["display_time"],
+                "detail_url": call["detail_url"],
+                "detail_label": call["detail_label"],
+            }
+        )
+
     for transcript in materials["transcripts"]:
         activity_date = str(transcript.get("activity_date") or "")
         if not activity_date:
@@ -7158,11 +7893,13 @@ def build_ai_scope_activity(materials: dict[str, Any]) -> dict[str, Any]:
         day["total_count"] = len(day["items"])
         day["note_count"] = day["kind_counter"].get("note", 0)
         day["file_count"] = day["kind_counter"].get("file", 0)
+        day["earnings_call_count"] = day["kind_counter"].get("earnings_call", 0)
         day["transcript_count"] = day["kind_counter"].get("transcript", 0)
         day["report_count"] = day["kind_counter"].get("report", 0)
         day["kind_summary"] = [
             {"label": "笔记", "count": day["note_count"]},
             {"label": "文件", "count": day["file_count"]},
+            {"label": "电话会议", "count": day["earnings_call_count"]},
             {"label": "转录", "count": day["transcript_count"]},
             {"label": "日报", "count": day["report_count"]},
         ]
@@ -7182,6 +7919,7 @@ def build_ai_scope_period_stats(entries: list[dict[str, Any]], prefix: str) -> d
         "active_days": len({item["date"] for item in matched_entries}),
         "note_count": sum(1 for item in matched_entries if item["kind"] == "note"),
         "file_count": sum(1 for item in matched_entries if item["kind"] == "file"),
+        "earnings_call_count": sum(1 for item in matched_entries if item["kind"] == "earnings_call"),
         "transcript_count": sum(1 for item in matched_entries if item["kind"] == "transcript"),
         "report_count": sum(1 for item in matched_entries if item["kind"] == "report"),
     }
@@ -7211,6 +7949,7 @@ def build_ai_scope_entry_totals(entries: list[dict[str, Any]]) -> dict[str, Any]
         {"key": "report", "label": "日报", "count": kind_counter.get("report", 0)},
         {"key": "note", "label": "笔记", "count": kind_counter.get("note", 0)},
         {"key": "file", "label": "文件", "count": kind_counter.get("file", 0)},
+        {"key": "earnings_call", "label": "电话会议", "count": kind_counter.get("earnings_call", 0)},
         {"key": "transcript", "label": "转录", "count": kind_counter.get("transcript", 0)},
     ]
 
@@ -7221,6 +7960,7 @@ def build_ai_scope_entry_totals(entries: list[dict[str, Any]]) -> dict[str, Any]
         "days_count": len(active_days),
         "note_count": kind_counter.get("note", 0),
         "file_count": kind_counter.get("file", 0),
+        "earnings_call_count": kind_counter.get("earnings_call", 0),
         "transcript_count": kind_counter.get("transcript", 0),
         "report_count": kind_counter.get("report", 0),
         "kind_summary": kind_summary,
@@ -7237,6 +7977,7 @@ def build_ai_scope_preview_groups(
         "report": [],
         "note": [],
         "file": [],
+        "earnings_call": [],
         "transcript": [],
     }
     for entry in entries:
@@ -7246,7 +7987,7 @@ def build_ai_scope_preview_groups(
 
     preferred_open_key = ""
     if detail_mode == "day":
-        for key in ["note", "file", "transcript", "report"]:
+        for key in ["note", "earnings_call", "file", "transcript", "report"]:
             if grouped[key]:
                 preferred_open_key = key
                 break
@@ -7255,6 +7996,7 @@ def build_ai_scope_preview_groups(
     for key, label in [
         ("note", "笔记"),
         ("file", "文件"),
+        ("earnings_call", "电话会议"),
         ("transcript", "转录"),
         ("report", "日报"),
     ]:
@@ -7306,7 +8048,7 @@ def build_ai_scope_summary(
 
     return {
         "headline": headline,
-        "description": "提问时只会把这里定义范围内的报告、笔记、文件和转录交给 Codex。",
+        "description": "提问时只会把这里定义范围内的报告、笔记、文件、管理层电话会议和转录交给 Codex。",
         "stock_label": stock_label,
         "time_label": time_label,
         "content_label": content_label,
@@ -7315,6 +8057,7 @@ def build_ai_scope_summary(
             {"label": "报告", "value": materials["report_count"]},
             {"label": "笔记", "value": materials["note_count"]},
             {"label": "文件", "value": materials["file_count"]},
+            {"label": "电话会议", "value": materials["earnings_call_count"]},
             {"label": "转录", "value": materials["transcript_count"]},
         ],
     }
@@ -7481,6 +8224,18 @@ def build_ai_workspace_timeline(materials: dict[str, Any], *, limit: int = 36) -
                 "summary": file_entry["summary"],
                 "display_time": file_entry["display_time"],
                 "sort_value": float(file_entry["sort_value"]),
+            }
+        )
+
+    for call in materials["earnings_calls"]:
+        events.append(
+            {
+                "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                "symbol_label": call["symbol"],
+                "title": call["title"],
+                "summary": call["summary"],
+                "display_time": call["display_time"],
+                "sort_value": float(call["sort_value"]),
             }
         )
 
@@ -7664,6 +8419,7 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
         f"- 范围内报告数: {materials['report_count']}",
         f"- 范围内笔记数: {materials['note_count']}",
         f"- 范围内文件数: {materials['file_count']}",
+        f"- 范围内电话会议数: {materials['earnings_call_count']}",
         f"- 范围内转录数: {materials['transcript_count']}",
         "",
         "## 站点概览",
@@ -7671,6 +8427,7 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
         f"- 全站股票数量: {len(list_stock_symbols(stock_store))}",
         f"- 分组数量: {len(stock_store['groups'])}",
         f"- 自选数量: {len(stock_store['favorites'])}",
+        f"- 电话会议归档数量: {sum(len(item.get('earnings_calls', [])) for item in stock_store.get('stocks', {}).values() if isinstance(item, dict))}",
         f"- 转录任务数量: {len(stock_store.get('transcripts', []))}",
         "",
     ]
@@ -7706,11 +8463,14 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
     lines.append("## 股票研究资料")
     grouped_notes: dict[str, list[dict[str, Any]]] = defaultdict(list)
     grouped_files: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped_earnings_calls: dict[str, list[dict[str, Any]]] = defaultdict(list)
     grouped_transcripts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for note in materials["notes"]:
         grouped_notes[note["symbol"]].append(note)
     for file_entry in materials["files"]:
         grouped_files[file_entry["symbol"]].append(file_entry)
+    for call in materials["earnings_calls"]:
+        grouped_earnings_calls[call["symbol"]].append(call)
     for transcript in materials["transcripts"]:
         for symbol in transcript.get("linked_symbols") or []:
             if symbol:
@@ -7732,6 +8492,21 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
             )
             if in_scope_timeline(item)
         ]
+        for call in grouped_earnings_calls.get(symbol, []):
+            timeline.append(
+                {
+                    "kind": "earnings_call",
+                    "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                    "kind_tone": SEARCH_KIND_META["earnings_call"]["tone"],
+                    "title": call["title"],
+                    "summary": call["summary"],
+                    "timestamp": call["call_date"] or call["published_at"],
+                    "sort_value": float(call["sort_value"]),
+                    "display_time": call["display_time"],
+                    "symbol_label": symbol,
+                }
+            )
+        timeline.sort(key=lambda item: (float(item.get("sort_value") or 0), item.get("title") or ""), reverse=True)
         tag_items = collect_tag_counts(
             grouped_notes.get(symbol, [])
             + grouped_files.get(symbol, [])
@@ -7745,6 +8520,7 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
                 f"- 标签汇总: {', '.join(item['value'] for item in tag_items) or '无'}",
                 f"- 笔记数: {len(grouped_notes.get(symbol, []))}",
                 f"- 文件数: {len(grouped_files.get(symbol, []))}",
+                f"- 电话会议数: {len(grouped_earnings_calls.get(symbol, []))}",
                 f"- 转录数: {len(grouped_transcripts.get(symbol, []))}",
                 "",
             ]
@@ -7774,6 +8550,18 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
                     f"- 时间: {file_entry['display_time']}",
                     f"- 标签: {', '.join(file_entry['tags']) or '无'}",
                     f"- 说明: {file_entry['description'] or '无'}",
+                    "",
+                ]
+            )
+        for call in grouped_earnings_calls.get(symbol, [])[:8]:
+            lines.extend(
+                [
+                    f"#### 电话会议: {call['title']}",
+                    f"- 日期: {call['display_time']}",
+                    f"- 财季: {call['fiscal_label'] or '待补充'}",
+                    f"- 来源: {call['source_label'] or '未标注'}",
+                    f"- 质量: {'；'.join(call['quality_chips']) or '常规正文'}",
+                    trim_note_content((call.get('transcript_text') or call['summary'])[:12000]),
                     "",
                 ]
             )
@@ -7946,6 +8734,25 @@ def build_mindmap_material_items(materials: dict[str, Any]) -> list[dict[str, An
                 "sort_value": float(file_entry.get("sort_value") or 0),
                 "symbols": normalize_stock_symbol_list([symbol])[:10],
                 "detail_url": str(file_entry.get("detail_url") or "").strip(),
+            }
+        )
+
+    for call in materials.get("earnings_calls", []):
+        call_id = str(call.get("id") or "").strip()
+        symbol = str(call.get("symbol") or "").strip().upper()
+        items.append(
+            {
+                "source_key": f"earnings_call:{symbol}:{call_id or sha256_text(str(call.get('call_date') or call.get('published_at') or ''))[:8]}",
+                "kind": "earnings_call",
+                "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                "title": str(call.get("title") or "电话会议").strip()[:160],
+                "summary": re.sub(r"\s+", " ", str(call.get("summary") or "").strip())[:320],
+                "body_text": normalize_mindmap_material_body(call.get("transcript_text") or "", limit=10_500),
+                "activity_date": normalize_date_field(call.get("activity_date")) or "",
+                "display_time": str(call.get("display_time") or "").strip(),
+                "sort_value": float(call.get("sort_value") or 0),
+                "symbols": normalize_stock_symbol_list([symbol])[:10],
+                "detail_url": str(call.get("detail_url") or "").strip(),
             }
         )
 
@@ -8204,7 +9011,7 @@ def build_mindmap_research_bundle(
         f"- 生成时间: {now_iso()}",
         f"- {scope_summary.get('stock_label') or '股票范围：全站'}",
         f"- {scope_summary.get('time_label') or '时间窗口：不限'}",
-        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}",
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}",
         f"- 原始资料数: {stats.get('raw_material_count', 0)}",
         f"- 入选资料数: {stats.get('selected_material_count', 0)}",
         f"- 压缩重复资料: {stats.get('duplicate_compressed_count', 0)}",
@@ -8212,7 +9019,8 @@ def build_mindmap_research_bundle(
         "",
         "## 生成侧重点",
         "- 导图必须同时表达主题结构、资料互补/冲突关系和时间演化。",
-        "- 已对重复观点、重复转录和低信息密度资料做过压缩；模型应优先参考入选资料，不要把重复内容当成额外证据。",
+        "- 如果范围里包含电话会议，要把它视作管理层原话/最新口径，与日报、笔记和其他转录交叉验证。",
+        "- 已对重复观点、重复电话会议/转录和低信息密度资料做过压缩；模型应优先参考入选资料，不要把重复内容当成额外证据。",
         "- 已提高近期资料、强证据资料、存在冲突/对冲资料的权重；最终结论仍需按证据强弱决定。",
         "",
     ]
@@ -8313,6 +9121,7 @@ def build_mindmap_reproducibility_fingerprint(
             "report_count": int(materials.get("report_count") or 0),
             "note_count": int(materials.get("note_count") or 0),
             "file_count": int(materials.get("file_count") or 0),
+            "earnings_call_count": int(materials.get("earnings_call_count") or 0),
             "transcript_count": int(materials.get("transcript_count") or 0),
         },
     }
@@ -8354,7 +9163,8 @@ def build_ai_codex_prompt(
         "6. 回答尽量基于网页已有资料，不要脱离资料泛泛而谈。\n"
         f"7. 回答风格要求: {style_label_to_prompt(response_style)}\n"
         "8. 如果问题涉及某段时间、变化趋势、前后对比，请优先参考知识包里的“最近变化”和“时间线”部分，按时间顺序作答。\n"
-        "9. 回答时尽量分成：结论 / 依据 / 提醒或遗漏点 / 下一步建议。\n\n"
+        "9. 如果知识包里包含管理层电话会议，优先把它视作管理层原话/最新口径，并和日报、笔记、会议转录交叉验证。\n"
+        "10. 回答时尽量分成：结论 / 依据 / 提醒或遗漏点 / 下一步建议。\n\n"
         f"网页知识包正文:\n{knowledge_text or '（当前知识包正文为空，请明确说明资料不足。）'}\n\n"
         f"最近对话历史:\n{history_block or '（这是新对话）'}\n\n"
         f"当前用户问题:\n{user_question.strip()}\n"
@@ -9055,6 +9865,7 @@ def normalize_mindmap_fingerprint(raw_fingerprint: Any) -> dict[str, Any]:
             "report_count": max(0, int(material_mix_source.get("report_count") or 0)),
             "note_count": max(0, int(material_mix_source.get("note_count") or 0)),
             "file_count": max(0, int(material_mix_source.get("file_count") or 0)),
+            "earnings_call_count": max(0, int(material_mix_source.get("earnings_call_count") or 0)),
             "transcript_count": max(0, int(material_mix_source.get("transcript_count") or 0)),
         },
     }
@@ -9420,7 +10231,8 @@ def build_mindmap_plan_prompt(
         "6. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
         "7. 顶层分支控制在 4 到 6 个，总节点控制在 12 到 28 个，层级最多 4 层。\n"
         "8. 根节点不能写成“资料整理”“研究导图”之类的泛称，要直接写研究主题。\n"
-        "9. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "9. 如果资料里包含电话会议，要优先识别管理层最新口径、指引、问答争议点，并和日报/笔记互相验证。\n"
+        "10. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
         "这一步的输出要求：\n"
         "- 使用最终 schema，但 evidence / time_signals / source_notes 可以先写最必要的 0 到 2 条。\n"
         "- timeline_highlights 至少给出 3 个节点（如果资料不足，再明确说明不足原因）。\n"
@@ -9428,7 +10240,7 @@ def build_mindmap_plan_prompt(
         "当前资料范围：\n"
         f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
         f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
-        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}\n"
         f"- pipeline_version: {fingerprint.get('pipeline_version') or MINDMAP_PIPELINE_VERSION}\n"
         f"- prompt_version: {fingerprint.get('prompt_version') or MINDMAP_PROMPT_VERSION}\n\n"
         f"允许引用的来源列表：\n{source_roster}\n\n"
@@ -9458,11 +10270,12 @@ def build_mindmap_finalize_prompt(
         "6. 对于仍未解开的冲突，要留在 risk / question / source_notes 里，不要硬写成确定结论。\n"
         "7. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
         "8. summary、evidence、time_signals、source_notes 都要短、可扫读。\n"
-        "9. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "9. 如果资料里包含电话会议，要优先保留管理层最新口径、指引变化和问答争议，不要把它埋进泛泛摘要里。\n"
+        "10. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
         "当前资料范围：\n"
         f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
         f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
-        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；转录'}\n\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}\n\n"
         f"允许引用的来源列表：\n{source_roster}\n\n"
         f"必须遵守的 JSON schema：\n{build_mindmap_json_schema_prompt()}\n\n"
         f"第一步骨架 JSON：\n{plan_text}\n\n"
@@ -9754,6 +10567,7 @@ def build_mindmap_page_context(
     stock_store = stock_store if stock_store is not None else load_stock_store()
     stock_options = build_stock_selector_options(stock_store)
     known_symbols = {item["symbol"] for item in stock_options}
+    draft_scope_settings = load_mindmap_scope_draft(known_symbols=known_symbols)
     active_record = None
     if record_id:
         active_record = get_mindmap_record(store, record_id)
@@ -9762,7 +10576,7 @@ def build_mindmap_page_context(
 
     try:
         active_scope_settings = normalize_ai_scope_settings(
-            (active_record or {}).get("scope_settings", {}),
+            draft_scope_settings if draft_scope_settings is not None else (active_record or {}).get("scope_settings", {}),
             known_symbols=known_symbols,
         )
     except ValueError:
@@ -10762,7 +11576,7 @@ def collect_ai_export_package(
     elif package_kind == "stock_transcripts_week":
         if not normalized_symbol:
             raise RuntimeError("请选择你要导出的股票。")
-        package_title = f"{normalized_symbol} 近 7 天会议转录包"
+        package_title = f"{normalized_symbol} 近 7 天会议资料包"
         export_slug = f"gpt-{normalized_symbol.lower()}-transcripts-week-{now.strftime('%Y%m%d')}"
         report_items = [item for item in find_related_reports(normalized_symbol, limit=12) if float(item.get("sort_key") or 0) >= cutoff_timestamp]
     else:
@@ -10770,6 +11584,7 @@ def collect_ai_export_package(
 
     notes: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
+    earnings_calls: list[dict[str, Any]] = []
     transcripts: list[dict[str, Any]] = []
 
     symbols = [normalized_symbol] if normalized_symbol else sorted(list_stock_symbols(store))
@@ -10813,6 +11628,12 @@ def collect_ai_export_package(
                     }
                 )
 
+        for call in entry["earnings_calls"]:
+            call_item = build_stock_earnings_call_material_item(item_symbol, call)
+            if package_kind in {"weekly", "stock_transcripts_week"} and float(call_item.get("sort_value") or 0) < cutoff_timestamp:
+                continue
+            earnings_calls.append(call_item)
+
     for transcript in store.get("transcripts", []):
         transcript_symbols = transcript_linked_symbols(transcript)
         if normalized_symbol and normalized_symbol not in transcript_symbols:
@@ -10849,15 +11670,17 @@ def collect_ai_export_package(
 
     notes.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     files.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
+    earnings_calls.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     transcripts.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     report_items.sort(key=lambda item: (float(item.get("sort_key") or 0), item["title"]), reverse=True)
 
     included_symbols = ordered_unique(
         [item["symbol"] for item in notes if item["symbol"]]
         + [item["symbol"] for item in files if item["symbol"]]
+        + [item["symbol"] for item in earnings_calls if item["symbol"]]
         + [linked_symbol for item in transcripts for linked_symbol in item.get("symbols", [])]
     )
-    tag_summary = collect_tag_counts(notes + files + transcripts)[:16]
+    tag_summary = collect_tag_counts(notes + files + earnings_calls + transcripts)[:16]
 
     timeline: list[dict[str, Any]] = []
     for report in report_items:
@@ -10893,6 +11716,17 @@ def collect_ai_export_package(
                 "sort_value": file_entry["sort_value"],
             }
         )
+    for call in earnings_calls:
+        timeline.append(
+            {
+                "kind": "电话会议",
+                "symbol": call["symbol"],
+                "title": call["title"],
+                "summary": call["summary"],
+                "display_time": call["display_time"],
+                "sort_value": call["sort_value"],
+            }
+        )
     for transcript in transcripts:
         timeline.append(
             {
@@ -10915,6 +11749,7 @@ def collect_ai_export_package(
         "reports": report_items,
         "notes": notes,
         "files": files,
+        "earnings_calls": earnings_calls,
         "transcripts": transcripts,
         "included_symbols": included_symbols,
         "tag_summary": tag_summary,
@@ -10923,6 +11758,7 @@ def collect_ai_export_package(
             "reports": len(report_items),
             "notes": len(notes),
             "files": len(files),
+            "earnings_calls": len(earnings_calls),
             "transcripts": len(transcripts),
             "symbols": len(included_symbols),
         },
@@ -10937,17 +11773,18 @@ def build_ai_export_upload_guide(context: dict[str, Any]) -> str:
         f"- 包含日报: {context['counts']['reports']} 篇",
         f"- 包含笔记: {context['counts']['notes']} 条",
         f"- 包含研究资料: {context['counts']['files']} 个",
+        f"- 包含管理层电话会议: {context['counts'].get('earnings_calls', 0)} 条",
         f"- 包含会议转录: {context['counts']['transcripts']} 条",
         "",
         "## 建议上传顺序",
         "1. 先上传 `01_PACKAGE_SUMMARY.md`，让外部 GPT 快速建立全局上下文。",
-        "2. 如果需要原文对照，再追加 `reports/`、`notes/`、`transcripts/` 里的 markdown。",
+        "2. 如果需要原文对照，再追加 `reports/`、`notes/`、`earnings_calls/`、`transcripts/` 里的 markdown。",
         "3. 如果还要核对原始文档，再上传 `files/` 下的原文件；语音相关问题可再补 `media/`。",
         "",
         "## 推荐提问方式",
         "- 先让它基于 `01_PACKAGE_SUMMARY.md` 做总览判断。",
         "- 再追加一两份关键原文，让它做对比、找矛盾、找遗漏证据。",
-        "- 如果是会议场景，优先上传 `transcripts/` 的整理稿，再按需补音频源文件。",
+        "- 如果是会议场景，优先上传 `earnings_calls/` 的管理层电话会议稿，其次再补 `transcripts/` 的整理稿和音频源文件。",
     ]
     return "\n".join(lines).strip()
 
@@ -10961,6 +11798,7 @@ def build_ai_export_summary(context: dict[str, Any]) -> str:
         f"- 日报: {context['counts']['reports']} 篇",
         f"- 笔记: {context['counts']['notes']} 条",
         f"- 研究资料: {context['counts']['files']} 个",
+        f"- 管理层电话会议: {context['counts'].get('earnings_calls', 0)} 条",
         f"- 会议转录: {context['counts']['transcripts']} 条",
         "",
         "## 标签概览",
@@ -10995,6 +11833,11 @@ def build_ai_export_summary(context: dict[str, Any]) -> str:
         lines.extend(["## 研究笔记摘要"])
         for note in context["notes"][:20]:
             lines.append(f"- [{note['symbol']}] {note['display_time']} | {note['title']} | {summarize_text_block(note['content_text'])}")
+
+    if context["earnings_calls"]:
+        lines.extend(["", "## 管理层电话会议摘要"])
+        for call in context["earnings_calls"][:20]:
+            lines.append(f"- [{call['symbol']}] {call['display_time']} | {call['title']} | {call['summary']}")
 
     if context["transcripts"]:
         lines.extend(["", "## 会议转录摘要"])
@@ -11067,6 +11910,28 @@ def build_ai_export_transcript_markdown(transcript: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def build_ai_export_earnings_call_markdown(call: dict[str, Any]) -> str:
+    lines = [
+        f"# {call['title']}",
+        "",
+        f"- 股票: {call['symbol'] or '未关联'}",
+        f"- 日期: {call['display_time']}",
+        f"- 财季: {call.get('fiscal_label') or '待补充'}",
+        f"- 来源: {call.get('source_label') or '未标注'}",
+        f"- 来源链接: {call.get('source_url') or '无'}",
+        f"- 完整性: {'已校验正文' if call.get('is_complete') else '待复核'}",
+        f"- 问答: {'含问答' if call.get('has_question_section') else '未识别'}",
+        f"- 质量提示: {'；'.join(call.get('quality_chips') or []) or '无'}",
+        "",
+        "## 摘要",
+        call.get("summary") or "当前电话会议还没有可导出的摘要。",
+        "",
+        "## 电话会议正文",
+        call.get("transcript_text") or "当前电话会议还没有可导出的正文。",
+    ]
+    return "\n".join(lines).strip()
+
+
 def parse_ai_export_days(raw_value: Any, default: int = 7) -> int:
     try:
         value = int(str(raw_value or default).strip())
@@ -11095,6 +11960,7 @@ def collect_ai_export_package_custom(
     include_reports: bool | None = None,
     include_notes: bool | None = None,
     include_files: bool | None = None,
+    include_earnings_calls: bool | None = None,
     include_transcripts: bool | None = None,
     start_date: str = "",
     end_date: str = "",
@@ -11117,8 +11983,9 @@ def collect_ai_export_package_custom(
     include_reports = bool(include_reports)
     include_notes = bool(include_notes)
     include_files = bool(include_files)
+    include_earnings_calls = bool(include_earnings_calls)
     include_transcripts = bool(include_transcripts)
-    if not any([include_reports, include_notes, include_files, include_transcripts]):
+    if not any([include_reports, include_notes, include_files, include_earnings_calls, include_transcripts]):
         raise RuntimeError("请至少勾选一种要导出的内容。")
 
     def in_selected_range(sort_value: float) -> bool:
@@ -11141,6 +12008,7 @@ def collect_ai_export_package_custom(
 
     notes: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
+    earnings_calls: list[dict[str, Any]] = []
     transcripts: list[dict[str, Any]] = []
     symbols = [normalized_symbol] if normalized_symbol else sorted(list_stock_symbols(store))
 
@@ -11185,6 +12053,13 @@ def collect_ai_export_package_custom(
                     }
                 )
 
+        if include_earnings_calls:
+            for call in entry["earnings_calls"]:
+                call_item = build_stock_earnings_call_material_item(item_symbol, call)
+                if not in_selected_range(float(call_item.get("sort_value") or 0)):
+                    continue
+                earnings_calls.append(call_item)
+
     if include_transcripts:
         for transcript in store.get("transcripts", []):
             transcript_symbols = transcript_linked_symbols(transcript)
@@ -11219,14 +12094,16 @@ def collect_ai_export_package_custom(
     report_items.sort(key=lambda item: (float(item.get("sort_key") or 0), item["title"]), reverse=True)
     notes.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     files.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
+    earnings_calls.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
     transcripts.sort(key=lambda item: (item["sort_value"], item["title"]), reverse=True)
 
     included_symbols = ordered_unique(
         [item["symbol"] for item in notes if item["symbol"]]
         + [item["symbol"] for item in files if item["symbol"]]
+        + [item["symbol"] for item in earnings_calls if item["symbol"]]
         + [linked_symbol for item in transcripts for linked_symbol in item.get("symbols", [])]
     )
-    tag_summary = collect_tag_counts(notes + files + transcripts)[:16]
+    tag_summary = collect_tag_counts(notes + files + earnings_calls + transcripts)[:16]
 
     timeline: list[dict[str, Any]] = []
     for report in report_items:
@@ -11262,6 +12139,17 @@ def collect_ai_export_package_custom(
                 "sort_value": file_entry["sort_value"],
             }
         )
+    for call in earnings_calls:
+        timeline.append(
+            {
+                "kind": "电话会议",
+                "symbol": call["symbol"],
+                "title": call["title"],
+                "summary": call["summary"],
+                "display_time": call["display_time"],
+                "sort_value": call["sort_value"],
+            }
+        )
     for transcript in transcripts:
         timeline.append(
             {
@@ -11281,6 +12169,7 @@ def collect_ai_export_package_custom(
             ("日报", include_reports),
             ("笔记", include_notes),
             ("资料", include_files),
+            ("电话会议", include_earnings_calls),
             ("转录", include_transcripts),
         )
         if enabled
@@ -11296,6 +12185,7 @@ def collect_ai_export_package_custom(
             ("reports", include_reports),
             ("notes", include_notes),
             ("files", include_files),
+            ("earnings-calls", include_earnings_calls),
             ("transcripts", include_transcripts),
         )
         if enabled
@@ -11316,6 +12206,7 @@ def collect_ai_export_package_custom(
         "reports": report_items,
         "notes": notes,
         "files": files,
+        "earnings_calls": earnings_calls,
         "transcripts": transcripts,
         "included_symbols": included_symbols,
         "tag_summary": tag_summary,
@@ -11324,6 +12215,7 @@ def collect_ai_export_package_custom(
             "reports": len(report_items),
             "notes": len(notes),
             "files": len(files),
+            "earnings_calls": len(earnings_calls),
             "transcripts": len(transcripts),
             "symbols": len(included_symbols),
         },
@@ -11336,6 +12228,7 @@ def collect_ai_export_package_custom(
             "include_reports": include_reports,
             "include_notes": include_notes,
             "include_files": include_files,
+            "include_earnings_calls": include_earnings_calls,
             "include_transcripts": include_transcripts,
             "content_labels": content_labels,
         },
@@ -11353,15 +12246,16 @@ def build_ai_export_upload_guide_custom(context: dict[str, Any]) -> str:
         f"- 生成时间: {context['generated_at']}",
         f"- 导出范围: {filters.get('scope_label', context.get('symbol') or '全站')}",
         f"- 时间范围: {filters.get('range_label', '最近 7 天')}",
-        f"- 内容类型: {'、'.join(filters.get('content_labels') or ['日报', '笔记', '资料', '转录'])}",
+        f"- 内容类型: {'、'.join(filters.get('content_labels') or ['日报', '笔记', '资料', '电话会议', '转录'])}",
         f"- 包含日报: {context['counts']['reports']} 篇",
         f"- 包含笔记: {context['counts']['notes']} 条",
         f"- 包含研究资料: {context['counts']['files']} 份",
+        f"- 包含管理层电话会议: {context['counts'].get('earnings_calls', 0)} 条",
         f"- 包含会议转录: {context['counts']['transcripts']} 条",
         "",
         "## 建议上传顺序",
         "1. 先上传 `01_PACKAGE_SUMMARY.md`，让外部 GPT 先建立整体上下文。",
-        "2. 如果需要原文对照，再补 `reports/`、`notes/`、`transcripts/` 目录下的 markdown。",
+        "2. 如果需要原文对照，再补 `reports/`、`notes/`、`earnings_calls/`、`transcripts/` 目录下的 markdown。",
         "3. 如果需要核对原始文档或音频，再补 `files/` 与 `media/` 目录。",
     ]
     return "\n".join(lines).strip()
@@ -11378,11 +12272,12 @@ def build_ai_export_summary_custom(context: dict[str, Any]) -> str:
         f"- 生成时间: {context['generated_at']}",
         f"- 导出范围: {filters.get('scope_label', context.get('symbol') or '全站')}",
         f"- 时间范围: {filters.get('range_label', '最近 7 天')}",
-        f"- 内容类型: {'、'.join(filters.get('content_labels') or ['日报', '笔记', '资料', '转录'])}",
+        f"- 内容类型: {'、'.join(filters.get('content_labels') or ['日报', '笔记', '资料', '电话会议', '转录'])}",
         f"- 涵盖股票: {', '.join(context['included_symbols']) or '无'}",
         f"- 日报: {context['counts']['reports']} 篇",
         f"- 笔记: {context['counts']['notes']} 条",
         f"- 研究资料: {context['counts']['files']} 份",
+        f"- 管理层电话会议: {context['counts'].get('earnings_calls', 0)} 条",
         f"- 会议转录: {context['counts']['transcripts']} 条",
         "",
         "## 标签概览",
@@ -11400,6 +12295,11 @@ def build_ai_export_summary_custom(context: dict[str, Any]) -> str:
             lines.append(f"- {item['display_time']} | {item['kind']} | {symbol_prefix}{item['title']} | {item['summary']}")
     else:
         lines.append("- 当前导出范围内没有可汇总内容。")
+
+    if context["earnings_calls"]:
+        lines.extend(["", "## 管理层电话会议摘要"])
+        for call in context["earnings_calls"][:20]:
+            lines.append(f"- [{call['symbol']}] {call['display_time']} | {call['title']} | {call['summary']}")
 
     return "\n".join(lines).strip()
 
@@ -11430,6 +12330,7 @@ def build_ai_export_archive(
     include_reports: bool | None = None,
     include_notes: bool | None = None,
     include_files: bool | None = None,
+    include_earnings_calls: bool | None = None,
     include_transcripts: bool | None = None,
     include_original_files: bool,
     include_source_media: bool,
@@ -11448,6 +12349,7 @@ def build_ai_export_archive(
         include_reports=include_reports,
         include_notes=include_notes,
         include_files=include_files,
+        include_earnings_calls=include_earnings_calls,
         include_transcripts=include_transcripts,
         start_date=start_date,
         end_date=end_date,
@@ -11487,6 +12389,13 @@ def build_ai_export_archive(
                         file_entry["path"],
                         arcname=f"files/{file_entry['symbol']}/{stem}-{export_safe_name(file_entry['title'])}",
                     )
+
+            for call in context["earnings_calls"]:
+                stem = build_export_file_stem(call["call_date"] or call["published_at"], call["id"], call["title"])
+                archive.writestr(
+                    f"earnings_calls/{call['symbol'] or 'unlinked'}/{stem}.md",
+                    build_ai_export_earnings_call_markdown(call),
+                )
 
             for transcript in context["transcripts"]:
                 stem = build_export_file_stem(transcript["meeting_date"] or transcript["created_at"], transcript["id"], transcript["title"])
@@ -11578,6 +12487,8 @@ def save_ai_scope():
             session["scope_settings"] = scope_settings
             touch_ai_session(session)
             save_ai_chat_store(store)
+    elif str(request.form.get("scope_owner") or "").strip().lower() == "mindmap":
+        save_mindmap_scope_draft(scope_settings)
 
     preview_context = build_ai_scope_preview_context(
         stock_store,
@@ -11699,11 +12610,13 @@ def export_ai_package():
     include_reports_raw = request.form.get("include_reports")
     include_notes_raw = request.form.get("include_notes")
     include_files_raw = request.form.get("include_files")
+    include_earnings_calls_raw = request.form.get("include_earnings_calls")
     include_transcripts_raw = request.form.get("include_transcripts")
 
     include_reports = None if include_reports_raw is None else include_reports_raw == "1"
     include_notes = None if include_notes_raw is None else include_notes_raw == "1"
     include_files = None if include_files_raw is None else include_files_raw == "1"
+    include_earnings_calls = None if include_earnings_calls_raw is None else include_earnings_calls_raw == "1"
     include_transcripts = None if include_transcripts_raw is None else include_transcripts_raw == "1"
     summary_only = content_mode == "summary_only"
 
@@ -11737,6 +12650,7 @@ def export_ai_package():
             include_reports=include_reports,
             include_notes=include_notes,
             include_files=include_files,
+            include_earnings_calls=include_earnings_calls,
             include_transcripts=include_transcripts,
             include_original_files=include_original_files,
             include_source_media=include_source_media,
@@ -11790,17 +12704,18 @@ def send_ai_message():
     session_id = request.form.get("session_id", "").strip()
     stock_store = load_stock_store()
     known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
+    submitted_scope = extract_mindmap_scope_request_payload(request.form)
     try:
         scope_settings = normalize_ai_scope_settings(
             {
-                "use_stock_scope": request.form.get("use_stock_scope"),
-                "symbols": request.form.get("scope_symbols", ""),
-                "content_kinds": request.form.get("scope_content_kinds", ""),
-                "use_date_scope": request.form.get("use_date_scope"),
-                "start_date": request.form.get("scope_start_date"),
-                "end_date": request.form.get("scope_end_date"),
-                "preview_month": request.form.get("scope_preview_month"),
-                "selected_date": request.form.get("scope_selected_date"),
+                "use_stock_scope": submitted_scope.get("use_stock_scope"),
+                "symbols": submitted_scope.get("scope_symbols", ""),
+                "content_kinds": submitted_scope.get("scope_content_kinds", ""),
+                "use_date_scope": submitted_scope.get("use_date_scope"),
+                "start_date": submitted_scope.get("scope_start_date"),
+                "end_date": submitted_scope.get("scope_end_date"),
+                "preview_month": submitted_scope.get("scope_preview_month"),
+                "selected_date": submitted_scope.get("scope_selected_date"),
             },
             known_symbols=known_symbols,
         )
@@ -12008,23 +12923,29 @@ def generate_mindmap():
     stock_store = load_stock_store()
     reports = collect_reports()
     known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
+    submitted_scope = extract_mindmap_scope_request_payload(request.form)
+    draft_scope_settings = load_mindmap_scope_draft(known_symbols=known_symbols)
     try:
         scope_settings = normalize_ai_scope_settings(
             {
-                "use_stock_scope": request.form.get("use_stock_scope"),
-                "symbols": request.form.get("scope_symbols", ""),
-                "content_kinds": request.form.get("scope_content_kinds", ""),
-                "use_date_scope": request.form.get("use_date_scope"),
-                "start_date": request.form.get("scope_start_date"),
-                "end_date": request.form.get("scope_end_date"),
-                "preview_month": request.form.get("scope_preview_month"),
-                "selected_date": request.form.get("scope_selected_date"),
+                "use_stock_scope": submitted_scope.get("use_stock_scope"),
+                "symbols": submitted_scope.get("scope_symbols", ""),
+                "content_kinds": submitted_scope.get("scope_content_kinds", ""),
+                "use_date_scope": submitted_scope.get("use_date_scope"),
+                "start_date": submitted_scope.get("scope_start_date"),
+                "end_date": submitted_scope.get("scope_end_date"),
+                "preview_month": submitted_scope.get("scope_preview_month"),
+                "selected_date": submitted_scope.get("scope_selected_date"),
             },
             known_symbols=known_symbols,
         )
     except ValueError as exc:
-        flash(str(exc), "error")
-        return redirect(url_for("mindmap_workspace"))
+        if should_use_mindmap_scope_draft_fallback(submitted_scope, draft_scope_settings):
+            scope_settings = draft_scope_settings or normalize_ai_scope_settings({})
+        else:
+            flash(str(exc), "error")
+            return redirect(url_for("mindmap_workspace"))
+    save_mindmap_scope_draft(scope_settings)
 
     model_catalog = load_codex_model_catalog()
     selected_model = next(
@@ -12051,6 +12972,7 @@ def generate_mindmap():
         materials["report_count"]
         + materials["note_count"]
         + materials["file_count"]
+        + materials["earnings_call_count"]
         + materials["transcript_count"]
         <= 0
     ):
@@ -12103,6 +13025,7 @@ def generate_mindmap():
     )
     worker.start()
 
+    flash("\u5bfc\u56fe\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u542f\u52a8\u3002", "success")
     return redirect(url_for("mindmap_workspace", map=record["id"]))
 
 
@@ -12303,7 +13226,8 @@ def index() -> str:
 
     active_report = None
     if reports:
-        default_name = selected_name or reports[0]["filename"]
+        available_names = {str(report.get("filename") or "") for report in reports}
+        default_name = selected_name if selected_name in available_names else reports[0]["filename"]
         active_report = load_report(default_name)
 
     return render_template(
@@ -13058,10 +13982,11 @@ def delete_expert_interview(expert_id: str, interview_id: str):
 @app.get("/search")
 def global_search() -> str:
     store = load_stock_store()
-    reports = collect_reports()
+    report_entries, _ = get_report_catalog()
+    reports = [serialize_report_entry(report) for report in report_entries]
     search_context = build_global_search_context(
         store,
-        reports,
+        report_entries,
         query=request.args.get("q", ""),
         kind_filter=request.args.get("kind", "").strip(),
         symbol_filter=request.args.get("symbol", "").strip(),
@@ -13620,6 +14545,65 @@ def update_transcript_category(transcript_id: str):
     return redirect(next_url)
 
 
+@app.post("/transcripts/<transcript_id>/links")
+def update_transcript_links(transcript_id: str):
+    next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
+    scope_symbol = normalize_stock_symbol(request.form.get("scope_symbol", "")) or ""
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        previous_symbols = transcript_linked_symbols(transcript)
+
+        link_to_stock = request.form.get("link_to_stock") == "on"
+        linked_symbols: list[str] = []
+        if link_to_stock:
+            linked_symbols = parse_symbol_list(request.form.get("linked_symbols_text", ""))
+            if not linked_symbols:
+                message = "如果要关联股票，请先填写一个或多个股票代码。"
+                if expects_json_response():
+                    return jsonify({"ok": False, "message": message}), 400
+                flash(message, "error")
+                return redirect(next_url)
+
+            known_symbols = set(list_stock_symbols(store))
+            missing_symbols = [symbol for symbol in linked_symbols if symbol not in known_symbols]
+            if missing_symbols:
+                message = f"未找到对应股票：{'、'.join(missing_symbols)}"
+                if expects_json_response():
+                    return jsonify({"ok": False, "message": message}), 400
+                flash(message, "error")
+                return redirect(next_url)
+
+            for symbol in linked_symbols:
+                ensure_stock_entry(store, symbol)
+
+        transcript["linked_symbol"] = linked_symbols[0] if linked_symbols else ""
+        transcript["linked_symbols"] = linked_symbols
+        transcript["updated_at"] = now_iso()
+        touch_stock_symbols(store, previous_symbols + linked_symbols)
+        save_stock_store(store)
+
+        transcript_card = build_transcript_card(transcript)
+        message = "会议转录的关联股票已更新。"
+
+        if expects_json_response():
+            transcript_cards = build_transcript_cards(store, symbol_filter=scope_symbol or None)
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": message,
+                    "transcript_id": transcript_id,
+                    "linked_symbols": transcript_card.get("linked_symbols", []),
+                    "linked_symbols_label": transcript_card.get("linked_symbols_label", ""),
+                    "counts": build_transcript_stats_payload(transcript_cards),
+                }
+            )
+
+    flash(message, "success")
+    return redirect(next_url)
+
+
 @app.get("/transcripts/<transcript_id>/export.pdf")
 def export_transcript_pdf(transcript_id: str):
     store = load_stock_store()
@@ -13771,6 +14755,63 @@ def sync_stock_earnings(symbol: str):
         save_stock_store(store)
 
     flash(f"{symbol} 的下一次业绩已同步，并写入日程。", "success")
+    return redirect(next_url)
+
+
+@app.post("/stocks/<symbol>/earnings-calls/sync")
+def sync_stock_earnings_calls(symbol: str):
+    symbol = require_stock_symbol(symbol)
+    next_url = safe_next_url(request.form.get("next_url"), url_for("stock_detail", symbol=symbol))
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        existing_calls = list(store.get("stocks", {}).get(symbol, {}).get("earnings_calls", []))
+
+    try:
+        payload = fetch_recent_stock_earnings_calls(symbol, existing_calls=existing_calls)
+    except Exception as exc:
+        with STOCK_STORE_LOCK:
+            store = load_stock_store()
+            note_stock_earnings_call_sync_failure(
+                store,
+                symbol,
+                str(exc),
+                source_label="The Motley Fool",
+                source_url="https://www.fool.com/earnings-call-transcripts/",
+            )
+            save_stock_store(store)
+        flash(f"{symbol} 的电话会议同步失败：{exc}", "error")
+        return redirect(next_url)
+
+    calls = payload.get("calls", []) if isinstance(payload, dict) else []
+    if not calls:
+        warnings = payload.get("warnings", []) if isinstance(payload, dict) else []
+        error_message = "最近两年未找到适合展示的完整电话会议。"
+        if warnings:
+            error_message = f"{error_message} 最近提示：{warnings[0]}"
+        with STOCK_STORE_LOCK:
+            store = load_stock_store()
+            note_stock_earnings_call_sync_failure(
+                store,
+                symbol,
+                error_message,
+                source_label=str(payload.get("source_label") or "Pineify") if isinstance(payload, dict) else "Pineify",
+                source_url=str(payload.get("source_url") or "https://pineify.app/earnings-transcript")
+                if isinstance(payload, dict)
+                else "https://pineify.app/earnings-transcript",
+                lookback_days=int(payload.get("lookback_days") or 730) if isinstance(payload, dict) else 730,
+            )
+            save_stock_store(store)
+        flash(f"{symbol} 的电话会议暂无可写入内容。", "error")
+        return redirect(next_url)
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        apply_stock_earnings_call_snapshot(store, symbol, payload)
+        save_stock_store(store)
+
+    warning_count = len(payload.get("warnings", [])) if isinstance(payload, dict) else 0
+    warning_suffix = f"（另有 {warning_count} 条未采用的候选）" if warning_count else ""
+    flash(f"{symbol} 的电话会议已同步 {len(calls)} 条{warning_suffix}", "success")
     return redirect(next_url)
 
 

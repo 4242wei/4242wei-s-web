@@ -5,7 +5,7 @@
   }
 
   const shell = root.closest("[data-ai-shell]") || root;
-  const allContentKinds = ["report", "note", "file", "transcript"];
+  const allContentKinds = ["report", "note", "file", "earnings_call", "transcript"];
   const messageList = root.querySelector("[data-ai-message-list]");
   const composerForm = root.querySelector("[data-ai-composer-form]");
   const textarea = composerForm ? composerForm.querySelector("textarea[name='prompt']") : null;
@@ -83,7 +83,7 @@
   }
 
   function parseContentKinds(rawValue) {
-    const parsed = (String(rawValue || "").toLowerCase().match(/report|note|file|transcript/g) || [])
+    const parsed = (String(rawValue || "").toLowerCase().match(/earnings_call|report|note|file|transcript/g) || [])
       .map(function (value) {
         return value.trim().toLowerCase();
       })
