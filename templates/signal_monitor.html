@@ -22,7 +22,7 @@
           结果会写进 <span class="inline-path">{{ signal_reports_dir }}</span>，不会污染你正式的研究资料库。
         </p>
         <div class="story-actions">
-          <a class="button button-secondary" href="{{ url_for('index') }}">返回报告归档</a>
+          <a class="button button-secondary" href="{{ url_for('monitor_page') }}">返回 Monitor</a>
           {% if signal_latest_report %}
             <a class="button button-secondary" href="{{ url_for('signal_monitor_page', report=signal_latest_report.filename) }}">查看最新结果</a>
           {% endif %}

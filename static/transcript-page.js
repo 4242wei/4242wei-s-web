@@ -88,18 +88,335 @@
       });
   }
 
+  function formatFileSize(bytes) {
+    const size = Number(bytes || 0);
+    if (!Number.isFinite(size) || size <= 0) {
+      return "0 B";
+    }
+
+    if (size < 1024) {
+      return `${size} B`;
+    }
+    if (size < 1024 * 1024) {
+      return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+    }
+    if (size < 1024 * 1024 * 1024) {
+      return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+    }
+    return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+
+  function padDatePart(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function normalizeInferredDate(year, month, day) {
+    const numericYear = Number.parseInt(year, 10);
+    const numericMonth = Number.parseInt(month, 10);
+    const numericDay = Number.parseInt(day, 10);
+    if (
+      !Number.isInteger(numericYear) ||
+      !Number.isInteger(numericMonth) ||
+      !Number.isInteger(numericDay) ||
+      numericMonth < 1 ||
+      numericMonth > 12 ||
+      numericDay < 1 ||
+      numericDay > 31
+    ) {
+      return "";
+    }
+
+    const value = new Date(Date.UTC(numericYear, numericMonth - 1, numericDay));
+    if (
+      value.getUTCFullYear() !== numericYear ||
+      value.getUTCMonth() !== numericMonth - 1 ||
+      value.getUTCDate() !== numericDay
+    ) {
+      return "";
+    }
+
+    return `${numericYear}-${padDatePart(numericMonth)}-${padDatePart(numericDay)}`;
+  }
+
+  function inferMeetingDateFromFilename(filename) {
+    const stem = String(filename || "").replace(/\.[^./\\]+$/, "");
+    if (!stem) {
+      return "";
+    }
+
+    const separatorMatch = stem.match(/(?:^|[^\d])(20\d{2})[-_.\s](\d{1,2})[-_.\s](\d{1,2})(?!\d)/);
+    if (separatorMatch) {
+      return normalizeInferredDate(separatorMatch[1], separatorMatch[2], separatorMatch[3]);
+    }
+
+    const compactMatch = stem.match(/(?:^|[^\d])(20\d{2})(\d{2})(\d{2})(?!\d)/);
+    if (compactMatch) {
+      return normalizeInferredDate(compactMatch[1], compactMatch[2], compactMatch[3]);
+    }
+
+    return "";
+  }
+
+  function setupTranscriptUpload(form) {
+    const root = form.querySelector("[data-transcript-upload-root]");
+    const input = form.querySelector("[data-transcript-upload-input]");
+    const trigger = form.querySelector("[data-transcript-upload-trigger]");
+    const summary = form.querySelector("[data-transcript-upload-summary]");
+    const filesContainer = form.querySelector("[data-transcript-upload-files]");
+    const copyButton = form.querySelector("[data-transcript-copy-filenames]");
+    const dateHint = form.querySelector("[data-transcript-upload-date-hint]");
+    const dateInput = form.querySelector("[data-transcript-meeting-date]");
+    const manualFlagInput = form.querySelector("[data-transcript-meeting-date-manual]");
+
+    if (
+      !(root instanceof HTMLElement) ||
+      !(input instanceof HTMLInputElement) ||
+      !(trigger instanceof HTMLButtonElement) ||
+      !(filesContainer instanceof HTMLElement)
+    ) {
+      return;
+    }
+
+    let dragDepth = 0;
+
+    const updateDateHint = function (message) {
+      if (!(dateHint instanceof HTMLElement)) {
+        return;
+      }
+
+      const text = String(message || "").trim();
+      dateHint.hidden = !text;
+      dateHint.textContent = text;
+    };
+
+    const setMeetingDateFromFiles = function (files) {
+      if (!(dateInput instanceof HTMLInputElement) || !(manualFlagInput instanceof HTMLInputElement)) {
+        return;
+      }
+
+      const firstFile = files.length ? files[0] : null;
+      const inferredDate = firstFile ? inferMeetingDateFromFilename(firstFile.name) : "";
+      if (!firstFile || !inferredDate) {
+        updateDateHint("");
+        return;
+      }
+
+      if (manualFlagInput.value === "1") {
+        updateDateHint(`首个文件名里识别到日期 ${inferredDate}，但你已经手动改过会议日期，所以这次不会自动覆盖。`);
+        return;
+      }
+
+      dateInput.dataset.programmaticUpdate = "true";
+      dateInput.value = inferredDate;
+      manualFlagInput.value = "0";
+      dateInput.dataset.programmaticUpdate = "";
+      updateDateHint(`已按首个文件名自动识别会议日期：${inferredDate}`);
+    };
+
+    const renderFiles = function (fileList) {
+      const files = Array.from(fileList || []);
+      filesContainer.replaceChildren();
+
+      if (!files.length) {
+        const placeholder = document.createElement("p");
+        placeholder.className = "transcript-upload-placeholder";
+        placeholder.textContent = "文件名会显示在这里，你可以直接选中文字复制。";
+        filesContainer.appendChild(placeholder);
+        if (summary instanceof HTMLElement) {
+          summary.textContent = "还没选文件";
+        }
+        if (copyButton instanceof HTMLButtonElement) {
+          copyButton.hidden = true;
+        }
+        root.classList.remove("has-files");
+        updateDateHint("");
+        return;
+      }
+
+      const list = document.createElement("ol");
+      list.className = "transcript-upload-file-items";
+      files.forEach(function (file, index) {
+        const item = document.createElement("li");
+        item.className = "transcript-upload-file-item";
+
+        const fileName = document.createElement("span");
+        fileName.className = "transcript-upload-file-name";
+        fileName.textContent = file.name;
+
+        const meta = document.createElement("span");
+        meta.className = "transcript-upload-file-meta";
+        const inferredDate = index === 0 ? inferMeetingDateFromFilename(file.name) : "";
+        meta.textContent = inferredDate
+          ? `${formatFileSize(file.size)} | 首个文件日期 ${inferredDate}`
+          : formatFileSize(file.size);
+
+        item.appendChild(fileName);
+        item.appendChild(meta);
+        list.appendChild(item);
+      });
+      filesContainer.appendChild(list);
+
+      if (summary instanceof HTMLElement) {
+        summary.textContent =
+          files.length === 1
+            ? files[0].name
+            : `已选 ${files.length} 个文件，会按首个文件日期批量创建任务`;
+      }
+      if (copyButton instanceof HTMLButtonElement) {
+        copyButton.hidden = false;
+      }
+      root.classList.add("has-files");
+      setMeetingDateFromFiles(files);
+    };
+
+    const syncFilesToInput = function (fileList) {
+      const files = Array.from(fileList || []);
+      if (!files.length) {
+        renderFiles([]);
+        return;
+      }
+
+      if (typeof DataTransfer === "function") {
+        const transfer = new DataTransfer();
+        files.forEach(function (file) {
+          transfer.items.add(file);
+        });
+        input.files = transfer.files;
+      } else {
+        try {
+          input.files = fileList;
+        } catch (error) {
+          renderFiles(files);
+          return;
+        }
+      }
+
+      renderFiles(input.files);
+    };
+
+    const hasDraggedFiles = function (event) {
+      if (!event.dataTransfer) {
+        return false;
+      }
+
+      return Array.from(event.dataTransfer.types || []).indexOf("Files") >= 0;
+    };
+
+    if (dateInput instanceof HTMLInputElement && manualFlagInput instanceof HTMLInputElement) {
+      const markDateAsManual = function () {
+        if (dateInput.dataset.programmaticUpdate === "true") {
+          return;
+        }
+        manualFlagInput.value = "1";
+      };
+
+      dateInput.addEventListener("input", markDateAsManual);
+      dateInput.addEventListener("change", markDateAsManual);
+    }
+
+    trigger.addEventListener("click", function () {
+      input.click();
+    });
+
+    input.addEventListener("change", function () {
+      renderFiles(input.files);
+    });
+
+    if (copyButton instanceof HTMLButtonElement) {
+      copyButton.addEventListener("click", function () {
+        const names = Array.from(input.files || []).map(function (file) {
+          return file.name;
+        });
+        if (!names.length) {
+          return;
+        }
+
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+          showFlash("error", "当前浏览器不支持直接复制，请手动选中文件名。");
+          return;
+        }
+
+        navigator.clipboard
+          .writeText(names.join("\n"))
+          .then(function () {
+            showFlash("success", `已复制 ${names.length} 个文件名。`);
+          })
+          .catch(function () {
+            showFlash("error", "复制文件名失败了，你可以直接选中文字再复制。");
+          });
+      });
+    }
+
+    ["dragenter", "dragover"].forEach(function (eventName) {
+      root.addEventListener(eventName, function (event) {
+        if (!hasDraggedFiles(event)) {
+          return;
+        }
+
+        event.preventDefault();
+        if (eventName === "dragenter") {
+          dragDepth += 1;
+        }
+        root.classList.add("is-dragover");
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = "copy";
+        }
+      });
+    });
+
+    root.addEventListener("dragleave", function (event) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) {
+        root.classList.remove("is-dragover");
+      }
+    });
+
+    root.addEventListener("drop", function (event) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+
+      event.preventDefault();
+      dragDepth = 0;
+      root.classList.remove("is-dragover");
+      syncFilesToInput(event.dataTransfer ? event.dataTransfer.files : []);
+    });
+
+    renderFiles(input.files);
+  }
+
   function bindTranscriptValidation(form) {
     const knownSymbols = new Set(parseSymbolList(form.dataset.knownStockSymbols || ""));
     const linkToggle = form.querySelector("[name='link_to_stock']");
     const multiToggle = form.querySelector("[name='link_to_multiple_stocks']");
     const singleSelect = form.querySelector("[name='linked_symbol']");
     const multiInput = form.querySelector("[name='linked_symbols_text']");
+    const mediaInput = form.querySelector("[data-transcript-upload-input]");
+    const fileUrlHintInput = form.querySelector("[name='file_url_hint']");
 
     if (!(linkToggle instanceof HTMLInputElement) || !(multiToggle instanceof HTMLInputElement)) {
       return;
     }
 
     form.addEventListener("submit", function (event) {
+      const selectedFiles =
+        mediaInput instanceof HTMLInputElement ? Array.from(mediaInput.files || []) : [];
+      if (
+        selectedFiles.length > 1 &&
+        fileUrlHintInput instanceof HTMLInputElement &&
+        fileUrlHintInput.value.trim()
+      ) {
+        event.preventDefault();
+        showFlash("error", "批量上传本地文件时，请先清空公网文件地址。");
+        fileUrlHintInput.focus();
+        return;
+      }
+
       if (!linkToggle.checked) {
         return;
       }
@@ -1104,6 +1421,7 @@
   window.addEventListener("DOMContentLoaded", function () {
     const form = document.querySelector("[data-transcript-form]");
     if (form instanceof HTMLFormElement) {
+      setupTranscriptUpload(form);
       bindStockLinkMode(form);
       bindTranscriptValidation(form);
       bindToggle(form, "diarization_enabled", "speaker-fields");

@@ -224,6 +224,12 @@
                   <span class="meta-chip">思考 {{ active_record.reasoning_effort or selected_reasoning_effort }}</span>
                   <span class="meta-chip">{{ active_record.node_count }} 节点</span>
                   <span class="meta-chip">{{ active_record.max_depth }} 层</span>
+                  {% if active_record.map_payload.comparison_axes %}
+                    <span class="meta-chip">{{ active_record.map_payload.comparison_axes|length }} 比较轴</span>
+                  {% endif %}
+                  {% if active_record.map_payload.verification_targets %}
+                    <span class="meta-chip">{{ active_record.map_payload.verification_targets|length }} 验证点</span>
+                  {% endif %}
                   <span class="meta-chip">{{ {"single_stock":"单股拆解","peer_group":"同行对比","value_chain":"产业链传导","theme_bundle":"主题资料包"}.get(active_record.structure_kind, "资料导图") }}</span>
                 </div>
               </div>
@@ -289,6 +295,11 @@
                   </section>
 
                   <section class="mindmap-inspector-block">
+                    <p class="eyebrow">比较轴</p>
+                    <div class="mindmap-source-relations" data-mindmap-comparison-axes></div>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
                     <p class="eyebrow">时间演化</p>
                     <div class="mindmap-timeline-list" data-mindmap-timeline></div>
                   </section>
@@ -296,6 +307,11 @@
                   <section class="mindmap-inspector-block">
                     <p class="eyebrow">资料关系</p>
                     <div class="mindmap-source-relations" data-mindmap-source-relations></div>
+                  </section>
+
+                  <section class="mindmap-inspector-block">
+                    <p class="eyebrow">关键验证点</p>
+                    <div class="mindmap-source-relations" data-mindmap-verification-targets></div>
                   </section>
 
                   <section class="mindmap-inspector-block">

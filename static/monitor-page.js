@@ -88,15 +88,72 @@
     }
   }
 
+  function removeActiveReportSpotlight(filename) {
+    if (!filename) {
+      return;
+    }
+
+    const spotlight = document.querySelector("[data-monitor-active-report]");
+    if (!(spotlight instanceof HTMLElement)) {
+      return;
+    }
+
+    if ((spotlight.getAttribute("data-monitor-active-report-filename") || "") !== filename) {
+      return;
+    }
+
+    spotlight.remove();
+  }
+
+  function findReportReaderTrigger(filename) {
+    if (!filename) {
+      return null;
+    }
+
+    const triggers = document.querySelectorAll("[data-monitor-report-reader]");
+    for (const trigger of triggers) {
+      if (!(trigger instanceof HTMLElement)) {
+        continue;
+      }
+      if ((trigger.getAttribute("data-report-filename") || "") === filename) {
+        return trigger;
+      }
+    }
+    return null;
+  }
+
+  function autoOpenReportFromLocation() {
+    const url = new URL(window.location.href);
+    const activeTab = (url.searchParams.get("tab") || "info").toLowerCase();
+    if (activeTab === "signals") {
+      return;
+    }
+    const filename = url.searchParams.get("report") || "";
+    if (!filename) {
+      return;
+    }
+
+    const trigger = findReportReaderTrigger(filename);
+    if (!(trigger instanceof HTMLElement)) {
+      return;
+    }
+
+    window.requestAnimationFrame(function () {
+      trigger.click();
+    });
+  }
+
   function removeReportCard(card, payload) {
     if (!(card instanceof HTMLElement)) {
       syncEmptyState();
       return;
     }
 
+    const filename = card.getAttribute("data-report-filename") || "";
     card.classList.add("is-removing");
     window.setTimeout(function () {
       card.remove();
+      removeActiveReportSpotlight(filename);
       if (payload) {
         setReportCount(payload.report_count || 0);
         setTodayCount(payload.today_report_count || 0);
@@ -465,5 +522,6 @@
     bindReportDeleteForms();
     setupStatusPolling();
     syncEmptyState();
+    autoOpenReportFromLocation();
   });
 })();

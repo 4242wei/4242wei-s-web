@@ -1,6 +1,7 @@
 {% set page_titles = {
   "archive": "报告归档",
   "monitor": "Monitor",
+  "data_monitor": "数据监控",
   "signals": "信息监控",
   "stocks": "股票工作台",
   "schedule": "日程",
@@ -14,9 +15,8 @@
   "trash": "回收站",
 } %}
 {% set nav_items = [
-  {"key": "archive", "label": "报告归档", "short": "报", "href": url_for("index")},
   {"key": "monitor", "label": "Monitor", "short": "监", "href": url_for("monitor_page")},
-  {"key": "signals", "label": "信息监控", "short": "信", "href": url_for("signal_monitor_page")},
+  {"key": "data_monitor", "label": "数据监控", "short": "数", "href": url_for("data_monitor_page")},
   {"key": "stocks", "label": "股票工作台", "short": "股", "href": url_for("stocks_workspace")},
   {"key": "schedule", "label": "日程", "short": "程", "href": url_for("schedule_page")},
   {"key": "experts", "label": "专家记录", "short": "专", "href": url_for("experts_page")},
@@ -45,7 +45,7 @@
   {"key": "impression-sunrise", "label": "印象日出", "caption": "港口晨雾、蓝灰水面、橙色日轮和薄雾里的反光，灵感取自《印象·日出》。", "swatches": ["#f7faf8", "#d8e7ea", "#89a7bd", "#5d748d", "#ef9357"]},
   {"key": "wild-lotus", "label": "野荷", "caption": "艳红往外炸开，野地里的叶筋和茎骨也得把它稳稳托住。", "swatches": ["#fbf8f1", "#dde7d9", "#e04859", "#6c9d52", "#2f3829"]},
 ] %}
-{% set current_page_title = page_titles.get(active_page, "报告归档") %}
+{% set current_page_title = page_titles.get(active_page, "Monitor") %}
 
 <aside class="workspace-rail" aria-label="功能索引">
   <div class="workspace-rail-shell">
@@ -151,9 +151,29 @@
         </svg>
         <span>日历</span>
       </a>
-      <form class="masthead-search" action="{{ url_for('global_search') }}" method="get">
-        <input name="q" type="search" placeholder="搜索报告、笔记、文件、转录">
+      <form
+        class="masthead-search masthead-stock-search"
+        action="{{ url_for('stocks_workspace') }}"
+        method="get"
+        data-stock-jump-search
+      >
+        <input
+          name="symbol"
+          type="search"
+          placeholder="搜索个股代码，直接跳转"
+          autocomplete="off"
+          spellcheck="false"
+          data-stock-jump-input
+        >
         <button type="submit">搜索</button>
+        <div class="masthead-stock-search-panel" data-stock-jump-panel hidden>
+          <div class="masthead-stock-search-panel-head">
+            <strong data-stock-jump-title>最近查看</strong>
+            <span class="section-caption" data-stock-jump-hint>输入股票代码后会直接跳转到个股页。</span>
+          </div>
+          <div class="masthead-stock-search-list" data-stock-jump-list></div>
+        </div>
+        <script type="application/json" data-stock-jump-options>{{ nav_stock_search_options|tojson }}</script>
       </form>
       <a class="masthead-utility-button" href="{{ url_for('download_workspace_backup') }}" title="下载当前网页与资料备份">
         备份
@@ -211,6 +231,7 @@
 <script src="{{ url_for('static', filename='calendar-modal.js', v='20260316-modalfix1') }}" defer></script>
 <script src="{{ url_for('static', filename='confirm-modal.js', v='20260315-confirmfix') }}" defer></script>
 <script src="{{ url_for('static', filename='flash-messages.js') }}" defer></script>
+<script src="{{ url_for('static', filename='masthead-stock-search.js', v='20260331-stockjump1') }}" defer></script>
 <script src="{{ url_for('static', filename='theme-switcher.js', v='20260325-seabreeze1') }}" defer></script>
 <script src="{{ url_for('static', filename='workspace-rail.js', v='20260317-railfold') }}" defer></script>
 

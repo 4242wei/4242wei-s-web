@@ -88,8 +88,10 @@
   const inspectorSymbolsBlock = root.querySelector("[data-mindmap-node-symbols-block]");
   const inspectorSymbols = root.querySelector("[data-mindmap-node-symbols]");
   const inspectorEvidence = root.querySelector("[data-mindmap-node-evidence]");
+  const inspectorComparisonAxes = root.querySelector("[data-mindmap-comparison-axes]");
   const inspectorTimeline = root.querySelector("[data-mindmap-timeline]");
   const inspectorSourceRelations = root.querySelector("[data-mindmap-source-relations]");
+  const inspectorVerificationTargets = root.querySelector("[data-mindmap-verification-targets]");
   const inspectorInsights = root.querySelector("[data-mindmap-insights]");
   const payloadScript = document.getElementById("mindmap-payload-json");
 
@@ -801,6 +803,73 @@
     });
   }
 
+  function renderComparisonAxes(node) {
+    if (!(inspectorComparisonAxes instanceof HTMLElement)) {
+      return;
+    }
+    inspectorComparisonAxes.innerHTML = "";
+
+    let axes = Array.isArray(payload.comparison_axes) ? payload.comparison_axes.slice() : [];
+    const symbols = Array.isArray(node.symbols) ? node.symbols.filter(Boolean) : [];
+    if (symbols.length) {
+      const filtered = axes.filter(function (axis) {
+        return Array.isArray(axis.views) && axis.views.some(function (view) {
+          return view && symbols.includes(view.symbol);
+        });
+      });
+      if (filtered.length) {
+        axes = filtered;
+      }
+    }
+
+    if (!axes.length) {
+      const empty = document.createElement("p");
+      empty.className = "section-caption";
+      empty.textContent = "当前导图还没有单独整理比较轴。";
+      inspectorComparisonAxes.appendChild(empty);
+      return;
+    }
+
+    axes.forEach(function (axis) {
+      const card = document.createElement("article");
+      card.className = "mindmap-source-relation-card";
+
+      const head = document.createElement("div");
+      head.className = "mindmap-source-relation-head";
+      head.appendChild(createMetaChip("比较轴"));
+      const title = document.createElement("strong");
+      title.textContent = axis.axis || "比较维度";
+      head.appendChild(title);
+      card.appendChild(head);
+
+      if (axis.takeaway) {
+        const takeaway = document.createElement("p");
+        takeaway.textContent = axis.takeaway;
+        card.appendChild(takeaway);
+      }
+
+      if (Array.isArray(axis.views) && axis.views.length) {
+        const list = document.createElement("ul");
+        list.className = "mindmap-detail-list";
+        axis.views.forEach(function (view) {
+          if (!view || !view.symbol) {
+            return;
+          }
+          const item = document.createElement("li");
+          const stance = view.stance ? " [" + view.stance + "]" : "";
+          const summary = view.summary ? " " + view.summary : "";
+          item.textContent = view.symbol + stance + summary;
+          list.appendChild(item);
+        });
+        if (list.children.length) {
+          card.appendChild(list);
+        }
+      }
+
+      inspectorComparisonAxes.appendChild(card);
+    });
+  }
+
   function renderSourceRelations(node) {
     if (!(inspectorSourceRelations instanceof HTMLElement)) {
       return;
@@ -850,6 +919,72 @@
     });
   }
 
+  function renderVerificationTargets(node) {
+    if (!(inspectorVerificationTargets instanceof HTMLElement)) {
+      return;
+    }
+    inspectorVerificationTargets.innerHTML = "";
+
+    let targets = Array.isArray(payload.verification_targets) ? payload.verification_targets.slice() : [];
+    const symbols = Array.isArray(node.symbols) ? node.symbols.filter(Boolean) : [];
+    if (symbols.length) {
+      const filtered = targets.filter(function (target) {
+        const targetSymbols = Array.isArray(target.symbols) ? target.symbols : [];
+        return !targetSymbols.length || targetSymbols.some(function (symbol) {
+          return symbols.includes(symbol);
+        });
+      });
+      if (filtered.length) {
+        targets = filtered;
+      }
+    }
+
+    if (!targets.length) {
+      const empty = document.createElement("p");
+      empty.className = "section-caption";
+      empty.textContent = "当前导图还没有单独整理关键验证点。";
+      inspectorVerificationTargets.appendChild(empty);
+      return;
+    }
+
+    targets.forEach(function (target) {
+      const card = document.createElement("article");
+      card.className = "mindmap-source-relation-card";
+
+      const head = document.createElement("div");
+      head.className = "mindmap-source-relation-head";
+      head.appendChild(createMetaChip((target.priority || "medium").toUpperCase()));
+      const title = document.createElement("strong");
+      title.textContent = target.question || "关键验证点";
+      head.appendChild(title);
+      card.appendChild(head);
+
+      if (target.why_it_matters) {
+        const why = document.createElement("p");
+        why.textContent = target.why_it_matters;
+        card.appendChild(why);
+      }
+
+      const detailList = document.createElement("ul");
+      detailList.className = "mindmap-detail-list";
+      if (target.evidence_gap) {
+        const gapItem = document.createElement("li");
+        gapItem.textContent = "证据缺口: " + target.evidence_gap;
+        detailList.appendChild(gapItem);
+      }
+      if (target.next_check) {
+        const nextItem = document.createElement("li");
+        nextItem.textContent = "下一步验证: " + target.next_check;
+        detailList.appendChild(nextItem);
+      }
+      if (detailList.children.length) {
+        card.appendChild(detailList);
+      }
+
+      inspectorVerificationTargets.appendChild(card);
+    });
+  }
+
   function updateInspector(node) {
     if (!node) {
       return;
@@ -871,8 +1006,10 @@
     }
 
     renderList(inspectorEvidence, Array.isArray(node.evidence) ? node.evidence : [], "当前节点没有单独抽出的证据锚点。");
+    renderComparisonAxes(node);
     renderTimeline(node);
     renderSourceRelations(node);
+    renderVerificationTargets(node);
     renderList(inspectorInsights, Array.isArray(payload.insights) ? payload.insights : [], "当前导图没有额外摘要。");
   }
 

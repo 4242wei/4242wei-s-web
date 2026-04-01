@@ -1,0 +1,318 @@
+<main class="stock-layout monitor-layout signal-layout">
+  <section class="stock-main monitor-main signal-main">
+    <section class="panel signal-builder-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">大V监控</p>
+          <h3>来源配置</h3>
+          <p class="section-caption">支持 X 链接、`@handle` 或名称。这里维护一组长期跟踪的大 V / 公开来源。</p>
+        </div>
+        <span class="summary-count" data-signal-source-count>{{ signal_sources|length }}</span>
+      </div>
+
+      <form
+        class="stack-form"
+        action="{{ url_for('save_signal_monitor_defaults') }}"
+        method="post"
+        data-signal-source-form
+        data-running="{{ 'true' if signal_monitor_runtime.is_running else 'false' }}"
+        data-today-exists="{{ 'true' if signal_today_reports else 'false' }}"
+      >
+        <script type="application/json" data-signal-source-seed>{{ signal_monitor_config.sources|tojson }}</script>
+        <input type="hidden" name="sources_json" value="" data-signal-source-hidden>
+        <input type="hidden" name="confirm_existing_today" value="0" data-signal-confirm-existing>
+
+        <div class="signal-builder-grid">
+          <div class="signal-builder-entry">
+            <div class="signal-entry-shell">
+              <label class="form-field">
+                <span class="field-label">来源地址或名称</span>
+                <input
+                  type="text"
+                  placeholder="例如 https://x.com/SemiAnalysis_ / @SemiAnalysis_ / SemiAnalysis"
+                  data-signal-source-input
+                >
+              </label>
+              <label class="form-field">
+                <span class="field-label">备注</span>
+                <input type="text" placeholder="例如：半导体 / AI 供应链 / 数据中心" data-signal-source-note>
+              </label>
+              <div class="signal-category-grid">
+                <label class="form-field">
+                  <span class="field-label">现有分类</span>
+                  <select data-signal-category-select>
+                    <option value="">默认归类（通用监控）</option>
+                    {% for group in signal_source_groups %}
+                      <option value="{{ group['name'] }}">{{ group['name'] }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="form-field">
+                  <span class="field-label">或新建分类</span>
+                  <input type="text" placeholder="例如：硬件监控" data-signal-category-input>
+                </label>
+              </div>
+              <label class="form-field signal-window-field">
+                <span class="field-label">默认回看窗口</span>
+                <input type="number" name="default_window_days" min="1" max="30" value="{{ signal_monitor_config.default_window_days }}">
+              </label>
+              <div class="story-actions signal-builder-actions">
+                <button class="button button-secondary" type="button" data-signal-source-add>添加来源</button>
+                <button class="button button-secondary" type="submit">保存默认来源</button>
+                <button
+                  class="button button-primary"
+                  type="submit"
+                  formaction="{{ url_for('run_signal_monitor_job') }}"
+                  formmethod="post"
+                  data-signal-run-button
+                >
+                  {% if signal_monitor_runtime.is_running %}监控运行中{% else %}运行监控{% endif %}
+                </button>
+              </div>
+            </div>
+
+            <div class="chip-row signal-example-row">
+              <button class="detail-chip detail-chip-button" type="button" data-signal-example="https://x.com/SemiAnalysis_">SemiAnalysis 示例</button>
+              <button class="detail-chip detail-chip-button" type="button" data-signal-example="@SemiAnalysis_">@SemiAnalysis_</button>
+            </div>
+          </div>
+
+          <div class="signal-source-editor">
+            <div class="signal-source-list" data-signal-source-list></div>
+          </div>
+        </div>
+      </form>
+
+      <form action="{{ url_for('terminate_signal_monitor_job') }}" method="post" data-signal-terminate-form hidden></form>
+    </section>
+
+    <section class="panel signal-reading-panel" id="signal-reading-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">阅读结果</p>
+          <h3>{% if active_signal_report %}{{ active_signal_report.title }}{% else %}新的监控结果会显示在这里{% endif %}</h3>
+          {% if active_signal_report %}
+            <p class="section-caption">这里会优先展示你当前选中的大V监控结果。</p>
+          {% else %}
+            <p class="section-caption">每次运行结束后，新的 Markdown 结果会先显示在这里。</p>
+          {% endif %}
+        </div>
+        {% if active_signal_report %}
+          <div class="card-link-row">
+            <a class="button button-secondary button-compact" href="{{ url_for('raw_signal_report', filename=active_signal_report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
+          </div>
+        {% endif %}
+      </div>
+
+      {% if active_signal_report %}
+        <div class="signal-reading-meta">
+          <div class="card-inline-meta">
+            <span class="meta-chip">{{ active_signal_report.report_date }}</span>
+            <span class="meta-chip">{{ active_signal_report.filename }}</span>
+            {% if active_signal_report.modified_label %}
+              <span class="meta-chip">更新 {{ active_signal_report.modified_label }}</span>
+            {% endif %}
+          </div>
+          {% if active_signal_report.summary %}
+            <p class="section-caption">{{ active_signal_report.summary }}</p>
+          {% endif %}
+        </div>
+        <article class="markdown-body signal-markdown-body" data-preserve-scroll-shell>
+          {{ active_signal_report.html | safe }}
+        </article>
+      {% else %}
+        <div class="empty-card">
+          <p class="empty-title">还没有大V监控结果</p>
+          <p>你可以先用 `SemiAnalysis` 跑一轮，确认这套监控方式是否符合你的观察习惯。</p>
+        </div>
+      {% endif %}
+    </section>
+
+    <section class="panel signal-history-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">结果历史</p>
+          <h3>大V监控报告</h3>
+          <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+        </div>
+        <span class="summary-count" data-signal-report-count>{{ signal_reports|length }}</span>
+      </div>
+
+      {% if signal_reports %}
+        <div class="record-stack" data-signal-report-list>
+          {% for report in signal_reports %}
+            <article class="record-card monitor-report-card signal-report-card{% if report.is_active %} is-active{% endif %}" data-signal-report-card data-report-filename="{{ report.filename }}">
+              <div class="monitor-report-layout">
+                <div class="monitor-report-main">
+                  <div class="card-inline-meta">
+                    <span class="meta-chip">{{ report.report_date }}</span>
+                    {% if report.is_today %}
+                      <span class="meta-chip">今天</span>
+                    {% endif %}
+                    {% if report.is_active %}
+                      <span class="meta-chip">当前</span>
+                    {% endif %}
+                    {% for source_name in report.source_names %}
+                      <span class="meta-chip">{{ source_name }}</span>
+                    {% endfor %}
+                  </div>
+                  <h4>{{ report.title }}</h4>
+                  {% if report.window_label %}
+                    <p class="section-caption">{{ report.window_label }}</p>
+                  {% endif %}
+                  <p class="card-preview-copy">{{ report.summary or "这份结果还没有生成摘要。" }}</p>
+                </div>
+                <div class="monitor-report-actions">
+                  <a class="button button-secondary button-compact" href="{{ url_for('monitor_page', tab='signals', signal_report=report.filename) }}">打开结果</a>
+                  <div class="monitor-report-link-list">
+                    <a class="text-link" href="{{ url_for('raw_signal_report', filename=report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
+                  </div>
+                  <form
+                    class="monitor-report-delete-form"
+                    action="{{ url_for('delete_signal_report', filename=report.filename) }}"
+                    method="post"
+                    data-signal-report-delete-form
+                    data-confirm-delete
+                    data-confirm-message="把这份大V监控报告移入回收站吗？"
+                  >
+                    <button class="danger-button danger-button-compact" type="submit">删除</button>
+                  </form>
+                </div>
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+        <div class="empty-card" data-signal-report-empty-state hidden>
+          <p class="empty-title">大V监控报告暂时为空</p>
+          <p>删除最后一份结果后，这里会自动回到空状态。</p>
+        </div>
+      {% else %}
+        <div class="empty-card" data-signal-report-empty-state>
+          <p class="empty-title">大V监控报告暂时为空</p>
+          <p>现在还没有大V监控结果。你可以先保存来源，再手动运行一轮。</p>
+        </div>
+      {% endif %}
+    </section>
+  </section>
+
+  <aside class="stock-sidebar monitor-sidebar signal-sidebar">
+    <section class="panel monitor-status-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">运行状态</p>
+          <h3>后台任务</h3>
+        </div>
+      </div>
+      <div
+        class="monitor-status-grid"
+        data-signal-status-panel
+        data-status-url="{{ url_for('signal_monitor_status') }}"
+        data-signal-running="{{ 'true' if signal_monitor_runtime.is_running else 'false' }}"
+        data-signal-status="{{ signal_monitor_runtime.status }}"
+        data-signal-poll-seconds="{{ signal_status_poll_seconds }}"
+        {% if signal_latest_report %}
+          data-signal-report-filename="{{ signal_latest_report.filename }}"
+        {% endif %}
+      >
+        <article class="mini-fact">
+          <span class="mini-label">状态</span>
+          <strong data-signal-status-label>{{ signal_monitor_runtime.status_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">开始时间</span>
+          <strong data-signal-started-at>{{ signal_monitor_runtime.started_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">结束时间</span>
+          <strong data-signal-finished-at>{{ signal_monitor_runtime.finished_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">当前来源</span>
+          <strong data-signal-runtime-sources>{{ signal_monitor_runtime.source_ids|length }} 个</strong>
+        </article>
+      </div>
+      {% if signal_monitor_runtime.message %}
+        <p class="field-help" data-signal-message>{{ signal_monitor_runtime.message }}</p>
+      {% else %}
+        <p class="field-help" data-signal-message hidden></p>
+      {% endif %}
+      {% if signal_monitor_runtime.error %}
+        <p class="field-help" data-signal-error>{{ signal_monitor_runtime.error }}</p>
+      {% else %}
+        <p class="field-help" data-signal-error hidden></p>
+      {% endif %}
+    </section>
+
+    <section class="panel signal-source-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">监控名单</p>
+          <h3>当前来源</h3>
+        </div>
+      </div>
+      <div class="signal-source-stack">
+        {% for group in signal_source_groups %}
+          <details class="expander signal-sidebar-group-expander">
+            <summary class="expander-summary signal-sidebar-group-summary">
+              <div>
+                <p class="eyebrow">监控分类</p>
+                <h3>{{ group['name'] }}</h3>
+                <p class="section-caption">{{ group['count'] }} 个来源 · {{ group['enabled_count'] }} 个启用中</p>
+              </div>
+              <div class="expander-meta">
+                <span class="summary-count">{{ group['count'] }}</span>
+                <span class="expander-toggle">
+                  <span class="expander-closed-label">展开</span>
+                  <span class="expander-open-label">收起</span>
+                </span>
+              </div>
+            </summary>
+            <div class="expander-body signal-sidebar-group-body">
+              <div class="record-scroll-shell signal-sidebar-source-shell {% if group['is_scrollable'] %}is-scrollable{% endif %}">
+                {% for source in group['items'] %}
+                  <article class="module-card signal-source-summary">
+                    <div class="card-inline-meta">
+                      <span class="meta-chip">{{ source.source_label }}</span>
+                      {% if source.handle %}
+                        <span class="meta-chip">@{{ source.handle }}</span>
+                      {% endif %}
+                    </div>
+                    <h4>{{ source.display_name }}</h4>
+                    {% if source.profile_url %}
+                      <p class="section-caption"><a class="text-link" href="{{ source.profile_url }}" target="_blank" rel="noreferrer">{{ source.profile_url }}</a></p>
+                    {% else %}
+                      <p class="section-caption">{{ source.query }}</p>
+                    {% endif %}
+                    <p class="field-help">上次窗口：{{ source.last_window_label }}</p>
+                    {% if source.notes %}
+                      <p class="field-help">{{ source.notes }}</p>
+                    {% endif %}
+                  </article>
+                {% endfor %}
+              </div>
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel monitor-today-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">当天结果</p>
+          <h3>重跑提醒</h3>
+        </div>
+      </div>
+      {% if signal_today_reports %}
+        <ul class="briefing-list">
+          {% for report in signal_today_reports %}
+            <li>{{ report.report_date }} · {{ report.filename }}</li>
+          {% endfor %}
+        </ul>
+        <p class="field-help">如果今天已经跑过一轮，再次运行前会先提醒你，避免结果时间窗口重叠。</p>
+      {% else %}
+        <p class="field-help">今天还没有新的大V监控结果。</p>
+      {% endif %}
+    </section>
+  </aside>
+</main>

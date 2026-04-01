@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ stock.symbol }} - 股票工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260331-stocksetup4') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-tabs.js', v='20260316-tabsfix2') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260330-earningscall1') }}" defer></script>
+  <script src="{{ url_for('static', filename='stock-detail-files.js', v='20260331-filelinks1') }}" defer></script>
   <script src="{{ url_for('static', filename='rich-editor.js', v='20260316-richmedia') }}" defer></script>
 </head>
 <body>
@@ -16,49 +17,66 @@
     {% include "_masthead.html" %}
 
     <section class="stock-detail-hero panel">
-      <div class="stock-detail-copy">
-        <p class="eyebrow">股票工作台</p>
-        <h2>{{ stock.symbol }}</h2>
-        <p class="story-dek">
-          这里负责沉淀这只股票的笔记、资料、转录和活动轨迹。阅读、录入与整理被拆成更清楚的层次，长期积累也不会显乱。
-        </p>
-        <div class="stock-earnings-banner">
-          <div class="stock-earnings-copy">
-            <p class="stock-earnings-title">{{ stock.next_earnings.headline }}</p>
-            <p class="section-caption">
-              {% if stock.next_earnings.has_date %}
-                同步于 {{ stock.next_earnings.display_last_synced_at }}
-                {% if stock.next_earnings.source_label %}
-                  · 来源：
-                  {% if stock.next_earnings.source_url %}
-                    <a class="text-link" href="{{ stock.next_earnings.source_url }}" target="_blank" rel="noreferrer">{{ stock.next_earnings.source_label }}</a>
-                  {% else %}
-                    {{ stock.next_earnings.source_label }}
+      <div class="stock-detail-hero-primary">
+        <div class="stock-detail-copy">
+          <p class="eyebrow">股票工作台</p>
+          <h2>{{ stock.symbol }}</h2>
+          <p class="story-dek">
+            这里负责沉淀这只股票的笔记、资料、转录和活动轨迹。阅读、录入与整理被拆成更清楚的层次，长期积累也不会显乱。
+          </p>
+          <div class="stock-earnings-banner">
+            <div class="stock-earnings-copy">
+              <p class="stock-earnings-title">{{ stock.next_earnings.headline }}</p>
+              <p class="section-caption">
+                {% if stock.next_earnings.has_date %}
+                  同步于 {{ stock.next_earnings.display_last_synced_at }}
+                  {% if stock.next_earnings.source_label %}
+                    · 来源：
+                    {% if stock.next_earnings.source_url %}
+                      <a class="text-link" href="{{ stock.next_earnings.source_url }}" target="_blank" rel="noreferrer">{{ stock.next_earnings.source_label }}</a>
+                    {% else %}
+                      {{ stock.next_earnings.source_label }}
+                    {% endif %}
                   {% endif %}
+                  {% if stock.next_earnings.is_estimated %}
+                    · 若公司后续正式公告不同，请以公告为准
+                  {% endif %}
+                {% else %}
+                  还没有同步到下一次业绩期，点右侧按钮即可补上。
                 {% endif %}
-                {% if stock.next_earnings.is_estimated %}
-                  · 若公司后续正式公告不同，请以公告为准
-                {% endif %}
-              {% else %}
-                还没有同步到下一次业绩期，点右侧按钮即可补上。
-              {% endif %}
-            </p>
+              </p>
+            </div>
+            <form action="{{ url_for('sync_stock_earnings', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
+              <input type="hidden" name="next_url" value="{{ return_to }}">
+              <button class="button button-secondary button-compact" type="submit">刷新业绩期</button>
+            </form>
           </div>
-          <form action="{{ url_for('sync_stock_earnings', symbol=stock.symbol) }}" method="post" data-preserve-scroll>
-            <input type="hidden" name="next_url" value="{{ return_to }}">
-            <button class="button button-secondary button-compact" type="submit">刷新业绩期</button>
-          </form>
+          <div class="chip-row">
+            {% if stock.is_favorite %}
+              <span class="detail-chip is-favorite">已加入自选</span>
+            {% endif %}
+            {% for group in stock.groups %}
+              <span class="detail-chip">{{ group.name }}</span>
+            {% endfor %}
+            {% if not stock.groups %}
+              <span class="detail-chip">暂未分组</span>
+            {% endif %}
+          </div>
         </div>
-        <div class="chip-row">
-          {% if stock.is_favorite %}
-            <span class="detail-chip is-favorite">已加入自选</span>
-          {% endif %}
-          {% for group in stock.groups %}
-            <span class="detail-chip">{{ group.name }}</span>
-          {% endfor %}
-          {% if not stock.groups %}
-            <span class="detail-chip">暂未分组</span>
-          {% endif %}
+        <div class="stock-detail-setup-anchor">
+          <button
+            class="stock-setup-trigger"
+            type="button"
+            aria-label="{{ stock.symbol }} set up"
+            {% if stock.setup.has_setup %}
+              data-reader-open
+              data-reader-template="{{ stock.setup.template_id }}"
+            {% else %}
+              disabled
+            {% endif %}
+          >
+            set up
+          </button>
         </div>
       </div>
 
@@ -231,10 +249,53 @@
                 </label>
                 <p class="field-help">支持常见文档文件，如 PDF、DOCX。若无法读取，会保留文件并提示该类型无法抽取文字。</p>
 
-                <label class="form-field">
+                <div class="form-field transcript-upload-field" data-stock-file-upload-root>
                   <span class="field-label">选择文件</span>
-                  <input name="research_file" type="file">
-                </label>
+                  <input class="transcript-upload-input" name="research_file" type="file" data-stock-file-upload-input>
+                  <button class="transcript-upload-dropzone" type="button" data-stock-file-upload-trigger>
+                    <span class="transcript-upload-copy">
+                      <strong>拖到这里直接上传</strong>
+                      <span>也可以点击这里选择一份研究资料，支持 PDF、Word、图片和常见文字文件。</span>
+                    </span>
+                    <span class="detail-chip">拖拽 / 选择</span>
+                  </button>
+                  <div class="transcript-upload-selection">
+                    <div class="transcript-upload-selection-copy">
+                      <span class="mini-label">已选文件</span>
+                      <span class="section-caption" data-stock-file-upload-summary>还没选文件</span>
+                    </div>
+                  </div>
+                  <div class="transcript-upload-file-list" data-stock-file-upload-files aria-live="polite">
+                    <p class="transcript-upload-placeholder">文件名会显示在这里，拖拽到上面的区域也可以直接完成选择。</p>
+                  </div>
+                </div>
+
+                <div class="form-field">
+                  <span class="field-label">关联股票</span>
+                  <div class="field-cluster">
+                    <div class="stock-link-picker">
+                      {% for option in stock_options %}
+                        {% set is_current_stock = option.symbol == stock.symbol %}
+                        <label class="stock-link-chip">
+                          <input
+                            class="stock-link-chip-input"
+                            {% if not is_current_stock %}name="linked_symbols" value="{{ option.symbol }}"{% endif %}
+                            type="checkbox"
+                            {% if is_current_stock %}checked disabled{% endif %}
+                          >
+                          <span class="stock-link-chip-body">
+                            <strong>{{ option.symbol }}</strong>
+                            <small>{% if is_current_stock %}当前上传页{% else %}{{ option.display_name }}{% endif %}</small>
+                          </span>
+                          {% if is_current_stock %}
+                            <input name="linked_symbols" type="hidden" value="{{ option.symbol }}">
+                          {% endif %}
+                        </label>
+                      {% endfor %}
+                    </div>
+                    <span class="field-help">当前股票会固定保留；其他股票可以一起勾选，同一份资料会同时出现在对应股票页。</span>
+                  </div>
+                </div>
 
                 <button class="button button-primary" type="submit">上传资料</button>
               </form>
@@ -870,21 +931,39 @@
                             <h4>{{ file.original_name }}</h4>
                             <p class="section-caption">{{ file.display_uploaded_at }}</p>
                           </div>
-                          <form
-                            action="{{ url_for('delete_stock_file', symbol=stock.symbol, file_id=file.id) }}"
-                            method="post"
-                            data-preserve-scroll
-                            data-confirm-delete
-                            data-confirm-message="把这个文件移入回收站吗？文件和说明都会先保留。"
-                          >
-                            <input type="hidden" name="next_url" value="{{ return_to }}">
-                            <button class="danger-button danger-button-compact" type="submit">删除</button>
-                          </form>
+                          <div class="record-card-actions">
+                            <button
+                              class="button button-secondary button-compact"
+                              type="button"
+                              data-reader-template="stock-file-link-editor-{{ file.id }}"
+                              data-reader-open
+                            >
+                              关联股票
+                            </button>
+                            {% if file.is_owner_context %}
+                              <form
+                                action="{{ file.delete_url }}"
+                                method="post"
+                                data-preserve-scroll
+                                data-confirm-delete
+                                data-confirm-message="把这个文件移入回收站吗？文件和说明都会先保留。"
+                              >
+                                <input type="hidden" name="next_url" value="{{ return_to }}">
+                                <button class="danger-button danger-button-compact" type="submit">删除</button>
+                              </form>
+                            {% endif %}
+                          </div>
                         </div>
 
                         <p class="card-preview-copy">{{ file.summary_excerpt }}</p>
 
                         <div class="card-inline-meta">
+                          {% if file.origin_symbol != stock.symbol %}
+                            <span class="meta-chip">来自 {{ file.origin_symbol }}</span>
+                          {% endif %}
+                          {% if file.linked_symbols %}
+                            <span class="meta-chip">关联股票 {{ file.linked_symbols_label }}</span>
+                          {% endif %}
                           {% if file.extract_text %}
                             <span class="meta-chip">已启用文字抽取</span>
                           {% endif %}
@@ -905,14 +984,63 @@
                           {% if file.is_previewable %}
                             <a
                               class="button button-secondary button-compact"
-                              href="{{ url_for('preview_stock_file_fragment', symbol=stock.symbol, file_id=file.id) }}"
+                              href="{{ file.preview_url }}"
                               data-reader-url
                             >
                               {{ file.preview_label }}
                             </a>
                           {% endif %}
-                          <a class="text-link" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=file.id) }}">下载文件</a>
+                          <a class="text-link" href="{{ file.download_url }}">下载文件</a>
                         </div>
+
+                        <template id="stock-file-link-editor-{{ file.id }}">
+                          <article class="reader-sheet reader-sheet-transcript">
+                            <div class="reader-sheet-head">
+                              <div class="reader-sheet-head-copy">
+                                <p class="eyebrow">关联股票</p>
+                                <h3>{{ file.original_name }}</h3>
+                                <p class="reader-sheet-meta-line">同一份资料只保留一份源文件，但可以同时挂到多个股票页。</p>
+                              </div>
+                              <button class="icon-button reader-sheet-close" type="button" aria-label="关闭关联股票窗口" data-reader-close>×</button>
+                            </div>
+
+                            <form class="stack-form compact-form" action="{{ file.update_links_url }}" method="post" data-preserve-scroll>
+                              <input type="hidden" name="next_url" value="{{ return_to }}">
+
+                              <div class="form-field">
+                                <span class="field-label">选择要展示到哪些股票页</span>
+                                <div class="stock-link-picker">
+                                  {% for option in stock_options %}
+                                    {% set is_storage_symbol = option.symbol == file.storage_symbol %}
+                                    {% set is_linked_symbol = option.symbol in file.linked_symbols %}
+                                    <label class="stock-link-chip">
+                                      <input
+                                        class="stock-link-chip-input"
+                                        {% if not is_storage_symbol %}name="linked_symbols" value="{{ option.symbol }}"{% endif %}
+                                        type="checkbox"
+                                        {% if is_linked_symbol %}checked{% endif %}
+                                        {% if is_storage_symbol %}disabled{% endif %}
+                                      >
+                                      <span class="stock-link-chip-body">
+                                        <strong>{{ option.symbol }}</strong>
+                                        <small>{% if is_storage_symbol %}原始上传页{% else %}{{ option.display_name }}{% endif %}</small>
+                                      </span>
+                                      {% if is_storage_symbol %}
+                                        <input name="linked_symbols" type="hidden" value="{{ option.symbol }}">
+                                      {% endif %}
+                                    </label>
+                                  {% endfor %}
+                                </div>
+                                <span class="field-help">原始上传页会固定保留；其他股票可以随时勾选或取消。</span>
+                              </div>
+
+                              <div class="card-link-row reader-sheet-footer">
+                                <button class="button button-primary button-compact" type="submit">保存关联</button>
+                                <button class="button button-secondary button-compact" type="button" data-reader-close>取消</button>
+                              </div>
+                            </form>
+                          </article>
+                        </template>
                       </article>
                     {% endfor %}
                   </div>
@@ -956,7 +1084,7 @@
                 <div class="record-scroll-shell{% if related_reports|length > 6 %} is-scrollable{% endif %}">
                   <div class="linked-report-list">
                     {% for report in related_reports %}
-                      <a class="linked-report-card" href="{{ url_for('index', report=report.filename) }}">
+                      <a class="linked-report-card" href="{{ url_for('monitor_page', report=report.filename) }}">
                         <span class="report-date">{{ report.report_date }}</span>
                         <strong>{{ report.title }}</strong>
                         <span class="report-summary">{{ report.summary }}</span>
@@ -1242,6 +1370,38 @@
     </main>
 
   </div>
+
+  <template id="{{ stock.setup.template_id }}">
+    <article class="reader-sheet reader-sheet-note report-reader-sheet">
+      <div class="reader-sheet-head">
+        <div class="reader-sheet-head-copy">
+          <p class="eyebrow">Set up</p>
+          <h3>{{ stock.setup.title }}</h3>
+          <p class="reader-sheet-meta-line">
+            {% if stock.setup.has_setup %}
+              更新 {{ stock.setup.updated_at }} · 公开信息研究底稿
+            {% else %}
+              还没有准备这只股票的 setup
+            {% endif %}
+          </p>
+        </div>
+        <button class="icon-button reader-sheet-close" type="button" aria-label="关闭 Set up" data-reader-close>×</button>
+      </div>
+      <div class="card-inline-meta reader-sheet-support">
+        <span class="meta-chip">公开信息</span>
+        <span class="meta-chip">预期差</span>
+        <span class="meta-chip">验证点</span>
+        <span class="meta-chip">Kill Criteria</span>
+      </div>
+      <div class="reader-sheet-stage">
+        <div class="reader-sheet-body report-reader-body">
+          <article class="markdown-body">
+            {{ stock.setup.html | safe }}
+          </article>
+        </div>
+      </div>
+    </article>
+  </template>
 
   <div class="reader-overlay" data-reader-overlay hidden>
     <div class="reader-overlay-backdrop" data-reader-close></div>

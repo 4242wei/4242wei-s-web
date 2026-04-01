@@ -20,7 +20,7 @@
           先整理观察名单，再进入个股页沉淀笔记、资料和会议转录。研究路径会更清晰，也更适合长期回看。
         </p>
         <div class="story-actions">
-          <a class="button button-primary" href="{{ url_for('index') }}">返回报告页</a>
+          <a class="button button-primary" href="{{ url_for('monitor_page') }}">返回 Monitor</a>
           <a class="button button-secondary" href="{{ url_for('global_search') }}">全局搜索</a>
           <a class="button button-secondary" href="{{ url_for('trash_page') }}">回收站</a>
           <form action="{{ url_for('sync_all_stock_earnings') }}" method="post">

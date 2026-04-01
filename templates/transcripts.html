@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>语音转录工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260401-transcriptscroll1') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260316-readerrefresh1') }}" defer></script>
   <script src="{{ url_for('static', filename='transcript-page.js', v='20260323-categoryfilter3') }}" defer></script>
@@ -745,7 +745,8 @@
             </label>
             <label class="form-field">
               <span class="field-label">会议日期</span>
-              <input name="meeting_date" type="date" value="{{ today_date }}">
+              <input name="meeting_date" type="date" value="{{ today_date }}" data-transcript-meeting-date>
+              <input name="meeting_date_is_manual" type="hidden" value="0" data-transcript-meeting-date-manual>
             </label>
           </div>
 
@@ -766,11 +767,36 @@
           </div>
 
           <div class="transcript-form-grid">
-            <label class="form-field">
+            <div class="form-field transcript-upload-field" data-transcript-upload-root>
               <span class="field-label">上传音频或视频</span>
-              <input name="transcript_media" type="file" accept=".mp3,.wav,.m4a,.wma,.aac,.ogg,.amr,.flac,.aiff,.mp4,.wmv,.m4v,.flv,.rmvb,.dat,.mov,.mkv,.webm,.avi,.mpeg,.3gp">
+              <input
+                class="transcript-upload-input"
+                name="transcript_media"
+                type="file"
+                multiple
+                accept=".mp3,.wav,.m4a,.wma,.aac,.ogg,.amr,.flac,.aiff,.mp4,.wmv,.m4v,.flv,.rmvb,.dat,.mov,.mkv,.webm,.avi,.mpeg,.3gp"
+                data-transcript-upload-input
+              >
+              <button class="transcript-upload-dropzone" type="button" data-transcript-upload-trigger>
+                <span class="transcript-upload-copy">
+                  <strong>拖到这里直接上传</strong>
+                  <span>也可以点击这里选择一个或多个音频 / 视频文件</span>
+                </span>
+                <span class="detail-chip">拖拽 / 选择</span>
+              </button>
+              <div class="transcript-upload-selection">
+                <div class="transcript-upload-selection-copy">
+                  <span class="mini-label">已选文件</span>
+                  <span class="section-caption" data-transcript-upload-summary>还没选文件</span>
+                </div>
+                <button class="button button-secondary button-compact" type="button" data-transcript-copy-filenames hidden>复制文件名</button>
+              </div>
+              <div class="transcript-upload-file-list" data-transcript-upload-files aria-live="polite">
+                <p class="transcript-upload-placeholder">文件名会显示在这里，你可以直接选中文字复制。</p>
+              </div>
+              <p class="field-help" data-transcript-upload-date-hint hidden></p>
               <span class="field-help">{{ supported_format_hint }}</span>
-            </label>
+            </div>
             <label class="form-field">
               <span class="field-label">公网文件地址（高级选项）</span>
               <input name="file_url_hint" type="url" placeholder="一般不用填。只有你想指定现成的 OSS / CDN / https 文件地址时再填">

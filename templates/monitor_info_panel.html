@@ -1,0 +1,283 @@
+<main class="stock-layout monitor-layout">
+  <section class="stock-main monitor-main">
+    <section class="panel monitor-builder-panel" id="monitor-builder">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">信息监控</p>
+          <h3>默认跟踪股票</h3>
+          <p class="section-caption">这里保存默认跟踪股票。后面如果你不改，手动运行时就直接用这组股票。</p>
+        </div>
+        <span class="summary-count" data-monitor-chip-count>{{ monitor_config.stock_pool|length }}</span>
+      </div>
+
+      <form
+        class="stack-form"
+        action="{{ url_for('save_monitor_defaults') }}"
+        method="post"
+        data-monitor-stock-form
+        data-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
+        data-today-exists="{{ 'true' if monitor_today_reports else 'false' }}"
+      >
+        <input type="hidden" name="stock_pool" value="{{ monitor_config.stock_pool|join(';') }}" data-monitor-stock-hidden>
+        <input type="hidden" name="confirm_existing_today" value="0" data-monitor-confirm-existing>
+
+        <div class="monitor-builder">
+          <div class="monitor-chip-shell">
+            <div class="monitor-chip-list" data-monitor-chip-list></div>
+            <div class="monitor-chip-input-row">
+              <input
+                type="text"
+                placeholder="输入股票代码，例如 FTAI"
+                list="monitor-stock-suggestion-list"
+                data-monitor-chip-input
+              >
+              <button class="button button-secondary" type="button" data-monitor-chip-add>添加股票</button>
+            </div>
+            <datalist id="monitor-stock-suggestion-list">
+              {% for symbol in monitor_stock_suggestions %}
+                <option value="{{ symbol }}"></option>
+              {% endfor %}
+            </datalist>
+          </div>
+
+          <div class="chip-row monitor-suggestion-row">
+            {% for symbol in monitor_stock_suggestions[:12] %}
+              <button class="detail-chip detail-chip-button" type="button" data-monitor-suggestion="{{ symbol }}">{{ symbol }}</button>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="story-actions monitor-builder-actions">
+          <button class="button button-secondary" type="submit">保存默认股票池</button>
+          <button
+            class="button button-primary"
+            type="submit"
+            formaction="{{ url_for('run_monitor_job') }}"
+            formmethod="post"
+            data-monitor-run-button
+          >
+            {% if monitor_runtime.is_running %}监测运行中{% else %}运行监测{% endif %}
+          </button>
+        </div>
+      </form>
+
+      <form action="{{ url_for('terminate_monitor_job') }}" method="post" data-monitor-terminate-form hidden></form>
+    </section>
+
+    <section class="panel monitor-history-panel" id="report-library">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">结果历史</p>
+          <h3>信息监控报告</h3>
+          <p class="section-caption">报告列表和阅读都放在这里。点击即可弹窗阅读，也兼容从个股页带着 report 参数直接跳进来。</p>
+        </div>
+        <span class="summary-count" data-monitor-report-count>{{ monitor_reports|length }}</span>
+      </div>
+
+      {% if monitor_active_report %}
+        <article
+          class="record-card monitor-report-card monitor-report-spotlight{% if monitor_active_report_is_monitor %} is-active{% endif %}"
+          data-monitor-active-report
+          data-monitor-active-report-filename="{{ monitor_active_report.filename }}"
+        >
+          <div class="monitor-report-layout">
+            <div class="monitor-report-main">
+              <div class="card-inline-meta">
+                <span class="meta-chip">{{ monitor_active_report.report_date }}</span>
+                <span class="meta-chip">更新 {{ monitor_active_report.updated_at }}</span>
+                {% if monitor_active_report_is_monitor %}
+                  <span class="meta-chip">信息监控</span>
+                {% else %}
+                  <span class="meta-chip">当前阅读</span>
+                {% endif %}
+                <span class="meta-chip">{{ monitor_active_report.filename }}</span>
+              </div>
+              <h4>{{ monitor_active_report.title }}</h4>
+              <p class="card-preview-copy">{{ monitor_active_report.summary or "这份报告还没有生成摘要。" }}</p>
+              {% if not monitor_active_report_is_monitor %}
+                <p class="field-help monitor-report-note">这份报告是从其它页面带过来的，下面列表仍以信息监控结果为主。</p>
+              {% endif %}
+            </div>
+            <div class="monitor-report-actions">
+              <a
+                class="button button-secondary button-compact"
+                href="{{ url_for('preview_report_fragment', filename=monitor_active_report.filename) }}"
+                data-reader-url
+                data-monitor-report-reader
+                data-report-filename="{{ monitor_active_report.filename }}"
+              >
+                弹窗阅读
+              </a>
+              <div class="monitor-report-link-list">
+                <a class="text-link" href="{{ url_for('raw_report', filename=monitor_active_report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
+              </div>
+              {% if monitor_active_report_is_monitor %}
+                <form
+                  class="monitor-report-delete-form"
+                  action="{{ url_for('delete_monitor_report', filename=monitor_active_report.filename) }}"
+                  method="post"
+                  data-monitor-report-delete-form
+                  data-confirm-delete
+                  data-confirm-message="把这份信息监控报告移入回收站吗？"
+                >
+                  <button class="danger-button danger-button-compact" type="submit">删除</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        </article>
+      {% endif %}
+
+      {% if monitor_reports %}
+        <div class="record-stack" data-monitor-report-list>
+          {% for report in monitor_reports %}
+            <article
+              class="record-card monitor-report-card{% if report.is_active %} is-active{% endif %}"
+              data-monitor-report-card
+              data-report-filename="{{ report.filename }}"
+            >
+              <div class="monitor-report-layout">
+                <div class="monitor-report-main">
+                  <div class="card-inline-meta">
+                    <span class="meta-chip">{{ report.report_date }}</span>
+                    {% if report.is_today %}
+                      <span class="meta-chip">今天</span>
+                    {% endif %}
+                    {% if report.is_active %}
+                      <span class="meta-chip">当前</span>
+                    {% endif %}
+                    <span class="meta-chip">{{ report.filename }}</span>
+                  </div>
+                  <h4>{{ report.title }}</h4>
+                  <p class="card-preview-copy">{{ report.summary or "这份结果还没有生成摘要。" }}</p>
+                </div>
+                <div class="monitor-report-actions">
+                  <a
+                    class="button button-secondary button-compact"
+                    href="{{ url_for('preview_report_fragment', filename=report.filename) }}"
+                    data-reader-url
+                    data-monitor-report-reader
+                    data-report-filename="{{ report.filename }}"
+                  >
+                    弹窗阅读
+                  </a>
+                  <div class="monitor-report-link-list">
+                    <a class="text-link" href="{{ url_for('monitor_page', report=report.filename) }}">设为当前</a>
+                    <a class="text-link" href="{{ url_for('raw_report', filename=report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
+                  </div>
+                  <form
+                    class="monitor-report-delete-form"
+                    action="{{ url_for('delete_monitor_report', filename=report.filename) }}"
+                    method="post"
+                    data-monitor-report-delete-form
+                    data-confirm-delete
+                    data-confirm-message="把这份信息监控报告移入回收站吗？"
+                  >
+                    <button class="danger-button danger-button-compact" type="submit">删除</button>
+                  </form>
+                </div>
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+        <div class="empty-card" data-monitor-report-empty-state hidden>
+          <p class="empty-title">信息监控报告暂时为空</p>
+          <p>列表会在你删除最后一份报告后自动回到这个空状态。</p>
+        </div>
+      {% else %}
+        <div class="empty-card" data-monitor-report-empty-state>
+          <p class="empty-title">信息监控报告暂时为空</p>
+          <p>现在还没有信息监控结果。你可以先保存股票池，再手动运行一轮监测。</p>
+        </div>
+      {% endif %}
+    </section>
+  </section>
+
+  <aside class="stock-sidebar monitor-sidebar">
+    <section class="panel monitor-status-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">运行状态</p>
+          <h3>后台任务</h3>
+        </div>
+      </div>
+      <div
+        class="monitor-status-grid"
+        data-monitor-status-panel
+        data-status-url="{{ url_for('monitor_status') }}"
+        data-monitor-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
+        data-monitor-status="{{ monitor_runtime.status }}"
+        data-monitor-poll-seconds="{{ monitor_status_poll_seconds }}"
+      >
+        <article class="mini-fact">
+          <span class="mini-label">状态</span>
+          <strong data-monitor-status-label>{{ monitor_runtime.status_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">开始时间</span>
+          <strong data-monitor-started-at>{{ monitor_runtime.started_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">结束时间</span>
+          <strong data-monitor-finished-at>{{ monitor_runtime.finished_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">本轮股票池</span>
+          <strong data-monitor-runtime-stocks>{{ monitor_runtime.stock_pool|join(" · ") or "未运行" }}</strong>
+        </article>
+      </div>
+      {% if monitor_runtime.message %}
+        <p class="field-help" data-monitor-message>{{ monitor_runtime.message }}</p>
+      {% else %}
+        <p class="field-help" data-monitor-message hidden></p>
+      {% endif %}
+      {% if monitor_runtime.error %}
+        <p class="field-help" data-monitor-error>{{ monitor_runtime.error }}</p>
+      {% else %}
+        <p class="field-help" data-monitor-error hidden></p>
+      {% endif %}
+    </section>
+
+    <section class="panel monitor-reference-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">参数</p>
+          <h3>运行配置</h3>
+        </div>
+      </div>
+      <div class="access-list">
+        <div class="access-item">
+          <span class="access-label">工作目录</span>
+          <span class="access-path">{{ monitor_config.workdir }}</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">超时</span>
+          <span class="access-path">{{ monitor_config.timeout_seconds }} 秒</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">结果目录</span>
+          <span class="access-path">{{ reports_dir }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel monitor-today-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">当天结果</p>
+          <h3>重跑提醒</h3>
+        </div>
+      </div>
+      {% if monitor_today_reports %}
+        <ul class="briefing-list">
+          {% for report in monitor_today_reports %}
+            <li>{{ report.report_date }} · {{ report.filename }}</li>
+          {% endfor %}
+        </ul>
+        <p class="field-help">如果今天已经有结果，再次运行前会先提醒你，避免同一天重复覆盖。</p>
+      {% else %}
+        <p class="field-help">今天还没有新的信息监控结果。</p>
+      {% endif %}
+    </section>
+  </aside>
+</main>

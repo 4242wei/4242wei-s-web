@@ -802,7 +802,7 @@
               : "";
           if (previousStatus === "running" && nextStatus !== "running") {
             if (latestReportFilename) {
-              window.location.href = `/signals?report=${encodeURIComponent(latestReportFilename)}#signal-reading-panel`;
+              window.location.href = `/monitor?tab=signals&signal_report=${encodeURIComponent(latestReportFilename)}#signal-reading-panel`;
             } else {
               window.location.reload();
             }

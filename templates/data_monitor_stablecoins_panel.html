@@ -1,0 +1,259 @@
+{% macro render_stablecoin_chart(chart) %}
+  <section class="panel stablecoin-chart-panel">
+    <div class="section-header">
+      <div>
+        <p class="eyebrow">图表</p>
+        <h3>{{ chart.title }}</h3>
+        <p class="section-caption">{{ chart.subtitle }}</p>
+      </div>
+    </div>
+
+    <div class="stablecoin-chart-shell" data-stablecoin-chart data-chart-title="{{ chart.title }}" data-chart-key="{{ chart.chart_key }}" data-chart-visible-limit="15">
+      <div class="stablecoin-chart-viewport" data-chart-viewport>
+        <svg
+          class="stablecoin-chart-svg"
+          viewBox="0 0 880 468"
+          role="img"
+          aria-label="{{ chart.title }}"
+          preserveAspectRatio="xMidYMid meet"
+        ></svg>
+      </div>
+      <div class="stablecoin-chart-scrollbar" data-chart-scrollbar hidden aria-label="{{ chart.title }} 横向滑动条">
+        <div class="stablecoin-chart-scrollbar-inner" data-chart-scrollbar-inner></div>
+      </div>
+      <p class="field-help stablecoin-chart-filter-note" data-chart-filter-note>点击上方币种，单独查看它的月度趋势。</p>
+      <script type="application/json" data-stablecoin-chart-seed>{{ chart|tojson }}</script>
+    </div>
+  </section>
+{% endmacro %}
+
+<main class="stock-layout data-monitor-layout">
+  <section class="stock-main data-monitor-main">
+    <section class="panel stablecoin-overview-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">总览</p>
+          <h3>稳定币结构与增量</h3>
+          <p class="section-caption">{{ stablecoin_notes }}</p>
+        </div>
+      </div>
+
+      <div class="stablecoin-overview-strip">
+        <div class="stablecoin-overview-grid">
+          <article class="module-card stablecoin-summary-card">
+            <p class="eyebrow">{{ stablecoin_market_cap_window_label }}</p>
+            <h4>总市值变化</h4>
+            <p class="stablecoin-summary-value">{{ stablecoin_market_cap_change_label }}</p>
+            <p class="section-caption">对比最早和最新月份的 6 种稳定币月均市值总和。</p>
+            <p class="field-help">覆盖 {{ stablecoin_market_cap_coverage_label }}</p>
+          </article>
+          <article class="module-card stablecoin-summary-card">
+            <p class="eyebrow">{{ stablecoin_volume_window_label }}</p>
+            <h4>交易量变化</h4>
+            <p class="stablecoin-summary-value">{{ stablecoin_volume_change_label }}</p>
+            <p class="section-caption">按月累计日度成交量，观察链上与交易所活动是否回暖。</p>
+            <p class="field-help">覆盖 {{ stablecoin_volume_coverage_label }}</p>
+          </article>
+          <article class="module-card stablecoin-summary-card">
+            <p class="eyebrow">月度序列</p>
+            <h4>最新月份</h4>
+            <p class="stablecoin-summary-value">{{ stablecoin_monthly_latest_label }}</p>
+            <p class="section-caption">{{ stablecoin_monthly_latest_caption }}</p>
+            <p class="field-help">最新纳入日期 {{ stablecoin_monthly_latest_point_label }}</p>
+          </article>
+        </div>
+
+        <article class="module-card stablecoin-summary-card stablecoin-summary-card-spot">
+          <p class="eyebrow">{{ stablecoin_realtime_mode_label }}</p>
+          <h4>存量快照</h4>
+          <p class="stablecoin-summary-value">{{ stablecoin_realtime_market_cap_label }}</p>
+          <div class="stablecoin-summary-detail-list" role="list" aria-label="稳定币实时快照">
+            <div class="stablecoin-summary-detail" role="listitem">
+              <span>最新 24h 成交量</span>
+              <strong>{{ stablecoin_realtime_volume_label }}</strong>
+            </div>
+            <div class="stablecoin-summary-detail" role="listitem">
+              <span>较月均</span>
+              <strong>{{ stablecoin_realtime_vs_month_label }}</strong>
+            </div>
+            <div class="stablecoin-summary-detail" role="listitem">
+              <span>24h 变化</span>
+              <strong>{{ stablecoin_realtime_change_label }}</strong>
+            </div>
+          </div>
+          <p class="section-caption">{{ stablecoin_realtime_caption }}</p>
+          <p class="field-help">更新时间 {{ stablecoin_realtime_point_label }}</p>
+        </article>
+      </div>
+
+      <div class="stablecoin-legend" aria-label="稳定币图例">
+        {% for coin in stablecoin_coins %}
+          <button
+            class="detail-chip detail-chip-button stablecoin-legend-chip"
+            type="button"
+            data-stablecoin-legend="{{ coin.symbol }}"
+            aria-pressed="false"
+          >
+            <span class="stablecoin-legend-swatch" style="--stablecoin-color: {{ coin.color }}"></span>
+            <strong>{{ coin.symbol }}</strong>
+            <span>{{ coin.share_label }}</span>
+          </button>
+        {% endfor %}
+      </div>
+    </section>
+
+    {{ render_stablecoin_chart(stablecoin_market_cap_chart) }}
+
+    {{ render_stablecoin_chart(stablecoin_volume_chart) }}
+
+    <section class="panel stablecoin-table-panel">
+      <details class="stablecoin-details">
+        <summary class="stablecoin-details-summary">
+          <div>
+            <p class="eyebrow">月度明细</p>
+            <h3>每个月重点看什么</h3>
+            <p class="section-caption">默认折叠。展开后会看到总量以及前三大稳定币占比，方便快速扫月份。</p>
+          </div>
+          <span class="stablecoin-details-toggle" aria-hidden="true">
+            <span class="stablecoin-details-toggle-open">展开明细</span>
+            <span class="stablecoin-details-toggle-close">收起明细</span>
+          </span>
+        </summary>
+
+        <div class="stablecoin-details-body">
+          <div class="stablecoin-table-shell">
+            <table class="stablecoin-table">
+              <thead>
+                <tr>
+                  <th>月份</th>
+                  <th>总市值</th>
+                  <th>总交易量</th>
+                  <th>前三构成</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for month in stablecoin_monthly_rows %}
+                  <tr>
+                    <td>{{ month.label }}</td>
+                    <td>{{ month.market_cap_total_label }}</td>
+                    <td>{{ month.volume_total_label }}</td>
+                    <td>
+                      <div class="stablecoin-leader-row">
+                        {% for coin in month.leaders %}
+                          <span class="detail-chip stablecoin-inline-chip">
+                            <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ coin.color }}"></span>
+                            <strong>{{ coin.symbol }}</strong>
+                            <span>{{ coin.share_label }}</span>
+                          </span>
+                        {% endfor %}
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+  </section>
+
+  <aside class="stock-sidebar data-monitor-sidebar">
+    <section
+      class="panel monitor-status-panel"
+      data-stablecoin-status-panel
+      data-status-url="{{ url_for('stablecoin_monitor_status') }}"
+      data-stablecoin-running="{{ 'true' if stablecoin_runtime.is_running else 'false' }}"
+      data-stablecoin-status="{{ stablecoin_runtime.status }}"
+      data-stablecoin-poll-seconds="{{ stablecoin_status_poll_seconds }}"
+    >
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">刷新状态</p>
+          <h3>后台更新</h3>
+        </div>
+      </div>
+      <div class="monitor-status-grid">
+        <article class="mini-fact">
+          <span class="mini-label">状态</span>
+          <strong data-stablecoin-status-label>{{ stablecoin_runtime.status_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">开始时间</span>
+          <strong data-stablecoin-started-at>{{ stablecoin_runtime.started_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">结束时间</span>
+          <strong data-stablecoin-finished-at>{{ stablecoin_runtime.finished_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">缓存时间</span>
+          <strong data-stablecoin-last-updated-side>{{ stablecoin_last_updated_label }}</strong>
+        </article>
+      </div>
+      {% if stablecoin_runtime.message %}
+        <p class="field-help" data-stablecoin-message>{{ stablecoin_runtime.message }}</p>
+      {% else %}
+        <p class="field-help" data-stablecoin-message hidden></p>
+      {% endif %}
+      {% if stablecoin_runtime.error %}
+        <p class="field-help" data-stablecoin-error>{{ stablecoin_runtime.error }}</p>
+      {% else %}
+        <p class="field-help" data-stablecoin-error hidden></p>
+      {% endif %}
+    </section>
+
+    <section class="panel monitor-reference-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">数据源</p>
+          <h3>抓取配置</h3>
+        </div>
+      </div>
+      <div class="access-list">
+        <div class="access-item">
+          <span class="access-label">来源</span>
+          <span class="access-path"><a class="text-link" href="{{ stablecoin_source_url }}" target="_blank" rel="noreferrer">{{ stablecoin_source_name }}</a></span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">接口</span>
+          <span class="access-path">{{ stablecoin_source_endpoint }}</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">区间</span>
+          <span class="access-path">{{ stablecoin_coverage_label }}</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">自动刷新</span>
+          <span class="access-path">{{ stablecoin_auto_refresh_label }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel stablecoin-coin-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">最新快照</p>
+          <h3>币种分布</h3>
+        </div>
+      </div>
+      <div class="stablecoin-coin-stack">
+        {% for coin in stablecoin_coins %}
+          <article class="module-card stablecoin-coin-card">
+            <div class="card-inline-meta">
+              <span class="meta-chip">
+                <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ coin.color }}"></span>
+                {{ coin.symbol }}
+              </span>
+              <span class="meta-chip">{{ coin.share_label }}</span>
+            </div>
+            <h4>{{ coin.label }}</h4>
+            <p class="stablecoin-coin-value">{{ coin.latest_market_cap_label }}</p>
+            <p class="section-caption">最新市值 | 12 个月变化 {{ coin.market_cap_change_label }}</p>
+            <p class="field-help">最新 24h 成交量 {{ coin.latest_volume_label }} | 更新时间 {{ coin.latest_point_label }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  </aside>
+</main>

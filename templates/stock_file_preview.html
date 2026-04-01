@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ file_entry.original_name }} - 文件预览</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260331-filelinks1') }}">
 </head>
 <body>
   <div class="page-shell">
@@ -22,11 +22,15 @@
 
       <aside class="stock-detail-actions">
         <a class="button button-primary" href="{{ url_for('stock_detail', symbol=stock.symbol) }}">返回 {{ stock.symbol }}</a>
-        <a class="button button-secondary" href="{{ url_for('download_stock_file', symbol=stock.symbol, file_id=file_entry.id) }}">下载文件</a>
+        <a class="button button-secondary" href="{{ file_entry.download_url }}">下载文件</a>
         <div class="detail-stat-grid">
           <article class="mini-fact">
             <span class="mini-label">股票</span>
             <strong>{{ stock.symbol }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">关联股票</span>
+            <strong>{{ file_entry.linked_symbols_label or stock.symbol }}</strong>
           </article>
           <article class="mini-fact">
             <span class="mini-label">上传时间</span>
@@ -70,4 +74,3 @@
   </div>
 </body>
 </html>
-

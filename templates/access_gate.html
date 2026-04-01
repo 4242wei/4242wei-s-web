@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>访问验证</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260331-access-gate-snow-fix">
+</head>
+<body class="access-page" style="--access-gate-bg: url('{{ url_for('static', filename='access-gate-bg.jpg') }}');">
+  {% with flashes = get_flashed_messages(with_categories=true) %}
+    {% if flashes %}
+      <div class="flash-stack" role="status" aria-live="polite">
+        {% for category, message in flashes %}
+          <div class="flash-message flash-{{ category }}" data-flash-message data-flash-kind="{{ category }}">
+            <div class="flash-body">{{ message }}</div>
+            <button class="flash-close" type="button" aria-label="关闭提示" data-flash-close>X</button>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <main class="access-shell">
+    <section class="panel access-panel">
+      <div class="access-copy">
+        <h1>输入访问密码</h1>
+      </div>
+
+      <form class="stack-form access-form" action="{{ url_for('access_password_submit') }}" method="post">
+        <input type="hidden" name="next_url" value="{{ next_url }}">
+
+        <label class="form-field">
+          <span class="field-label">密码</span>
+          <input name="password" type="password" placeholder="请输入访问密码" autocomplete="current-password" autofocus required>
+        </label>
+
+        <div class="card-link-row access-actions">
+          <button class="button button-primary" type="submit">进入网页</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='flash-messages.js') }}?v=20260330-access-gate"></script>
+</body>
+</html>

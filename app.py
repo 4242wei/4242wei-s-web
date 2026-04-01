@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import hmac
 import hashlib
 import io
 import json
@@ -242,7 +243,7 @@ TRASH_KIND_META = {
     "transcript": {"label": "会议转录", "description": "恢复后仍可继续查看与同步"},
     "group": {"label": "股票分组", "description": "恢复后会带回原有股票列表"},
     "schedule_item": {"label": "日程条目", "description": "恢复后会回到日程区，保留日期、备忘和关联公司"},
-    "monitor_report": {"label": "Monitor 报告", "description": "恢复后会重新回到报告归档和 Monitor 页面"},
+    "monitor_report": {"label": "Monitor 报告", "description": "恢复后会重新回到 Monitor 报告区"},
 }
 SCHEDULE_KIND_META = {
     "meeting": {"label": "专家会", "tone": "meeting"},
@@ -529,6 +530,7 @@ REPORTS_DIR = resolve_app_path(
     DEFAULT_EXTERNAL_REPORTS_DIR if DEFAULT_EXTERNAL_REPORTS_DIR.exists() else FALLBACK_REPORTS_DIR,
 )
 STOCK_STORE_PATH = resolve_app_path("STOCKS_DATA_PATH", BASE_DIR / "data" / "stocks.json")
+STOCK_SETUPS_DIR = resolve_app_path("STOCK_SETUPS_DIR", BASE_DIR / "data" / "stock_setups")
 STOCK_UPLOADS_DIR = resolve_app_path("STOCKS_UPLOADS_DIR", BASE_DIR / "uploads" / "stocks")
 TRANSCRIPT_UPLOADS_DIR = resolve_app_path("TRANSCRIPT_UPLOADS_DIR", BASE_DIR / "uploads" / "transcripts")
 AI_CHAT_STORE_PATH = resolve_app_path("AI_CHAT_DATA_PATH", BASE_DIR / "data" / "ai_chats.json")
@@ -544,9 +546,13 @@ MINDMAP_POLL_INTERVAL_SECONDS = int(os.getenv("MINDMAP_POLL_INTERVAL_SECONDS", "
 MINDMAP_STALE_JOB_SECONDS = int(os.getenv("MINDMAP_STALE_JOB_SECONDS", "120"))
 TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS", "12"))
 AI_PROMPT_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("AI_PROMPT_KNOWLEDGE_CHAR_LIMIT", "40000"))
-MINDMAP_PIPELINE_VERSION = "20260330-research-v3"
-MINDMAP_PROMPT_VERSION = "20260330-two-step-v2"
-MINDMAP_SCHEMA_VERSION = "20260324-schema-v2"
+MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT", "22000"))
+MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT", "32000"))
+MINDMAP_REPAIR_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_REPAIR_KNOWLEDGE_CHAR_LIMIT", "22000"))
+MINDMAP_MAX_STEP_TIMEOUT_SECONDS = int(os.getenv("MINDMAP_MAX_STEP_TIMEOUT_SECONDS", "2400"))
+MINDMAP_PIPELINE_VERSION = "20260331-research-v4"
+MINDMAP_PROMPT_VERSION = "20260331-compare-verify-v3"
+MINDMAP_SCHEMA_VERSION = "20260331-schema-v3"
 MINDMAP_SCOPE_DRAFT_SESSION_KEY = "mindmap_scope_draft"
 MINDMAP_MAX_CURATED_SOURCES = 28
 MINDMAP_RECENT_WINDOW_DAYS = 45
@@ -563,6 +569,11 @@ MINDMAP_STUDIO_LOCK = threading.RLock()
 STOCK_STORE_LOCK = threading.RLock()
 STOCK_STORE_CACHE_LOCK = threading.RLock()
 STOCK_STORE_CACHE: dict[str, Any] = {"signature": None, "data": None}
+STABLECOIN_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
+STABLECOIN_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
+STABLECOIN_MONITOR_SCHEDULER_STARTED = False
+COINGECKO_REQUEST_LOCK = threading.Lock()
+COINGECKO_LAST_REQUEST_AT = 0.0
 MINDMAP_KIND_PRIORITY = {
     "report": 1.1,
     "earnings_call": 1.05,
@@ -740,14 +751,50 @@ SIGNAL_MONITOR_DEFAULT_SOURCES = [
         "enabled": True,
     }
 ]
+DATA_MONITOR_DATA_DIR = BASE_DIR / "data" / "data_monitor"
+STABLECOIN_MONITOR_CACHE_PATH = DATA_MONITOR_DATA_DIR / "stablecoins.json"
+STABLECOIN_MONITOR_RUNTIME_PATH = DATA_MONITOR_DATA_DIR / "stablecoins_runtime.json"
+STABLECOIN_MONITOR_LOCK = threading.RLock()
+STABLECOIN_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
+STABLECOIN_MONITOR_REFRESH_INTERVAL_HOURS = int(os.getenv("STABLECOIN_MONITOR_REFRESH_INTERVAL_HOURS", "12"))
+STABLECOIN_MONITOR_SCHEDULER_SLEEP_SECONDS = int(os.getenv("STABLECOIN_MONITOR_SCHEDULER_SLEEP_SECONDS", "900"))
+STABLECOIN_MONITOR_DAY_RANGE = 365
+STABLECOIN_MONITOR_START_MONTH = str(os.getenv("STABLECOIN_MONITOR_START_MONTH", "2024-01")).strip() or "2024-01"
+COINGECKO_MIN_REQUEST_INTERVAL_SECONDS = float(os.getenv("COINGECKO_MIN_REQUEST_INTERVAL_SECONDS", "8"))
+COINGECKO_API_BASE_URL = "https://api.coingecko.com/api/v3"
+DEFILLAMA_STABLECOINS_API_BASE_URL = "https://stablecoins.llama.fi"
+COINGECKO_REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+}
+STABLECOIN_MONITOR_ASSETS = [
+    {"id": "tether", "llama_id": "1", "symbol": "USDT", "label": "Tether", "color": "var(--stablecoin-series-1)"},
+    {"id": "usd-coin", "llama_id": "2", "symbol": "USDC", "label": "USD Coin", "color": "var(--stablecoin-series-2)"},
+    {"id": "dai", "llama_id": "5", "symbol": "DAI", "label": "DAI", "color": "var(--stablecoin-series-3)"},
+    {"id": "ethena-usde", "llama_id": "146", "symbol": "USDe", "label": "Ethena USDe", "color": "var(--stablecoin-series-4)"},
+    {"id": "first-digital-usd", "llama_id": "119", "symbol": "FDUSD", "label": "First Digital USD", "color": "var(--stablecoin-series-5)"},
+    {"id": "paypal-usd", "llama_id": "120", "symbol": "PYUSD", "label": "PayPal USD", "color": "var(--stablecoin-series-6)"},
+]
 BACKUP_DIR = BASE_DIR / "backups"
 BACKUP_KEEP_COUNT = int(os.getenv("BACKUP_KEEP_COUNT", "20"))
 BACKUP_EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", "backups"}
 BACKUP_EXCLUDED_FILE_NAMES = {".env", ".env.local"}
 BACKUP_EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+WEB_ACCESS_PASSWORD = str(os.getenv("WEB_ACCESS_PASSWORD", "4242wei")).strip()
+WEB_ACCESS_SESSION_KEY = "web_access_signature"
+WEB_ACCESS_REMEMBER_DAYS = 30
+WEB_ACCESS_PASSWORD_SIGNATURE = (
+    hashlib.sha256(WEB_ACCESS_PASSWORD.encode("utf-8")).hexdigest() if WEB_ACCESS_PASSWORD else ""
+)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "stock-daily-analysis-local-secret")
+app.permanent_session_lifetime = timedelta(days=WEB_ACCESS_REMEMBER_DAYS)
+app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
 
 def now_iso() -> str:
@@ -980,6 +1027,35 @@ def format_iso_timestamp(value: str | None) -> str:
         return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return value
+
+
+def format_compact_currency(value: Any, *, decimals: int = 1) -> str:
+    try:
+        numeric_value = float(value or 0.0)
+    except (TypeError, ValueError):
+        numeric_value = 0.0
+
+    sign = "-" if numeric_value < 0 else ""
+    amount = abs(numeric_value)
+    units = (
+        (1_000_000_000_000, "T", 2),
+        (1_000_000_000, "B", decimals),
+        (1_000_000, "M", decimals),
+        (1_000, "K", decimals),
+    )
+    for threshold, suffix, digits in units:
+        if amount >= threshold:
+            return f"{sign}${amount / threshold:.{digits}f}{suffix}"
+
+    return f"{sign}${amount:,.0f}"
+
+
+def format_signed_percent(value: Any, *, decimals: int = 1) -> str:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{numeric_value:+.{decimals}f}%"
 
 
 def coerce_sort_timestamp(value: Any) -> float:
@@ -1252,6 +1328,63 @@ def read_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def stock_setup_path(symbol: str) -> Path:
+    normalized_symbol = str(symbol or "").strip().upper()
+    return STOCK_SETUPS_DIR / f"{normalized_symbol}.md"
+
+
+def build_stock_setup_view(symbol: str) -> dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    title_fallback = f"{normalized_symbol} Set up"
+    placeholder_copy = "这只股票的公开信息 set up 还没放进来。后面可以把 thesis、预期差、验证点和 kill criteria 都沉淀在这里。"
+    template_id = f"stock-setup-reader-{normalized_symbol.lower() or 'default'}"
+    path = stock_setup_path(normalized_symbol)
+
+    if not path.exists():
+        return {
+            "has_setup": False,
+            "title": title_fallback,
+            "summary": placeholder_copy,
+            "html": plain_text_to_html(placeholder_copy),
+            "updated_at": "",
+            "template_id": template_id,
+        }
+
+    content = read_text_file(path).strip()
+    if not content:
+        return {
+            "has_setup": False,
+            "title": title_fallback,
+            "summary": placeholder_copy,
+            "html": plain_text_to_html(placeholder_copy),
+            "updated_at": "",
+            "template_id": template_id,
+        }
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        stat_result = None
+
+    html = markdown.markdown(
+        content,
+        extensions=MARKDOWN_EXTENSIONS,
+        output_format="html5",
+    )
+    summary = extract_summary(content)
+    if not summary or summary == "在报告前几段补一小段摘要，这里就会自动显示预览。":
+        summary = "先看 thesis、预期差、验证点，再决定要不要继续往下深挖。"
+
+    return {
+        "has_setup": True,
+        "title": extract_title(content, title_fallback),
+        "summary": summary,
+        "html": html,
+        "updated_at": format_timestamp(stat_result.st_mtime) if stat_result else "",
+        "template_id": template_id,
+    }
+
+
 def is_text_previewable(filename: str) -> bool:
     return Path(filename).suffix.lower() in TEXT_PREVIEW_SUFFIXES
 
@@ -1446,6 +1579,56 @@ def shift_month(year: int, month: int, offset: int) -> tuple[int, int]:
     return month_index // 12, (month_index % 12) + 1
 
 
+def build_recent_month_windows(
+    month_count: int,
+    *,
+    end_date: datetime | None = None,
+) -> list[dict[str, str]]:
+    base = end_date or datetime.now()
+    windows: list[dict[str, str]] = []
+    for offset in range(month_count - 1, -1, -1):
+        year, month = shift_month(base.year, base.month, -offset)
+        month_key = f"{year:04d}-{month:02d}"
+        windows.append(
+            {
+                "month": month_key,
+                "label": month_key,
+                "short_label": f"{str(year)[2:]}-{month:02d}",
+                "month_name": f"{calendar.month_abbr[month]} {str(year)[2:]}",
+            }
+        )
+    return windows
+
+
+def build_month_windows_between(
+    start_month: str,
+    end_month: str | None = None,
+) -> list[dict[str, str]]:
+    start_date = parse_month_value(start_month)
+    end_date = parse_month_value(end_month, fallback=start_date) if end_month else datetime.now().replace(day=1)
+    start_date = start_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_date = end_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if end_date < start_date:
+        end_date = start_date
+
+    windows: list[dict[str, str]] = []
+    cursor = start_date
+    while cursor <= end_date:
+        month_key = f"{cursor.year:04d}-{cursor.month:02d}"
+        windows.append(
+            {
+                "month": month_key,
+                "label": month_key,
+                "short_label": f"{str(cursor.year)[2:]}-{cursor.month:02d}",
+                "month_name": f"{calendar.month_abbr[cursor.month]} {str(cursor.year)[2:]}",
+            }
+        )
+        next_year, next_month = shift_month(cursor.year, cursor.month, 1)
+        cursor = datetime(next_year, next_month, 1)
+
+    return windows
+
+
 def parse_iso_date_value(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1512,6 +1695,35 @@ def normalize_date_field(value: str | None) -> str:
     raw_value = str(value or "").strip()
     parsed = parse_iso_date_value(raw_value)
     return parsed.date().isoformat() if parsed else ""
+
+
+def infer_date_from_filename(filename: str | None) -> str:
+    stem = Path(str(filename or "")).stem
+    if not stem:
+        return ""
+
+    separator_match = re.search(
+        r"(?<!\d)(?P<year>20\d{2})[-_.\s](?P<month>\d{1,2})[-_.\s](?P<day>\d{1,2})(?!\d)",
+        stem,
+    )
+    if separator_match:
+        try:
+            return datetime(
+                int(separator_match.group("year")),
+                int(separator_match.group("month")),
+                int(separator_match.group("day")),
+            ).date().isoformat()
+        except ValueError:
+            pass
+
+    compact_match = re.search(r"(?<!\d)(?P<date>20\d{6})(?!\d)", stem)
+    if compact_match:
+        try:
+            return datetime.strptime(compact_match.group("date"), "%Y%m%d").date().isoformat()
+        except ValueError:
+            pass
+
+    return ""
 
 
 def normalize_choice_list(raw_values: Any, allowed_values: set[str]) -> list[str]:
@@ -2909,6 +3121,116 @@ def transcript_matches_symbol(entry: dict[str, Any], symbol: str | None) -> bool
     return normalized_symbol in transcript_linked_symbols(entry)
 
 
+def stock_file_storage_symbol(file_entry: dict[str, Any], fallback_symbol: str | None = None) -> str:
+    return normalize_stock_symbol(str(file_entry.get("storage_symbol") or "")) or (
+        normalize_stock_symbol(fallback_symbol or "") or ""
+    )
+
+
+def stock_file_linked_symbols(file_entry: dict[str, Any], fallback_symbol: str | None = None) -> list[str]:
+    storage_symbol = stock_file_storage_symbol(file_entry, fallback_symbol)
+    return ordered_unique(
+        ([storage_symbol] if storage_symbol else []) + normalize_stock_symbol_list(file_entry.get("linked_symbols", []))
+    )
+
+
+def build_stock_file_record(owner_symbol: str, file_entry: dict[str, Any]) -> dict[str, Any]:
+    storage_symbol = stock_file_storage_symbol(file_entry, owner_symbol) or owner_symbol
+    linked_symbols = stock_file_linked_symbols(file_entry, storage_symbol)
+    return {
+        "owner_symbol": owner_symbol,
+        "storage_symbol": storage_symbol,
+        "linked_symbols": linked_symbols,
+        "linked_symbols_label": "；".join(linked_symbols),
+        "file_entry": file_entry,
+    }
+
+
+def iter_stock_file_records(
+    store: dict[str, Any],
+    *,
+    symbol_filter: str | None = None,
+):
+    normalized_symbol = normalize_stock_symbol(symbol_filter)
+    seen_keys: set[str] = set()
+    raw_stocks = store.get("stocks", {})
+    stock_symbols = sorted(raw_stocks.keys()) if isinstance(raw_stocks, dict) else []
+
+    for owner_symbol in stock_symbols:
+        entry = ensure_stock_entry(store, owner_symbol)
+        for file_entry in entry["files"]:
+            record = build_stock_file_record(owner_symbol, file_entry)
+            if normalized_symbol and normalized_symbol not in record["linked_symbols"]:
+                continue
+
+            dedupe_key = str(file_entry.get("id") or "").strip() or (
+                f"{record['storage_symbol']}::{file_entry.get('stored_name') or ''}"
+            )
+            if dedupe_key in seen_keys:
+                continue
+
+            seen_keys.add(dedupe_key)
+            yield record
+
+
+def get_stock_file_record(store: dict[str, Any], symbol: str, file_id: str) -> dict[str, Any]:
+    target_id = str(file_id or "").strip()
+    normalized_symbol = normalize_stock_symbol(symbol)
+    for record in iter_stock_file_records(store, symbol_filter=normalized_symbol or None):
+        if str(record["file_entry"].get("id") or "").strip() == target_id:
+            return record
+    abort(404)
+
+
+def get_stock_file_linked_note(store: dict[str, Any], record: dict[str, Any]) -> dict[str, Any] | None:
+    linked_note_id = str(record["file_entry"].get("linked_note_id") or "").strip()
+    if not linked_note_id:
+        return None
+
+    storage_entry = ensure_stock_entry(store, record["storage_symbol"])
+    return next((item for item in storage_entry["notes"] if item["id"] == linked_note_id), None)
+
+
+def build_stock_file_card(
+    store: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    access_symbol: str,
+) -> dict[str, Any]:
+    file_entry = record["file_entry"]
+    original_name = str(file_entry.get("original_name") or "")
+    resolved_symbol = normalize_stock_symbol(access_symbol) or record["storage_symbol"]
+    linked_symbols = record["linked_symbols"]
+
+    return {
+        **file_entry,
+        "storage_symbol": record["storage_symbol"],
+        "linked_symbols": linked_symbols,
+        "linked_symbols_label": record["linked_symbols_label"],
+        "linked_symbol_count": len(linked_symbols),
+        "linked_symbols_form_value": "; ".join(linked_symbols),
+        "display_uploaded_at": file_display_time(file_entry),
+        "is_text_previewable": is_text_previewable(original_name),
+        "is_image_previewable": is_image_previewable(original_name),
+        "is_previewable": is_file_previewable(original_name),
+        "preview_label": "查看图片" if is_image_previewable(original_name) else "在线预览",
+        "has_linked_note": bool(file_entry.get("linked_note_id")),
+        "summary_excerpt": summarize_text_block(file_entry.get("description") or original_name),
+        "tags": normalize_tag_list(file_entry.get("tags", [])),
+        "context_symbol": resolved_symbol,
+        "is_owner_context": resolved_symbol == record["storage_symbol"],
+        "origin_symbol": record["storage_symbol"],
+        "download_url": url_for("download_stock_file", symbol=resolved_symbol, file_id=file_entry["id"]),
+        "preview_url": url_for("preview_stock_file_fragment", symbol=resolved_symbol, file_id=file_entry["id"]),
+        "update_links_url": url_for("update_stock_file_links", symbol=resolved_symbol, file_id=file_entry["id"]),
+        "delete_url": url_for("delete_stock_file", symbol=resolved_symbol, file_id=file_entry["id"]),
+    }
+
+
+def stock_file_count_for_symbol(store: dict[str, Any], symbol: str) -> int:
+    return sum(1 for _ in iter_stock_file_records(store, symbol_filter=symbol))
+
+
 def touch_stock_symbols(store: dict[str, Any], symbols: list[str]) -> None:
     for symbol in normalize_stock_symbol_list(symbols):
         touch_stock(store, symbol)
@@ -3303,7 +3625,11 @@ def build_monitor_suggestions(stock_store: dict[str, Any], config: dict[str, Any
     return suggestions
 
 
-def build_monitor_report_cards(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_monitor_report_cards(
+    reports: list[dict[str, Any]],
+    *,
+    active_filename: str | None = None,
+) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     today_compact = datetime.now().strftime("%Y%m%d")
     for report in reports:
@@ -3312,17 +3638,34 @@ def build_monitor_report_cards(reports: list[dict[str, Any]]) -> list[dict[str, 
             {
                 **report,
                 "is_today": filename.startswith(today_compact),
+                "is_active": bool(active_filename and filename == active_filename),
             }
         )
     return cards
 
 
-def build_monitor_page_context(stock_store: dict[str, Any]) -> dict[str, Any]:
+def build_monitor_page_context(
+    stock_store: dict[str, Any],
+    *,
+    all_reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     config = load_monitor_config()
     runtime = sync_monitor_runtime()
-    reports = collect_monitor_reports()
-    today_reports = collect_today_monitor_reports(reports)
-    latest_report = reports[0] if reports else None
+    all_reports = all_reports if all_reports is not None else collect_reports()
+    monitor_reports = [report for report in all_reports if is_monitor_report_entry(report)]
+    selected_name = str(request.args.get("report") or "").strip()
+    available_names = {str(report.get("filename") or "") for report in all_reports}
+    default_name = ""
+    if selected_name and selected_name in available_names:
+        default_name = selected_name
+    elif monitor_reports:
+        default_name = str(monitor_reports[0].get("filename") or "")
+    elif all_reports:
+        default_name = str(all_reports[0].get("filename") or "")
+
+    active_report = load_report(default_name) if default_name else None
+    today_reports = collect_today_monitor_reports(monitor_reports)
+    latest_report = monitor_reports[0] if monitor_reports else None
     return {
         "monitor_config": config,
         "monitor_runtime": {
@@ -3333,9 +3676,11 @@ def build_monitor_page_context(stock_store: dict[str, Any]) -> dict[str, Any]:
             "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未运行",
             "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未完成",
         },
-        "monitor_reports": build_monitor_report_cards(reports),
+        "monitor_reports": build_monitor_report_cards(monitor_reports, active_filename=default_name),
         "monitor_today_reports": today_reports,
         "monitor_latest_report": latest_report,
+        "monitor_active_report": active_report,
+        "monitor_active_report_is_monitor": bool(active_report and is_monitor_report_entry(active_report)),
         "monitor_stock_suggestions": build_monitor_suggestions(stock_store, config),
         "monitor_status_poll_seconds": MONITOR_STATUS_POLL_INTERVAL_SECONDS,
     }
@@ -3910,7 +4255,12 @@ def start_signal_monitor_process(sources: list[dict[str, Any]]) -> dict[str, Any
         return runtime
 
 
-def build_signal_report_cards(reports: list[dict[str, Any]], state: dict[str, Any]) -> list[dict[str, Any]]:
+def build_signal_report_cards(
+    reports: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    active_filename: str | None = None,
+) -> list[dict[str, Any]]:
     source_state_map = state.get("sources", {}) if isinstance(state.get("sources"), dict) else {}
     history_by_filename = {
         item.get("report_filename"): item
@@ -3925,6 +4275,7 @@ def build_signal_report_cards(reports: list[dict[str, Any]], state: dict[str, An
             {
                 **report,
                 "is_today": str(report.get("filename") or "").startswith(today_compact),
+                "is_active": bool(active_filename and report["filename"] == active_filename),
                 "source_ids": history_item.get("source_ids", []),
                 "source_names": [
                     str(source_state_map.get(source_id, {}).get("display_name") or source_id)
@@ -3980,13 +4331,24 @@ def build_signal_source_groups(cards: list[dict[str, Any]]) -> list[dict[str, An
     return groups
 
 
-def build_signal_monitor_page_context() -> dict[str, Any]:
+def build_signal_monitor_page_context(
+    *,
+    selected_name: str | None = None,
+    reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     config = load_signal_monitor_config()
     state = load_signal_monitor_state()
     runtime = sync_signal_monitor_runtime()
-    reports = collect_signal_reports()
+    reports = reports if reports is not None else collect_signal_reports()
     today_reports = collect_today_signal_reports(reports)
     latest_report = reports[0] if reports else None
+    available_names = {str(report.get("filename") or "") for report in reports}
+    active_name = ""
+    if selected_name and selected_name in available_names:
+        active_name = selected_name
+    elif latest_report:
+        active_name = str(latest_report.get("filename") or "")
+    active_report = get_signal_report(active_name) if active_name else None
     source_cards = build_signal_source_cards(config, state)
     return {
         "signal_monitor_config": config,
@@ -3999,12 +4361,1126 @@ def build_signal_monitor_page_context() -> dict[str, Any]:
             "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未运行",
             "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未完成",
         },
-        "signal_reports": build_signal_report_cards(reports, state),
+        "signal_reports": build_signal_report_cards(reports, state, active_filename=active_name),
         "signal_today_reports": today_reports,
         "signal_latest_report": latest_report,
+        "active_signal_report": active_report,
         "signal_sources": source_cards,
         "signal_source_groups": build_signal_source_groups(source_cards),
         "signal_status_poll_seconds": SIGNAL_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
+    }
+
+
+def build_stablecoin_month_windows(*, end_month: str | None = None) -> list[dict[str, str]]:
+    return build_month_windows_between(STABLECOIN_MONITOR_START_MONTH, end_month)
+
+
+def resolve_stablecoin_cache_end_month(source: dict[str, Any]) -> str | None:
+    candidates: list[str] = []
+    coverage_end = str(source.get("coverage_end") or "").strip()
+    if coverage_end:
+        candidates.append(coverage_end)
+
+    latest_month_snapshot = source.get("latest_month_snapshot") if isinstance(source.get("latest_month_snapshot"), dict) else {}
+    latest_snapshot = source.get("latest_snapshot") if isinstance(source.get("latest_snapshot"), dict) else {}
+    candidates.extend(
+        [
+            str(latest_month_snapshot.get("month") or "").strip(),
+            str(latest_snapshot.get("month") or "").strip(),
+        ]
+    )
+
+    for candidate in candidates:
+        if re.fullmatch(r"\d{4}-\d{2}", candidate):
+            return candidate
+    return None
+
+
+def format_stablecoin_point_label(value: Any, *, fallback: str = "n/a") -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return fallback
+
+    parsed = parse_signal_monitor_datetime(raw_value)
+    if parsed is not None:
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    return raw_value
+
+
+def normalize_coingecko_snapshot_timestamp(value: Any) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+
+    parsed = parse_signal_monitor_datetime(raw_value)
+    if parsed is not None:
+        return parsed.replace(microsecond=0).isoformat()
+    return raw_value
+
+
+def default_stablecoin_market_cache(*, end_month: str | None = None) -> dict[str, Any]:
+    month_windows = build_stablecoin_month_windows(end_month=end_month)
+    coins = [
+        {
+            **asset,
+            "latest_market_cap": 0.0,
+            "latest_volume": 0.0,
+            "latest_point_at": "",
+            "history_latest_point_at": "",
+        }
+        for asset in STABLECOIN_MONITOR_ASSETS
+    ]
+    monthly_series = []
+    for window in month_windows:
+        monthly_series.append(
+            {
+                **window,
+                "market_cap_total": 0.0,
+                "volume_total": 0.0,
+                "volume_available": False,
+                "coins": [
+                    {
+                        "symbol": asset["symbol"],
+                        "label": asset["label"],
+                        "color": asset["color"],
+                        "market_cap": 0.0,
+                        "volume": 0.0,
+                    }
+                    for asset in STABLECOIN_MONITOR_ASSETS
+                ],
+            }
+        )
+    return {
+        "updated_at": "",
+        "coverage_start": month_windows[0]["label"] if month_windows else "",
+        "coverage_end": month_windows[-1]["label"] if month_windows else "",
+        "granularity": "monthly",
+        "period_months": len(month_windows),
+        "source": {
+            "name": "DeFiLlama + CoinGecko",
+            "url": "https://stablecoins.llama.fi/stablecoins",
+            "endpoint": (
+                "DeFiLlama /stablecoins + /stablecoin/{id}"
+                " + CoinGecko /api/v3/coins/markets?vs_currency=usd&ids={ids}"
+                " + /api/v3/coins/{id}/market_chart?vs_currency=usd&days=365&interval=daily"
+            ),
+        },
+        "coins": coins,
+        "monthly_series": monthly_series,
+        "latest_snapshot": {
+            "month": month_windows[-1]["label"] if month_windows else "",
+            "total_market_cap": 0.0,
+            "total_volume": 0.0,
+            "latest_point_at": "",
+            "market_cap_change_24h": 0.0,
+            "market_cap_change_24h_pct": 0.0,
+            "is_realtime": False,
+        },
+        "latest_month_snapshot": {
+            "month": month_windows[-1]["label"] if month_windows else "",
+            "total_market_cap": 0.0,
+            "total_volume": 0.0,
+            "latest_point_at": "",
+        },
+        "notes": (
+            f"市值自 {STABLECOIN_MONITOR_START_MONTH} 起按月聚合，成交量保留近 365 天月累计；"
+            "右侧独立展示当日总市值与最新 24h 成交量。当前覆盖 USDT、USDC、DAI、USDe、FDUSD、PYUSD。"
+        ),
+    }
+
+
+def normalize_stablecoin_market_cache(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    baseline = default_stablecoin_market_cache(end_month=resolve_stablecoin_cache_end_month(source))
+
+    raw_coins = source.get("coins") if isinstance(source.get("coins"), list) else []
+    raw_coin_map: dict[str, dict[str, Any]] = {}
+    for item in raw_coins:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if symbol:
+            raw_coin_map[symbol] = item
+
+    normalized_coins: list[dict[str, Any]] = []
+    for asset in STABLECOIN_MONITOR_ASSETS:
+        raw_item = raw_coin_map.get(asset["symbol"], {})
+        normalized_coins.append(
+            {
+                **asset,
+                "latest_market_cap": float(raw_item.get("latest_market_cap") or 0.0),
+                "latest_volume": float(raw_item.get("latest_volume") or 0.0),
+                "latest_point_at": str(raw_item.get("latest_point_at") or "").strip(),
+                "history_latest_point_at": str(
+                    raw_item.get("history_latest_point_at") or raw_item.get("latest_point_at") or ""
+                ).strip(),
+            }
+        )
+
+    raw_monthly = source.get("monthly_series") if isinstance(source.get("monthly_series"), list) else []
+    raw_month_map: dict[str, dict[str, Any]] = {}
+    for item in raw_monthly:
+        if not isinstance(item, dict):
+            continue
+        month_key = str(item.get("month") or "").strip()
+        if month_key:
+            raw_month_map[month_key] = item
+
+    normalized_months: list[dict[str, Any]] = []
+    for window in baseline["monthly_series"]:
+        raw_month = raw_month_map.get(window["month"], {})
+        raw_month_coins = raw_month.get("coins") if isinstance(raw_month.get("coins"), list) else []
+        raw_month_coin_map: dict[str, dict[str, Any]] = {}
+        for coin_item in raw_month_coins:
+            if not isinstance(coin_item, dict):
+                continue
+            symbol = str(coin_item.get("symbol") or "").strip().upper()
+            if symbol:
+                raw_month_coin_map[symbol] = coin_item
+
+        coin_entries: list[dict[str, Any]] = []
+        market_cap_total = 0.0
+        volume_total = 0.0
+        for asset in STABLECOIN_MONITOR_ASSETS:
+            raw_coin_entry = raw_month_coin_map.get(asset["symbol"], {})
+            market_cap_value = float(raw_coin_entry.get("market_cap") or 0.0)
+            volume_value = float(raw_coin_entry.get("volume") or 0.0)
+            market_cap_total += market_cap_value
+            volume_total += volume_value
+            coin_entries.append(
+                {
+                    "symbol": asset["symbol"],
+                    "label": asset["label"],
+                    "color": asset["color"],
+                    "market_cap": market_cap_value,
+                    "volume": volume_value,
+                }
+            )
+
+        normalized_months.append(
+            {
+                **window,
+                "market_cap_total": market_cap_total,
+                "volume_total": volume_total,
+                "volume_available": bool(raw_month.get("volume_available")) or volume_total > 0.0,
+                "coins": coin_entries,
+            }
+        )
+
+    raw_snapshot = source.get("latest_snapshot") if isinstance(source.get("latest_snapshot"), dict) else {}
+    raw_month_snapshot = (
+        source.get("latest_month_snapshot") if isinstance(source.get("latest_month_snapshot"), dict) else {}
+    )
+    latest_market_cap_total = sum(float(item.get("latest_market_cap") or 0.0) for item in normalized_coins)
+    latest_volume_total = sum(float(item.get("latest_volume") or 0.0) for item in normalized_coins)
+    latest_point_at = max((str(item.get("latest_point_at") or "").strip() for item in normalized_coins), default="")
+    latest_history_point_at = max(
+        (str(item.get("history_latest_point_at") or "").strip() for item in normalized_coins),
+        default="",
+    )
+    latest_month = normalized_months[-1] if normalized_months else {}
+
+    return {
+        "updated_at": str(source.get("updated_at") or "").strip(),
+        "coverage_start": str(source.get("coverage_start") or baseline["coverage_start"]).strip(),
+        "coverage_end": str(source.get("coverage_end") or baseline["coverage_end"]).strip(),
+        "granularity": "monthly",
+        "period_months": int(source.get("period_months") or baseline["period_months"]),
+        "source": {
+            "name": str(source.get("source", {}).get("name") or baseline["source"]["name"]).strip(),
+            "url": str(source.get("source", {}).get("url") or baseline["source"]["url"]).strip(),
+            "endpoint": str(source.get("source", {}).get("endpoint") or baseline["source"]["endpoint"]).strip(),
+        },
+        "coins": normalized_coins,
+        "monthly_series": normalized_months,
+        "latest_snapshot": {
+            "month": str(raw_snapshot.get("month") or latest_month.get("label") or "").strip(),
+            "total_market_cap": float(raw_snapshot.get("total_market_cap") or latest_market_cap_total),
+            "total_volume": float(raw_snapshot.get("total_volume") or latest_volume_total),
+            "latest_point_at": str(raw_snapshot.get("latest_point_at") or latest_point_at).strip(),
+            "market_cap_change_24h": float(raw_snapshot.get("market_cap_change_24h") or 0.0),
+            "market_cap_change_24h_pct": float(raw_snapshot.get("market_cap_change_24h_pct") or 0.0),
+            "is_realtime": bool(raw_snapshot.get("is_realtime")),
+        },
+        "latest_month_snapshot": {
+            "month": str(raw_month_snapshot.get("month") or latest_month.get("label") or "").strip(),
+            "total_market_cap": float(raw_month_snapshot.get("total_market_cap") or latest_month.get("market_cap_total") or 0.0),
+            "total_volume": float(raw_month_snapshot.get("total_volume") or latest_month.get("volume_total") or 0.0),
+            "latest_point_at": str(raw_month_snapshot.get("latest_point_at") or latest_history_point_at).strip(),
+        },
+        "notes": str(source.get("notes") or baseline["notes"]).strip(),
+    }
+
+
+def load_stablecoin_market_cache() -> dict[str, Any]:
+    STABLECOIN_MONITOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not STABLECOIN_MONITOR_CACHE_PATH.exists():
+        cache = default_stablecoin_market_cache()
+        save_stablecoin_market_cache(cache)
+        return cache
+    return normalize_stablecoin_market_cache(load_json(STABLECOIN_MONITOR_CACHE_PATH))
+
+
+def save_stablecoin_market_cache(cache: dict[str, Any]) -> None:
+    normalized = normalize_stablecoin_market_cache(cache)
+    STABLECOIN_MONITOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = STABLECOIN_MONITOR_CACHE_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(STABLECOIN_MONITOR_CACHE_PATH)
+
+
+def normalize_stablecoin_monitor_runtime(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+
+    def normalize_runtime_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if re.fullmatch(r"[?？\uFFFD\s]+", text):
+            return ""
+        return text
+
+    return {
+        "status": str(source.get("status") or "idle").strip() or "idle",
+        "started_at": str(source.get("started_at") or "").strip(),
+        "finished_at": str(source.get("finished_at") or "").strip(),
+        "reason": str(source.get("reason") or "").strip(),
+        "message": normalize_runtime_text(source.get("message")),
+        "error": normalize_runtime_text(source.get("error")),
+    }
+
+
+def load_stablecoin_monitor_runtime() -> dict[str, Any]:
+    STABLECOIN_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not STABLECOIN_MONITOR_RUNTIME_PATH.exists():
+        runtime = normalize_stablecoin_monitor_runtime({})
+        save_stablecoin_monitor_runtime(runtime)
+        return runtime
+    return normalize_stablecoin_monitor_runtime(load_json(STABLECOIN_MONITOR_RUNTIME_PATH))
+
+
+def save_stablecoin_monitor_runtime(runtime: dict[str, Any]) -> None:
+    normalized = normalize_stablecoin_monitor_runtime(runtime)
+    STABLECOIN_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = STABLECOIN_MONITOR_RUNTIME_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(STABLECOIN_MONITOR_RUNTIME_PATH)
+
+
+def stablecoin_market_cache_is_stale(cache: dict[str, Any]) -> bool:
+    updated_at = parse_signal_monitor_datetime(cache.get("updated_at"))
+    if updated_at is None:
+        return True
+    return datetime.now() - updated_at >= timedelta(hours=STABLECOIN_MONITOR_REFRESH_INTERVAL_HOURS)
+
+
+def throttle_coingecko_requests() -> None:
+    global COINGECKO_LAST_REQUEST_AT
+
+    with COINGECKO_REQUEST_LOCK:
+        now_value = time.monotonic()
+        wait_seconds = COINGECKO_MIN_REQUEST_INTERVAL_SECONDS - (now_value - COINGECKO_LAST_REQUEST_AT)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now_value = time.monotonic()
+        COINGECKO_LAST_REQUEST_AT = now_value
+
+
+def fetch_coingecko_market_chart(coin_id: str) -> dict[str, Any]:
+    url = f"{COINGECKO_API_BASE_URL}/coins/{coin_id}/market_chart"
+    params = {
+        "vs_currency": "usd",
+        "days": str(STABLECOIN_MONITOR_DAY_RANGE),
+        "interval": "daily",
+    }
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            throttle_coingecko_requests()
+            response = requests.get(
+                url,
+                params=params,
+                headers=COINGECKO_REQUEST_HEADERS,
+                timeout=40,
+            )
+            if response.status_code == 429:
+                retry_after = 12 + (attempt * 8)
+                time.sleep(retry_after)
+                raise RuntimeError("CoinGecko 当前限流，请稍后再试。")
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("CoinGecko 返回了无法识别的数据结构。")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+                continue
+    raise RuntimeError(f"抓取 {coin_id} 历史行情失败：{last_error}")
+
+
+def fetch_coingecko_market_snapshot(coin_ids: list[str]) -> list[dict[str, Any]]:
+    url = f"{COINGECKO_API_BASE_URL}/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "ids": ",".join(coin_ids),
+        "per_page": str(max(len(coin_ids), 10)),
+        "page": "1",
+        "sparkline": "false",
+    }
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            throttle_coingecko_requests()
+            response = requests.get(
+                url,
+                params=params,
+                headers=COINGECKO_REQUEST_HEADERS,
+                timeout=40,
+            )
+            if response.status_code == 429:
+                retry_after = 12 + (attempt * 8)
+                time.sleep(retry_after)
+                raise RuntimeError("CoinGecko 当前限流，请稍后再试。")
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("CoinGecko 返回了无法识别的实时快照结构。")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+                continue
+    raise RuntimeError(f"抓取稳定币实时快照失败：{last_error}")
+
+
+def fetch_defillama_stablecoins_index() -> list[dict[str, Any]]:
+    url = f"{DEFILLAMA_STABLECOINS_API_BASE_URL}/stablecoins"
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params={"includePrices": "true"}, timeout=40)
+            response.raise_for_status()
+            payload = response.json()
+            pegged_assets = payload.get("peggedAssets") if isinstance(payload, dict) else None
+            if not isinstance(pegged_assets, list):
+                raise RuntimeError("DeFiLlama 返回了无法识别的稳定币列表结构。")
+            return pegged_assets
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+                continue
+    raise RuntimeError(f"抓取 DeFiLlama 稳定币列表失败：{last_error}")
+
+
+def fetch_defillama_stablecoin_detail(stablecoin_id: str) -> dict[str, Any]:
+    url = f"{DEFILLAMA_STABLECOINS_API_BASE_URL}/stablecoin/{stablecoin_id}"
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=40)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("DeFiLlama 返回了无法识别的稳定币详情结构。")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 + attempt * 2)
+                continue
+    raise RuntimeError(f"抓取 DeFiLlama 稳定币详情失败：{last_error}")
+
+
+def summarize_stablecoin_market_chart(
+    payload: dict[str, Any],
+    *,
+    month_windows: list[dict[str, str]],
+) -> dict[str, Any]:
+    month_keys = [item["month"] for item in month_windows]
+    month_key_set = set(month_keys)
+    market_caps_by_month: dict[str, list[float]] = defaultdict(list)
+    volumes_by_month: dict[str, list[float]] = defaultdict(list)
+    latest_market_cap = 0.0
+    latest_volume = 0.0
+    latest_point_at = ""
+
+    for raw_point in payload.get("market_caps", []) if isinstance(payload.get("market_caps"), list) else []:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) < 2:
+            continue
+        try:
+            point_at = datetime.utcfromtimestamp(float(raw_point[0]) / 1000.0)
+            value = max(float(raw_point[1]), 0.0)
+        except (TypeError, ValueError, OSError):
+            continue
+        month_key = f"{point_at.year:04d}-{point_at.month:02d}"
+        if month_key in month_key_set:
+            market_caps_by_month[month_key].append(value)
+        if point_at.isoformat() >= latest_point_at:
+            latest_point_at = point_at.date().isoformat()
+            latest_market_cap = value
+
+    for raw_point in payload.get("total_volumes", []) if isinstance(payload.get("total_volumes"), list) else []:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) < 2:
+            continue
+        try:
+            point_at = datetime.utcfromtimestamp(float(raw_point[0]) / 1000.0)
+            value = max(float(raw_point[1]), 0.0)
+        except (TypeError, ValueError, OSError):
+            continue
+        month_key = f"{point_at.year:04d}-{point_at.month:02d}"
+        if month_key in month_key_set:
+            volumes_by_month[month_key].append(value)
+        if point_at.date().isoformat() >= latest_point_at:
+            latest_point_at = point_at.date().isoformat()
+            latest_volume = value
+
+    monthly_rollup: dict[str, dict[str, float]] = {}
+    for month_key in month_keys:
+        month_market_caps = market_caps_by_month.get(month_key, [])
+        month_volumes = volumes_by_month.get(month_key, [])
+        monthly_rollup[month_key] = {
+            "market_cap": (sum(month_market_caps) / len(month_market_caps)) if month_market_caps else 0.0,
+            "market_cap_available": bool(month_market_caps),
+            "volume": sum(month_volumes) if month_volumes else 0.0,
+            "volume_available": bool(month_volumes),
+        }
+
+    return {
+        "monthly": monthly_rollup,
+        "latest_market_cap": latest_market_cap,
+        "latest_volume": latest_volume,
+        "latest_point_at": latest_point_at,
+    }
+
+
+def summarize_defillama_stablecoin_history(
+    payload: dict[str, Any],
+    *,
+    month_windows: list[dict[str, str]],
+) -> dict[str, Any]:
+    month_keys = [item["month"] for item in month_windows]
+    month_key_set = set(month_keys)
+    market_caps_by_month: dict[str, list[float]] = defaultdict(list)
+    latest_market_cap = 0.0
+    latest_point_at = ""
+
+    for raw_point in payload.get("tokens", []) if isinstance(payload.get("tokens"), list) else []:
+        if not isinstance(raw_point, dict):
+            continue
+        try:
+            point_at = datetime.utcfromtimestamp(int(raw_point.get("date") or 0))
+            value = max(float((raw_point.get("circulating") or {}).get("peggedUSD") or 0.0), 0.0)
+        except (TypeError, ValueError, OSError):
+            continue
+        month_key = f"{point_at.year:04d}-{point_at.month:02d}"
+        if month_key in month_key_set:
+            market_caps_by_month[month_key].append(value)
+        point_label = point_at.date().isoformat()
+        if point_label >= latest_point_at:
+            latest_point_at = point_label
+            latest_market_cap = value
+
+    monthly_rollup: dict[str, dict[str, float | bool]] = {}
+    for month_key in month_keys:
+        month_market_caps = market_caps_by_month.get(month_key, [])
+        monthly_rollup[month_key] = {
+            "market_cap": (sum(month_market_caps) / len(month_market_caps)) if month_market_caps else 0.0,
+            "market_cap_available": bool(month_market_caps),
+        }
+
+    return {
+        "monthly": monthly_rollup,
+        "latest_market_cap": latest_market_cap,
+        "latest_point_at": latest_point_at,
+    }
+
+
+def summarize_cached_stablecoin_volume_history(
+    cache: dict[str, Any],
+    *,
+    coin_symbol: str,
+    month_windows: list[dict[str, str]],
+) -> dict[str, Any]:
+    month_keys = [item["month"] for item in month_windows]
+    monthly_rollup: dict[str, dict[str, float | bool]] = {
+        month_key: {
+            "market_cap": 0.0,
+            "market_cap_available": False,
+            "volume": 0.0,
+            "volume_available": False,
+        }
+        for month_key in month_keys
+    }
+    latest_volume = 0.0
+    latest_point_at = ""
+    target_symbol = str(coin_symbol or "").strip().upper()
+
+    monthly_series = cache.get("monthly_series") if isinstance(cache.get("monthly_series"), list) else []
+    for month in monthly_series:
+        if not isinstance(month, dict):
+            continue
+        month_key = str(month.get("month") or month.get("label") or "").strip()
+        if month_key not in monthly_rollup:
+            continue
+
+        coin_entries = month.get("coins") if isinstance(month.get("coins"), list) else []
+        for coin_entry in coin_entries:
+            if not isinstance(coin_entry, dict):
+                continue
+            symbol = str(coin_entry.get("symbol") or "").strip().upper()
+            if symbol != target_symbol:
+                continue
+
+            volume_value = float(coin_entry.get("volume") or 0.0)
+            monthly_rollup[month_key] = {
+                "market_cap": 0.0,
+                "market_cap_available": False,
+                "volume": volume_value,
+                "volume_available": bool(month.get("volume_available")) or volume_value > 0.0,
+            }
+            if month_key >= latest_point_at:
+                latest_point_at = month_key
+                latest_volume = volume_value
+            break
+
+    return {
+        "monthly": monthly_rollup,
+        "latest_market_cap": 0.0,
+        "latest_volume": latest_volume,
+        "latest_point_at": latest_point_at,
+    }
+
+
+def build_stablecoin_market_dataset() -> dict[str, Any]:
+    market_cap_payload_map: dict[str, dict[str, Any]] = {}
+    latest_history_point_dt: datetime | None = None
+    previous_cache = load_stablecoin_market_cache()
+
+    for asset in STABLECOIN_MONITOR_ASSETS:
+        payload = fetch_defillama_stablecoin_detail(str(asset["llama_id"]))
+        market_cap_payload_map[asset["id"]] = payload
+        summary = summarize_defillama_stablecoin_history(payload, month_windows=[])
+        latest_point_dt = parse_iso_date_value(summary.get("latest_point_at"))
+        if latest_point_dt is not None and (latest_history_point_dt is None or latest_point_dt > latest_history_point_dt):
+            latest_history_point_dt = latest_point_dt
+
+    latest_history_month = latest_history_point_dt.strftime("%Y-%m") if latest_history_point_dt is not None else None
+    month_windows = build_stablecoin_month_windows(end_month=latest_history_month)
+    monthly_series_map = {
+        window["month"]: {
+            **window,
+            "market_cap_total": 0.0,
+            "volume_total": 0.0,
+            "volume_available": False,
+            "coins": [],
+        }
+        for window in month_windows
+    }
+    coins: list[dict[str, Any]] = []
+    defillama_snapshot_map: dict[str, dict[str, Any]] = {}
+    try:
+        defillama_records = fetch_defillama_stablecoins_index()
+        for item in defillama_records:
+            if not isinstance(item, dict):
+                continue
+            coin_id = str(item.get("gecko_id") or "").strip()
+            if coin_id:
+                defillama_snapshot_map[coin_id] = item
+    except Exception:
+        defillama_snapshot_map = {}
+    snapshot_map: dict[str, dict[str, Any]] = {}
+    try:
+        snapshot_records = fetch_coingecko_market_snapshot([asset["id"] for asset in STABLECOIN_MONITOR_ASSETS])
+        for item in snapshot_records:
+            if not isinstance(item, dict):
+                continue
+            coin_id = str(item.get("id") or "").strip()
+            if coin_id:
+                snapshot_map[coin_id] = item
+    except Exception:
+        snapshot_map = {}
+
+    latest_snapshot_point_at = ""
+    latest_snapshot_point_dt: datetime | None = None
+    latest_market_cap_total = 0.0
+    latest_volume_total = 0.0
+    latest_market_cap_change_24h = 0.0
+
+    for asset in STABLECOIN_MONITOR_ASSETS:
+        market_cap_payload = market_cap_payload_map[asset["id"]]
+        market_cap_summary = summarize_defillama_stablecoin_history(market_cap_payload, month_windows=month_windows)
+        try:
+            volume_payload = fetch_coingecko_market_chart(asset["id"])
+            volume_summary = summarize_stablecoin_market_chart(volume_payload, month_windows=month_windows)
+        except Exception:
+            volume_summary = summarize_cached_stablecoin_volume_history(
+                previous_cache,
+                coin_symbol=str(asset["symbol"]),
+                month_windows=month_windows,
+            )
+        market_cap_snapshot = defillama_snapshot_map.get(asset["id"], {})
+        volume_snapshot = snapshot_map.get(asset["id"], {})
+
+        latest_market_cap = float(
+            (market_cap_snapshot.get("circulating") or {}).get("peggedUSD")
+            or market_cap_summary["latest_market_cap"]
+            or 0.0
+        )
+        previous_market_cap = float((market_cap_snapshot.get("circulatingPrevDay") or {}).get("peggedUSD") or 0.0)
+        latest_volume = float(volume_snapshot.get("total_volume") or volume_summary["latest_volume"] or 0.0)
+        latest_point_at = normalize_coingecko_snapshot_timestamp(volume_snapshot.get("last_updated")) or str(
+            market_cap_summary["latest_point_at"] or volume_summary["latest_point_at"] or ""
+        )
+        latest_point_dt = parse_signal_monitor_datetime(latest_point_at) or parse_iso_date_value(latest_point_at)
+        if latest_point_dt is not None and (latest_snapshot_point_dt is None or latest_point_dt > latest_snapshot_point_dt):
+            latest_snapshot_point_dt = latest_point_dt
+            latest_snapshot_point_at = latest_point_at
+
+        latest_market_cap_total += latest_market_cap
+        latest_volume_total += latest_volume
+        if previous_market_cap > 0:
+            latest_market_cap_change_24h += latest_market_cap - previous_market_cap
+        coins.append(
+            {
+                **asset,
+                "latest_market_cap": latest_market_cap,
+                "latest_volume": latest_volume,
+                "latest_point_at": latest_point_at,
+                "history_latest_point_at": str(market_cap_summary["latest_point_at"] or "").strip(),
+            }
+        )
+        for window in month_windows:
+            market_cap_month_values = market_cap_summary["monthly"].get(window["month"], {})
+            volume_month_values = volume_summary["monthly"].get(window["month"], {})
+            market_cap_value = float(market_cap_month_values.get("market_cap") or 0.0)
+            volume_value = float(volume_month_values.get("volume") or 0.0)
+            volume_available = bool(volume_month_values.get("volume_available"))
+            bucket = monthly_series_map[window["month"]]
+            bucket["market_cap_total"] += market_cap_value
+            bucket["volume_total"] += volume_value
+            bucket["volume_available"] = bool(bucket.get("volume_available")) or volume_available
+            bucket["coins"].append(
+                {
+                    "symbol": asset["symbol"],
+                    "label": asset["label"],
+                    "color": asset["color"],
+                    "market_cap": market_cap_value,
+                    "volume": volume_value,
+                }
+            )
+
+    monthly_series = [monthly_series_map[window["month"]] for window in month_windows]
+    latest_month_snapshot = monthly_series[-1] if monthly_series else {"label": "", "market_cap_total": 0.0, "volume_total": 0.0}
+    previous_market_cap_total = latest_market_cap_total - latest_market_cap_change_24h
+    return {
+        "updated_at": now_iso(),
+        "coverage_start": month_windows[0]["label"] if month_windows else "",
+        "coverage_end": month_windows[-1]["label"] if month_windows else "",
+        "granularity": "monthly",
+        "period_months": len(month_windows),
+        "source": {
+            "name": "DeFiLlama + CoinGecko",
+            "url": "https://stablecoins.llama.fi/stablecoins",
+            "endpoint": (
+                "DeFiLlama /stablecoins + /stablecoin/{id}"
+                " + CoinGecko /api/v3/coins/markets?vs_currency=usd&ids={ids}"
+                " + /api/v3/coins/{id}/market_chart?vs_currency=usd&days=365&interval=daily"
+            ),
+        },
+        "coins": coins,
+        "monthly_series": monthly_series,
+        "latest_snapshot": {
+            "month": str(latest_month_snapshot.get("label") or ""),
+            "total_market_cap": latest_market_cap_total,
+            "total_volume": latest_volume_total,
+            "latest_point_at": latest_snapshot_point_at,
+            "market_cap_change_24h": latest_market_cap_change_24h,
+            "market_cap_change_24h_pct": calculate_percent_change(latest_market_cap_total, previous_market_cap_total) or 0.0,
+            "is_realtime": bool(snapshot_map),
+        },
+        "latest_month_snapshot": {
+            "month": str(latest_month_snapshot.get("label") or ""),
+            "total_market_cap": float(latest_month_snapshot.get("market_cap_total") or 0.0),
+            "total_volume": float(latest_month_snapshot.get("volume_total") or 0.0),
+            "latest_point_at": latest_history_point_dt.date().isoformat() if latest_history_point_dt is not None else "",
+        },
+        "notes": (
+            f"市值自 {STABLECOIN_MONITOR_START_MONTH} 起按月聚合，成交量保留近 365 天月累计；"
+            "右侧独立展示当日总市值与最新 24h 成交量。当前覆盖 USDT、USDC、DAI、USDe、FDUSD、PYUSD。"
+        ),
+    }
+
+
+def run_stablecoin_market_refresh(reason: str, started_at: str | None = None) -> None:
+    global STABLECOIN_MONITOR_ACTIVE_THREAD
+
+    runtime = {
+        "status": "running",
+        "started_at": started_at or now_iso(),
+        "finished_at": "",
+        "reason": reason,
+        "message": f"正在抓取自 {STABLECOIN_MONITOR_START_MONTH} 以来的稳定币历史数据。",
+        "error": "",
+    }
+    save_stablecoin_monitor_runtime(runtime)
+
+    try:
+        dataset = build_stablecoin_market_dataset()
+        save_stablecoin_market_cache(dataset)
+        runtime = {
+            "status": "completed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "稳定币数据已刷新，图表和摘要已同步更新。",
+            "error": "",
+        }
+    except Exception as exc:
+        runtime = {
+            "status": "failed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "",
+            "error": str(exc),
+        }
+    finally:
+        save_stablecoin_monitor_runtime(runtime)
+        with STABLECOIN_MONITOR_LOCK:
+            STABLECOIN_MONITOR_ACTIVE_THREAD = None
+
+
+def sync_stablecoin_monitor_runtime() -> dict[str, Any]:
+    runtime = load_stablecoin_monitor_runtime()
+    if runtime["status"] != "running":
+        return runtime
+
+    active_thread = STABLECOIN_MONITOR_ACTIVE_THREAD
+    if active_thread is not None and active_thread.is_alive():
+        return runtime
+
+    runtime["status"] = "failed"
+    runtime["finished_at"] = runtime["finished_at"] or now_iso()
+    runtime["error"] = runtime["error"] or "稳定币刷新线程已经结束，但没有留下完整结果。"
+    save_stablecoin_monitor_runtime(runtime)
+    return runtime
+
+
+def start_stablecoin_market_refresh(reason: str) -> dict[str, Any]:
+    global STABLECOIN_MONITOR_ACTIVE_THREAD
+
+    with STABLECOIN_MONITOR_LOCK:
+        runtime = sync_stablecoin_monitor_runtime()
+        if runtime["status"] == "running":
+            return runtime
+
+        started_at = now_iso()
+        runtime = {
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": "",
+            "reason": reason,
+            "message": f"正在抓取自 {STABLECOIN_MONITOR_START_MONTH} 以来的稳定币历史数据。",
+            "error": "",
+        }
+        save_stablecoin_monitor_runtime(runtime)
+
+        worker = threading.Thread(
+            target=run_stablecoin_market_refresh,
+            args=(reason, started_at),
+            daemon=True,
+            name="stablecoin-monitor-refresh",
+        )
+        STABLECOIN_MONITOR_ACTIVE_THREAD = worker
+        worker.start()
+        return runtime
+
+
+def maybe_start_stablecoin_monitor_scheduler() -> None:
+    global STABLECOIN_MONITOR_SCHEDULER_STARTED, STABLECOIN_MONITOR_SCHEDULER_THREAD
+
+    with STABLECOIN_MONITOR_LOCK:
+        if STABLECOIN_MONITOR_SCHEDULER_STARTED:
+            return
+
+        def scheduler_loop() -> None:
+            while True:
+                try:
+                    cache = load_stablecoin_market_cache()
+                    runtime = sync_stablecoin_monitor_runtime()
+                    if runtime["status"] != "running" and stablecoin_market_cache_is_stale(cache):
+                        start_stablecoin_market_refresh("scheduler")
+                except Exception:
+                    pass
+                time.sleep(max(120, STABLECOIN_MONITOR_SCHEDULER_SLEEP_SECONDS))
+
+        worker = threading.Thread(
+            target=scheduler_loop,
+            daemon=True,
+            name="stablecoin-monitor-scheduler",
+        )
+        STABLECOIN_MONITOR_SCHEDULER_THREAD = worker
+        STABLECOIN_MONITOR_SCHEDULER_STARTED = True
+        worker.start()
+
+
+def ensure_stablecoin_market_cache_ready() -> tuple[dict[str, Any], dict[str, Any]]:
+    maybe_start_stablecoin_monitor_scheduler()
+    cache = load_stablecoin_market_cache()
+    runtime = sync_stablecoin_monitor_runtime()
+    if not cache.get("updated_at") and runtime["status"] != "running":
+        run_stablecoin_market_refresh("bootstrap")
+        cache = load_stablecoin_market_cache()
+        runtime = sync_stablecoin_monitor_runtime()
+    elif stablecoin_market_cache_is_stale(cache) and runtime["status"] != "running":
+        runtime = start_stablecoin_market_refresh("stale_auto")
+    return cache, runtime
+
+
+def calculate_percent_change(current_value: float, previous_value: float) -> float | None:
+    if previous_value <= 0:
+        return None
+    return ((current_value - previous_value) / previous_value) * 100.0
+
+
+def build_stablecoin_chart_payload(
+    monthly_series: list[dict[str, Any]],
+    *,
+    metric_key: str,
+    metric_total_key: str,
+    title: str,
+    subtitle: str,
+    chart_key: str,
+) -> dict[str, Any]:
+    bars: list[dict[str, Any]] = []
+    max_total = 0.0
+    for month in monthly_series:
+        total_value = float(month.get(metric_total_key) or 0.0)
+        max_total = max(max_total, total_value)
+        series = []
+        for coin in month.get("coins", []):
+            value = float(coin.get(metric_key) or 0.0)
+            series.append(
+                {
+                    "symbol": str(coin.get("symbol") or ""),
+                    "label": str(coin.get("label") or ""),
+                    "color": str(coin.get("color") or "#6b86b8"),
+                    "value": value,
+                    "value_label": format_compact_currency(value),
+                }
+            )
+        bars.append(
+            {
+                "label": str(month.get("short_label") or month.get("label") or ""),
+                "month": str(month.get("label") or ""),
+                "total_value": total_value,
+                "total_label": format_compact_currency(total_value),
+                "series": series,
+            }
+        )
+
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "bars": bars,
+        "max_total": max_total,
+        "chart_key": chart_key,
+    }
+
+
+def build_stablecoin_data_monitor_context() -> dict[str, Any]:
+    cache, runtime = ensure_stablecoin_market_cache_ready()
+    monthly_series = cache.get("monthly_series", []) if isinstance(cache.get("monthly_series"), list) else []
+    coins = cache.get("coins", []) if isinstance(cache.get("coins"), list) else []
+    latest_snapshot = cache.get("latest_snapshot", {}) if isinstance(cache.get("latest_snapshot"), dict) else {}
+    latest_month_snapshot = (
+        cache.get("latest_month_snapshot") if isinstance(cache.get("latest_month_snapshot"), dict) else {}
+    )
+    latest_market_cap_total = float(latest_snapshot.get("total_market_cap") or 0.0)
+    latest_volume_total = float(latest_snapshot.get("total_volume") or 0.0)
+    earliest_month = monthly_series[0] if monthly_series else {}
+    latest_month = monthly_series[-1] if monthly_series else {}
+    volume_months = [month for month in monthly_series if bool(month.get("volume_available"))]
+    earliest_volume_month = volume_months[0] if volume_months else {}
+    latest_volume_month = volume_months[-1] if volume_months else {}
+    latest_month_label = str(latest_month_snapshot.get("month") or latest_month.get("label") or "").strip()
+    latest_month_point_at = str(latest_month_snapshot.get("latest_point_at") or "").strip()
+    market_cap_change_pct = calculate_percent_change(
+        float(latest_month.get("market_cap_total") or 0.0),
+        float(earliest_month.get("market_cap_total") or 0.0),
+    )
+    volume_change_pct = calculate_percent_change(
+        float(latest_volume_month.get("volume_total") or 0.0),
+        float(earliest_volume_month.get("volume_total") or 0.0),
+    )
+
+    monthly_coin_history: dict[str, list[dict[str, float]]] = {asset["symbol"]: [] for asset in STABLECOIN_MONITOR_ASSETS}
+    for month in monthly_series:
+        for coin in month.get("coins", []):
+            symbol = str(coin.get("symbol") or "").strip().upper()
+            if symbol in monthly_coin_history:
+                monthly_coin_history[symbol].append(
+                    {
+                        "market_cap": float(coin.get("market_cap") or 0.0),
+                        "volume": float(coin.get("volume") or 0.0),
+                    }
+                )
+
+    sorted_coins = sorted(coins, key=lambda item: float(item.get("latest_market_cap") or 0.0), reverse=True)
+    coin_cards: list[dict[str, Any]] = []
+    for coin in sorted_coins:
+        symbol = str(coin.get("symbol") or "")
+        history = monthly_coin_history.get(symbol, [])
+        first_market_cap = float(history[0]["market_cap"]) if history else 0.0
+        last_market_cap = float(history[-1]["market_cap"]) if history else 0.0
+        share = ((float(coin.get("latest_market_cap") or 0.0) / latest_market_cap_total) * 100.0) if latest_market_cap_total > 0 else 0.0
+        coin_cards.append(
+            {
+                **coin,
+                "latest_market_cap_label": format_compact_currency(coin.get("latest_market_cap") or 0.0),
+                "latest_volume_label": format_compact_currency(coin.get("latest_volume") or 0.0),
+                "share_label": f"{share:.1f}%",
+                "market_cap_change_label": format_signed_percent(
+                    calculate_percent_change(last_market_cap, first_market_cap)
+                ),
+                "latest_point_label": format_stablecoin_point_label(coin.get("latest_point_at")),
+            }
+        )
+
+    monthly_rows: list[dict[str, Any]] = []
+    for month in reversed(monthly_series):
+        total_market_cap = float(month.get("market_cap_total") or 0.0)
+        leaders = sorted(
+            month.get("coins", []),
+            key=lambda item: float(item.get("market_cap") or 0.0),
+            reverse=True,
+        )[:3]
+        monthly_rows.append(
+            {
+                **month,
+                "market_cap_total_label": format_compact_currency(total_market_cap),
+                "volume_total_label": (
+                    format_compact_currency(month.get("volume_total") or 0.0)
+                    if month.get("volume_available")
+                    else "n/a"
+                ),
+                "leaders": [
+                    {
+                        **coin,
+                        "market_cap_label": format_compact_currency(coin.get("market_cap") or 0.0),
+                        "share_label": (
+                            f"{((float(coin.get('market_cap') or 0.0) / total_market_cap) * 100.0):.1f}%"
+                            if total_market_cap > 0
+                            else "0.0%"
+                        ),
+                    }
+                    for coin in leaders
+                ],
+            }
+        )
+
+    latest_month_point_dt = parse_iso_date_value(latest_month_point_at)
+    latest_month_days_included = 0
+    if latest_month_point_dt is not None and latest_month_label == latest_month_point_dt.strftime("%Y-%m"):
+        latest_month_days_included = latest_month_point_dt.day
+
+    if latest_month_label:
+        stablecoin_monthly_latest_label = f"{latest_month_label} 平均"
+    else:
+        stablecoin_monthly_latest_label = "n/a"
+
+    if latest_month_label and latest_month_days_included > 0:
+        stablecoin_monthly_latest_caption = (
+            f"左侧连续月份当前滚动到 {latest_month_label}，已纳入本月前 {latest_month_days_included} 天的日度数据。"
+        )
+    elif latest_month_label and latest_month_point_at:
+        stablecoin_monthly_latest_caption = f"左侧连续月份当前滚动到 {latest_month_label}，截至 {latest_month_point_at}。"
+    else:
+        stablecoin_monthly_latest_caption = "左侧连续月份会沿最新有数据的月份继续向前滚动。"
+
+    realtime_vs_month_pct = calculate_percent_change(
+        latest_market_cap_total,
+        float(latest_month_snapshot.get("total_market_cap") or latest_month.get("market_cap_total") or 0.0),
+    )
+    realtime_is_live = bool(latest_snapshot.get("is_realtime"))
+    realtime_mode_label = "当日快照" if realtime_is_live else "最近日度快照"
+    realtime_point_label = format_stablecoin_point_label(latest_snapshot.get("latest_point_at"))
+    realtime_caption = "和左侧月均序列分开看，方便月初直接对照当下状态。"
+    if latest_month_label and realtime_vs_month_pct is not None:
+        realtime_caption = (
+            f"相对 {latest_month_label} 月均 {format_signed_percent(realtime_vs_month_pct)}，和左侧月均序列分开看更直观。"
+        )
+
+    market_cap_coverage_label = f"{cache.get('coverage_start') or STABLECOIN_MONITOR_START_MONTH} 至 {cache.get('coverage_end') or '-'}"
+    volume_coverage_label = (
+        f"{earliest_volume_month.get('label') or '-'} 至 {latest_volume_month.get('label') or '-'}"
+        if volume_months
+        else "近 365 天数据暂不可用"
+    )
+    combined_coverage_label = f"市值 {market_cap_coverage_label}；成交量 {volume_coverage_label}"
+
+    return {
+        "stablecoin_cache": cache,
+        "stablecoin_runtime": {
+            **runtime,
+            "status_label": monitor_runtime_status_label(runtime["status"]),
+            "status_tone": monitor_runtime_status_tone(runtime["status"]),
+            "is_running": runtime["status"] == "running",
+            "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+            "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+        },
+        "stablecoin_status_poll_seconds": STABLECOIN_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
+        "stablecoin_is_stale": stablecoin_market_cache_is_stale(cache),
+        "stablecoin_tracked_count": len(coins),
+        "stablecoin_last_updated_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "尚未抓取",
+        "stablecoin_latest_market_cap_label": format_compact_currency(latest_market_cap_total),
+        "stablecoin_latest_volume_label": format_compact_currency(latest_volume_total),
+        "stablecoin_market_cap_change_label": format_signed_percent(market_cap_change_pct),
+        "stablecoin_volume_change_label": format_signed_percent(volume_change_pct),
+        "stablecoin_market_cap_window_label": f"自 {STABLECOIN_MONITOR_START_MONTH}",
+        "stablecoin_volume_window_label": "近 365 天",
+        "stablecoin_market_cap_coverage_label": market_cap_coverage_label,
+        "stablecoin_volume_coverage_label": volume_coverage_label,
+        "stablecoin_coverage_label": combined_coverage_label,
+        "stablecoin_latest_point_label": realtime_point_label,
+        "stablecoin_monthly_latest_label": stablecoin_monthly_latest_label,
+        "stablecoin_monthly_latest_point_label": latest_month_point_at or "n/a",
+        "stablecoin_monthly_latest_caption": stablecoin_monthly_latest_caption,
+        "stablecoin_realtime_mode_label": realtime_mode_label,
+        "stablecoin_realtime_market_cap_label": format_compact_currency(latest_market_cap_total),
+        "stablecoin_realtime_volume_label": format_compact_currency(latest_volume_total),
+        "stablecoin_realtime_point_label": realtime_point_label,
+        "stablecoin_realtime_change_label": format_signed_percent(latest_snapshot.get("market_cap_change_24h_pct")),
+        "stablecoin_realtime_vs_month_label": format_signed_percent(realtime_vs_month_pct),
+        "stablecoin_realtime_caption": realtime_caption,
+        "stablecoin_realtime_is_live": realtime_is_live,
+        "stablecoin_coins": coin_cards,
+        "stablecoin_source_name": str(cache.get("source", {}).get("name") or "CoinGecko"),
+        "stablecoin_source_url": str(cache.get("source", {}).get("url") or "https://www.coingecko.com/"),
+        "stablecoin_source_endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        "stablecoin_notes": str(cache.get("notes") or ""),
+        "stablecoin_market_cap_chart": build_stablecoin_chart_payload(
+            monthly_series,
+            metric_key="market_cap",
+            metric_total_key="market_cap_total",
+            title="月均市值",
+            subtitle=f"按月汇总 6 种主流稳定币自 {STABLECOIN_MONITOR_START_MONTH} 以来的平均市值，观察份额与绝对规模的变化。",
+            chart_key="market-cap",
+        ),
+        "stablecoin_volume_chart": build_stablecoin_chart_payload(
+            volume_months,
+            metric_key="volume",
+            metric_total_key="volume_total",
+            title="月累计成交量",
+            subtitle="按月累计日度成交量，追踪链上与场内稳定币交易活跃度；当前受公开接口限制，覆盖近 365 天。",
+            chart_key="volume",
+        ),
+        "stablecoin_monthly_rows": monthly_rows,
+        "stablecoin_auto_refresh_label": f"应用运行时每 {STABLECOIN_MONITOR_REFRESH_INTERVAL_HOURS} 小时自动刷新一次",
     }
 
 
@@ -4153,7 +5629,7 @@ def normalize_note(raw_note: Any, *, trust_saved_html: bool = False) -> dict[str
     }
 
 
-def normalize_file_entry(raw_file: Any) -> dict[str, Any] | None:
+def normalize_file_entry(raw_file: Any, *, fallback_symbol: str = "") -> dict[str, Any] | None:
     if not isinstance(raw_file, dict):
         return None
 
@@ -4161,6 +5637,13 @@ def normalize_file_entry(raw_file: Any) -> dict[str, Any] | None:
     original_name = str(raw_file.get("original_name") or "").strip()
     if not stored_name or not original_name:
         return None
+
+    storage_symbol = normalize_stock_symbol(str(raw_file.get("storage_symbol") or "")) or (
+        normalize_stock_symbol(fallback_symbol) or ""
+    )
+    linked_symbols = ordered_unique(
+        ([storage_symbol] if storage_symbol else []) + normalize_stock_symbol_list(raw_file.get("linked_symbols", []))
+    )
 
     return {
         "id": str(raw_file.get("id") or uuid.uuid4().hex[:10]),
@@ -4173,6 +5656,8 @@ def normalize_file_entry(raw_file: Any) -> dict[str, Any] | None:
         "linked_note_title": str(raw_file.get("linked_note_title") or "").strip()[:120],
         "extract_text": bool(raw_file.get("extract_text")),
         "tags": normalize_tag_list(raw_file.get("tags", [])),
+        "storage_symbol": storage_symbol,
+        "linked_symbols": linked_symbols,
     }
 
 
@@ -4360,7 +5845,10 @@ def normalize_trash_entry(raw_entry: Any, *, trust_saved_html: bool = False) -> 
     if item_type == "note":
         normalized_payload = normalize_note(payload, trust_saved_html=trust_saved_html)
     elif item_type == "file":
-        normalized_payload = normalize_file_entry(payload)
+        normalized_payload = normalize_file_entry(
+            payload,
+            fallback_symbol=normalize_stock_symbol(str(raw_entry.get("symbol") or "")) or "",
+        )
     elif item_type == "transcript":
         normalized_payload = normalize_transcript_entry(payload, trust_saved_html=trust_saved_html)
     elif item_type == "group":
@@ -4473,7 +5961,7 @@ def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[
                 entry["files"] = [
                     file_entry
                     for raw_file in raw_entry.get("files", [])
-                    if (file_entry := normalize_file_entry(raw_file)) is not None
+                    if (file_entry := normalize_file_entry(raw_file, fallback_symbol=symbol)) is not None
                 ]
 
             stocks[symbol] = entry
@@ -4834,6 +6322,64 @@ def safe_next_url(value: str | None, default: str) -> str:
     return default
 
 
+def normalize_monitor_workspace_tab(raw_value: str | None, *, fallback: str = "info") -> str:
+    value = str(raw_value or "").strip().lower()
+    if value in {"signals", "signal", "bigv", "big-v", "big_v", "v"}:
+        return "signals"
+    if value in {"info", "monitor", "stock", "stocks"}:
+        return "info"
+    return fallback
+
+
+def redirect_to_monitor_workspace(
+    *,
+    tab: str = "info",
+    report: str | None = None,
+    signal_report: str | None = None,
+):
+    params: dict[str, Any] = {}
+    normalized_tab = normalize_monitor_workspace_tab(tab)
+    if normalized_tab != "info":
+        params["tab"] = normalized_tab
+    if report:
+        params["report"] = report
+    if signal_report:
+        params["signal_report"] = signal_report
+    return redirect(url_for("monitor_page", **params))
+
+
+def normalize_data_monitor_tab(raw_value: str | None, *, fallback: str = "stablecoins") -> str:
+    value = str(raw_value or "").strip().lower()
+    if value in {"stablecoins", "stablecoin", "stable", "stables", "usdt"}:
+        return "stablecoins"
+    return fallback
+
+
+def is_web_access_authenticated() -> bool:
+    if not WEB_ACCESS_PASSWORD_SIGNATURE:
+        return True
+    return hmac.compare_digest(
+        str(session.get(WEB_ACCESS_SESSION_KEY) or ""),
+        WEB_ACCESS_PASSWORD_SIGNATURE,
+    )
+
+
+@app.before_request
+def enforce_web_access_password():
+    if not WEB_ACCESS_PASSWORD_SIGNATURE:
+        return None
+
+    allowed_endpoints = {"static", "favicon", "access_password_gate", "access_password_submit"}
+    if request.endpoint in allowed_endpoints:
+        return None
+
+    if is_web_access_authenticated():
+        return None
+
+    next_url = request.full_path if request.query_string else request.path
+    return redirect(url_for("access_password_gate", next=next_url))
+
+
 def expects_json_response() -> bool:
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return True
@@ -4860,7 +6406,7 @@ def build_stock_card(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "display_name": entry.get("display_name") or symbol,
         "is_favorite": symbol in store["favorites"],
         "note_count": len(entry.get("notes", [])),
-        "file_count": len(entry.get("files", [])),
+        "file_count": stock_file_count_for_symbol(store, symbol),
         "transcript_count": transcript_count_for_symbol(store, symbol),
         "earnings_call_count": len(entry.get("earnings_calls", [])),
         "updated_label": format_iso_timestamp(entry.get("updated_at")),
@@ -5991,7 +7537,10 @@ def build_stock_tag_summary(store: dict[str, Any], symbol: str | None = None) ->
     for item_symbol in symbols:
         entry = ensure_stock_entry(store, item_symbol)
         items.extend(entry["notes"])
-        items.extend(entry["files"])
+    if symbol:
+        items.extend(record["file_entry"] for record in iter_stock_file_records(store, symbol_filter=symbol))
+    else:
+        items.extend(record["file_entry"] for record in iter_stock_file_records(store))
 
     transcripts = [
         transcript
@@ -6899,11 +8448,330 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "timeline": build_stock_timeline(store, symbol, related_reports=related_reports),
         "tag_summary": build_stock_tag_summary(store, symbol)[:12],
         "created_label": format_iso_timestamp(entry.get("created_at")),
+        "setup": build_stock_setup_view(symbol),
     }
 
 
 def stock_upload_dir(symbol: str) -> Path:
     return STOCK_UPLOADS_DIR / symbol
+
+
+def permanently_delete_trash_entry(trash_entry: dict[str, Any]) -> None:
+    payload = trash_entry["payload"]
+    if trash_entry["item_type"] == "file":
+        symbol = stock_file_storage_symbol(payload, str(trash_entry.get("symbol") or ""))
+        if symbol:
+            target_path = stock_upload_dir(symbol) / str(payload.get("stored_name") or "")
+            if target_path.exists():
+                target_path.unlink()
+    elif trash_entry["item_type"] == "transcript":
+        target_path = transcript_local_path(payload)
+        if target_path.exists():
+            target_path.unlink()
+        bucket_name = str(payload.get("source_bucket_name") or "").strip()
+        object_key = str(payload.get("source_object_key") or "").strip()
+        if bucket_name and object_key:
+            delete_uploaded_object(
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
+    elif trash_entry["item_type"] == "monitor_report":
+        trash_path = Path(str(payload.get("trash_path") or ""))
+        if trash_path.exists():
+            trash_path.unlink()
+    elif trash_entry["item_type"] == "signal_report":
+        trash_path = Path(str(payload.get("trash_path") or ""))
+        if trash_path.exists():
+            trash_path.unlink()
+
+
+def build_stock_activity(store: dict[str, Any], symbol_filter: str | None = None) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+
+    symbols = [symbol_filter] if symbol_filter else sorted(list_stock_symbols(store))
+
+    for symbol in symbols:
+        entry = ensure_stock_entry(store, symbol)
+
+        for note in entry["notes"]:
+            activity_date = iso_to_date(note.get("created_at"))
+            if not activity_date:
+                continue
+
+            note_id = str(note.get("id") or "").strip()
+            detail_url = url_for("stock_detail", symbol=symbol)
+            if note_id:
+                detail_url = f"{detail_url}#note-{note_id}"
+
+            entries.append(
+                {
+                    "date": activity_date,
+                    "timestamp": str(note.get("created_at") or ""),
+                    "kind": "note",
+                    "kind_label": "笔记",
+                    "symbol": symbol,
+                    "title": note.get("title") or "未命名笔记",
+                    "summary": (note.get("content_text") or "").strip()[:180],
+                    "display_time": note_display_time(note),
+                    "anchor": "notes-panel",
+                    "detail_url": detail_url,
+                    "detail_label": "打开笔记",
+                    "item_id": note_id,
+                }
+            )
+
+    for record in iter_stock_file_records(store, symbol_filter=symbol_filter):
+        file_entry = record["file_entry"]
+        activity_date = iso_to_date(file_entry.get("uploaded_at"))
+        if not activity_date:
+            continue
+
+        access_symbol = symbol_filter or record["storage_symbol"]
+        file_id = str(file_entry.get("id") or "").strip()
+        detail_url = url_for("stock_detail", symbol=access_symbol)
+        download_url = ""
+        if file_id:
+            detail_url = f"{detail_url}#file-{file_id}"
+            download_url = url_for("download_stock_file", symbol=access_symbol, file_id=file_id)
+
+        entries.append(
+            {
+                "date": activity_date,
+                "timestamp": str(file_entry.get("uploaded_at") or ""),
+                "kind": "file",
+                "kind_label": "文件",
+                "symbol": access_symbol,
+                "title": file_entry.get("original_name") or "已上传文件",
+                "summary": (file_entry.get("description") or "").strip()[:180],
+                "display_time": file_display_time(file_entry),
+                "file_type": detect_file_type_label(str(file_entry.get("original_name") or "")),
+                "anchor": "files-panel",
+                "detail_url": detail_url,
+                "detail_label": "打开资料",
+                "download_url": download_url,
+                "item_id": file_id,
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (item["date"], item["timestamp"], item["symbol"], item["title"]),
+        reverse=True,
+    )
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for item in entries:
+        day = summaries.setdefault(
+            item["date"],
+            {
+                "date": item["date"],
+                "items": [],
+                "note_count": 0,
+                "file_count": 0,
+                "file_type_counter": Counter(),
+                "symbols": set(),
+            },
+        )
+        day["items"].append(item)
+        day["symbols"].add(item["symbol"])
+        if item["kind"] == "note":
+            day["note_count"] += 1
+        else:
+            day["file_count"] += 1
+            day["file_type_counter"][str(item.get("file_type") or "未知类型")] += 1
+
+    for day in summaries.values():
+        day["items"].sort(
+            key=lambda item: (item["timestamp"], item["symbol"], item["title"]),
+            reverse=True,
+        )
+        day["stock_count"] = len(day["symbols"])
+        day["total_count"] = day["note_count"] + day["file_count"]
+        day["file_types"] = [
+            {"label": label, "count": count}
+            for label, count in sorted(day["file_type_counter"].items(), key=lambda item: (-item[1], item[0]))
+        ]
+        day.pop("file_type_counter", None)
+        day.pop("symbols", None)
+
+    return {
+        "entries": entries,
+        "summaries": summaries,
+    }
+
+
+def build_stock_timeline(
+    store: dict[str, Any],
+    symbol: str,
+    *,
+    related_reports: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    entry = ensure_stock_entry(store, symbol)
+    events: list[dict[str, Any]] = []
+
+    for note in entry["notes"]:
+        events.append(
+            {
+                "kind": "note",
+                "kind_label": SEARCH_KIND_META["note"]["label"],
+                "kind_tone": SEARCH_KIND_META["note"]["tone"],
+                "title": note.get("title") or "未命名笔记",
+                "summary": summarize_text_block(note.get("content_text") or ""),
+                "timestamp": str(note.get("created_at") or ""),
+                "sort_value": coerce_sort_timestamp(note.get("created_at")),
+                "display_time": note_display_time(note),
+                "tags": normalize_tag_list(note.get("tags", [])),
+                "reader_template_id": f"note-reader-{note['id']}",
+                "anchor": "notes-panel",
+            }
+        )
+
+    for record in iter_stock_file_records(store, symbol_filter=symbol):
+        file_entry = record["file_entry"]
+        file_card = build_stock_file_card(store, record, access_symbol=symbol)
+        events.append(
+            {
+                "kind": "file",
+                "kind_label": SEARCH_KIND_META["file"]["label"],
+                "kind_tone": SEARCH_KIND_META["file"]["tone"],
+                "title": file_entry.get("original_name") or "未命名文件",
+                "summary": summarize_text_block(
+                    file_entry.get("description")
+                    or f"{detect_file_type_label(str(file_entry.get('original_name') or ''))} 文件"
+                ),
+                "timestamp": str(file_entry.get("uploaded_at") or ""),
+                "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
+                "display_time": file_display_time(file_entry),
+                "tags": normalize_tag_list(file_entry.get("tags", [])),
+                "file_type_label": detect_file_type_label(str(file_entry.get("original_name") or "")),
+                "action_url": url_for("stock_detail", symbol=symbol) + "#files-panel",
+                "action_label": "查看文件",
+                "download_url": file_card["download_url"],
+                "anchor": "files-panel",
+            }
+        )
+
+    for transcript in build_transcript_cards(store, symbol_filter=symbol):
+        events.append(
+            {
+                "kind": "transcript",
+                "kind_label": SEARCH_KIND_META["transcript"]["label"],
+                "kind_tone": SEARCH_KIND_META["transcript"]["tone"],
+                "title": transcript["display_title"],
+                "summary": transcript["summary_excerpt"],
+                "timestamp": str(transcript.get("meeting_date") or transcript.get("created_at") or ""),
+                "sort_value": coerce_sort_timestamp(transcript.get("meeting_date") or transcript.get("created_at")),
+                "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
+                "tags": normalize_tag_list(transcript.get("tags", [])),
+                "status_label": transcript.get("status_label"),
+                "reader_template_id": f"stock-transcript-reader-{transcript['id']}",
+                "anchor": "transcripts-panel",
+            }
+        )
+
+    for report in related_reports or []:
+        events.append(
+            {
+                "kind": "report",
+                "kind_label": SEARCH_KIND_META["report"]["label"],
+                "kind_tone": SEARCH_KIND_META["report"]["tone"],
+                "title": report["title"],
+                "summary": report["summary"],
+                "timestamp": str(report.get("sort_key") or 0),
+                "sort_value": float(report.get("sort_key") or 0),
+                "display_time": report["report_date"],
+                "tags": [],
+                "action_url": url_for("index", report=report["filename"]),
+                "action_label": "打开日报",
+                "anchor": "related-reports",
+            }
+        )
+
+    events.sort(key=lambda item: (float(item["sort_value"]), item["title"]), reverse=True)
+    return events
+
+
+def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
+    if symbol not in list_stock_symbols(store):
+        abort(404)
+
+    entry = ensure_stock_entry(store, symbol)
+    notes = sorted(entry["notes"], key=lambda item: item["created_at"], reverse=True)
+    files = sorted(
+        [build_stock_file_card(store, record, access_symbol=symbol) for record in iter_stock_file_records(store, symbol_filter=symbol)],
+        key=lambda item: str(item.get("uploaded_at") or ""),
+        reverse=True,
+    )
+    transcripts = build_transcript_cards(store, symbol_filter=symbol)
+    earnings_calls = build_stock_earnings_call_cards(entry)
+    file_lookup = {str(file_entry.get("id") or ""): file_entry for file_entry in files}
+    related_reports = find_related_reports(symbol)
+
+    return {
+        **build_stock_card(store, symbol),
+        "notes": [
+            {
+                **note,
+                "display_title": note["title"] or "未命名笔记",
+                "display_created_at": note_display_time(note),
+                "summary_excerpt": summarize_text_block(note["content_text"]),
+                "source_file": file_lookup.get(note.get("source_file_id", "")),
+                "source_file_name_display": note.get("source_file_name")
+                or (
+                    file_lookup.get(note.get("source_file_id", ""), {}).get("original_name", "")
+                    if note.get("source_file_id")
+                    else ""
+                ),
+                "tags": normalize_tag_list(note.get("tags", [])),
+            }
+            for note in notes
+        ],
+        "files": files,
+        "transcripts": transcripts,
+        "earnings_calls": earnings_calls,
+        "earnings_call_sync": build_stock_earnings_call_sync_view(entry),
+        "related_reports": related_reports,
+        "timeline": build_stock_timeline(store, symbol, related_reports=related_reports),
+        "tag_summary": build_stock_tag_summary(store, symbol)[:12],
+        "created_label": format_iso_timestamp(entry.get("created_at")),
+        "setup": build_stock_setup_view(symbol),
+    }
+
+
+def get_stock_file_entry(store: dict[str, Any], symbol: str, file_id: str) -> dict[str, Any]:
+    return get_stock_file_record(store, symbol, file_id)["file_entry"]
+
+
+def build_stock_file_preview_context(
+    store: dict[str, Any],
+    symbol: str,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    file_entry = record["file_entry"]
+    linked_note = get_stock_file_linked_note(store, record)
+    original_name = str(file_entry.get("original_name") or "")
+    file_path = stock_upload_dir(record["storage_symbol"]) / str(file_entry.get("stored_name") or "")
+    preview_text = ""
+    is_truncated = False
+
+    if is_text_previewable(original_name):
+        preview_text, is_truncated = load_text_preview(file_path)
+
+    preview_note_html = ""
+    if is_image_previewable(original_name):
+        if linked_note and linked_note.get("content_html"):
+            preview_note_html = linked_note["content_html"]
+        elif file_entry.get("description"):
+            preview_note_html = plain_text_to_html(str(file_entry.get("description") or "").strip())
+
+    return {
+        "file_entry": build_stock_file_card(store, record, access_symbol=symbol),
+        "preview_text": preview_text,
+        "is_truncated": is_truncated,
+        "preview_note_html": preview_note_html,
+        "image_url": url_for("inline_stock_file", symbol=symbol, file_id=file_entry["id"])
+        if is_image_previewable(original_name)
+        else "",
+    }
 
 
 def get_transcript_entry(store: dict[str, Any], transcript_id: str) -> dict[str, Any]:
@@ -7077,6 +8945,17 @@ def build_navigation_context(
 ) -> dict[str, Any]:
     reports = reports if reports is not None else collect_reports()
     stock_store = stock_store if stock_store is not None else load_stock_store()
+    nav_stock_search_options = []
+    favorite_symbols = set(stock_store.get("favorites", []))
+    for option in build_stock_selector_options(stock_store):
+        symbol = option["symbol"]
+        nav_stock_search_options.append(
+            {
+                **option,
+                "detail_url": url_for("stock_detail", symbol=symbol),
+                "is_favorite": symbol in favorite_symbols,
+            }
+        )
 
     return {
         "active_page": active_page,
@@ -7090,7 +8969,34 @@ def build_navigation_context(
             1 for item in stock_store.get("schedule_items", []) if item.get("status") == "planned"
         ),
         "nav_trash_count": len(stock_store.get("trash", [])),
+        "nav_stock_search_options": nav_stock_search_options,
     }
+
+
+@app.get("/access")
+def access_password_gate() -> str:
+    if is_web_access_authenticated():
+        return redirect(safe_next_url(request.args.get("next"), url_for("index")))
+
+    next_url = safe_next_url(request.args.get("next"), url_for("index"))
+    return render_template("access_gate.html", next_url=next_url)
+
+
+@app.post("/access")
+def access_password_submit():
+    next_url = safe_next_url(request.form.get("next_url"), url_for("index"))
+    if not WEB_ACCESS_PASSWORD_SIGNATURE:
+        return redirect(next_url)
+
+    submitted_password = str(request.form.get("password") or "")
+    if not hmac.compare_digest(submitted_password, WEB_ACCESS_PASSWORD):
+        flash("访问密码不对，请再试一次。", "error")
+        return redirect(url_for("access_password_gate", next=next_url))
+
+    session.permanent = True
+    session[WEB_ACCESS_SESSION_KEY] = WEB_ACCESS_PASSWORD_SIGNATURE
+    flash(f"访问验证已通过，当前浏览器 {WEB_ACCESS_REMEMBER_DAYS} 天内不用重复输入。", "success")
+    return redirect(next_url)
 
 
 def load_codex_model_catalog() -> list[dict[str, Any]]:
@@ -8615,6 +10521,61 @@ def load_ai_knowledge_text(bundle_path: Path) -> str:
     )
 
 
+def trim_text_for_prompt(text: str, *, limit: int, note: str) -> str:
+    normalized = str(text or "").strip()
+    capped_limit = max(int(limit or 0), 2000)
+    if len(normalized) <= capped_limit:
+        return normalized
+    return normalized[:capped_limit].rstrip() + note
+
+
+def mindmap_knowledge_text_for_step(knowledge_text: str, *, step_slug: str) -> str:
+    step_limit = {
+        "plan": min(MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT, AI_PROMPT_KNOWLEDGE_CHAR_LIMIT),
+        "mindmap": min(MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT, AI_PROMPT_KNOWLEDGE_CHAR_LIMIT),
+        "repair": min(MINDMAP_REPAIR_KNOWLEDGE_CHAR_LIMIT, AI_PROMPT_KNOWLEDGE_CHAR_LIMIT),
+    }.get(step_slug, AI_PROMPT_KNOWLEDGE_CHAR_LIMIT)
+    step_label = {
+        "plan": "计划阶段正文已截短，优先依据上方时间线、比较轴和冲突线索搭骨架。",
+        "mindmap": "正式成图阶段正文已截短，优先依据已给出的骨架、时间线和高权重证据补全结果。",
+        "repair": "修复阶段正文已截短，请优先修正当前校验失败点。",
+    }.get(step_slug, "当前阶段正文已截短，请优先依据上方内容作答。")
+    return trim_text_for_prompt(
+        knowledge_text,
+        limit=step_limit,
+        note=f"\n\n[知识包正文过长，{step_label}]",
+    )
+
+
+def compute_mindmap_step_timeout_seconds(
+    *,
+    step_slug: str,
+    reasoning_effort: str,
+    prompt_text: str,
+) -> int:
+    base_timeout = max(int(AI_CODEX_TIMEOUT_SECONDS or 0), 60)
+    max_timeout = max(base_timeout, int(MINDMAP_MAX_STEP_TIMEOUT_SECONDS or base_timeout))
+    reasoning_multiplier = {
+        "low": 1.0,
+        "medium": 1.0,
+        "high": 1.2,
+        "xhigh": 1.55,
+    }.get(str(reasoning_effort or "").strip().lower(), 1.0)
+    step_multiplier = {
+        "plan": 1.15,
+        "mindmap": 1.25,
+        "repair": 1.0,
+    }.get(step_slug, 1.0)
+    prompt_length = len(str(prompt_text or ""))
+    prompt_multiplier = 1.0
+    if prompt_length >= 32000:
+        prompt_multiplier = 1.18
+    elif prompt_length >= 24000:
+        prompt_multiplier = 1.1
+    timeout_seconds = int(round(base_timeout * reasoning_multiplier * step_multiplier * prompt_multiplier))
+    return max(base_timeout, min(timeout_seconds, max_timeout))
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
@@ -9736,6 +11697,93 @@ def normalize_mindmap_source_relations(
     return relations[:8]
 
 
+def normalize_mindmap_comparison_axes(
+    raw_items: Any,
+    *,
+    valid_source_refs: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    axes: list[dict[str, Any]] = []
+    for raw_item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(raw_item, dict):
+            continue
+        axis = re.sub(r"\s+", " ", str(raw_item.get("axis") or "").strip())[:60]
+        takeaway = re.sub(r"\s+", " ", str(raw_item.get("takeaway") or "").strip())[:240]
+        if not axis:
+            continue
+
+        views: list[dict[str, Any]] = []
+        raw_views = raw_item.get("views", [])
+        for raw_view in raw_views if isinstance(raw_views, list) else []:
+            if not isinstance(raw_view, dict):
+                continue
+            symbol = normalize_stock_symbol(str(raw_view.get("symbol") or "")) or ""
+            stance = re.sub(r"\s+", " ", str(raw_view.get("stance") or "").strip())[:24]
+            summary = re.sub(r"\s+", " ", str(raw_view.get("summary") or "").strip())[:180]
+            if not symbol or (not stance and not summary):
+                continue
+            views.append(
+                {
+                    "symbol": symbol,
+                    "stance": stance,
+                    "summary": summary,
+                    "source_refs": normalize_mindmap_source_refs(
+                        raw_view.get("source_refs"),
+                        valid_source_refs=valid_source_refs,
+                    ),
+                }
+            )
+        if not views:
+            continue
+
+        axes.append(
+            {
+                "axis": axis,
+                "takeaway": takeaway,
+                "views": views[:8],
+                "source_refs": normalize_mindmap_source_refs(
+                    raw_item.get("source_refs"),
+                    valid_source_refs=valid_source_refs,
+                ),
+            }
+        )
+    return axes[:6]
+
+
+def normalize_mindmap_verification_targets(
+    raw_items: Any,
+    *,
+    valid_source_refs: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for raw_item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(raw_item, dict):
+            continue
+        question = re.sub(r"\s+", " ", str(raw_item.get("question") or "").strip())[:120]
+        why_it_matters = re.sub(r"\s+", " ", str(raw_item.get("why_it_matters") or "").strip())[:220]
+        evidence_gap = re.sub(r"\s+", " ", str(raw_item.get("evidence_gap") or "").strip())[:220]
+        next_check = re.sub(r"\s+", " ", str(raw_item.get("next_check") or "").strip())[:220]
+        if not question:
+            continue
+        priority = str(raw_item.get("priority") or "").strip().lower()
+        if priority not in {"high", "medium", "low"}:
+            priority = "medium"
+        targets.append(
+            {
+                "question": question,
+                "why_it_matters": why_it_matters,
+                "evidence_gap": evidence_gap,
+                "next_check": next_check,
+                "priority": priority,
+                "symbols": normalize_stock_symbol_list(raw_item.get("symbols", []))[:8],
+                "source_refs": normalize_mindmap_source_refs(
+                    raw_item.get("source_refs"),
+                    valid_source_refs=valid_source_refs,
+                ),
+            }
+        )
+    return targets[:6]
+
+
 def normalize_mindmap_payload(
     raw_payload: Any,
     *,
@@ -9774,6 +11822,14 @@ def normalize_mindmap_payload(
         raw_payload.get("source_relations"),
         valid_source_refs=valid_source_refs,
     )
+    comparison_axes = normalize_mindmap_comparison_axes(
+        raw_payload.get("comparison_axes"),
+        valid_source_refs=valid_source_refs,
+    )
+    verification_targets = normalize_mindmap_verification_targets(
+        raw_payload.get("verification_targets"),
+        valid_source_refs=valid_source_refs,
+    )
     cross_links = normalize_mindmap_cross_links(raw_payload.get("cross_links"), node_ids=node_ids)
 
     return {
@@ -9783,6 +11839,8 @@ def normalize_mindmap_payload(
         "root": root,
         "cross_links": cross_links,
         "insights": insights,
+        "comparison_axes": comparison_axes,
+        "verification_targets": verification_targets,
         "timeline_highlights": timeline,
         "source_relations": source_relations,
         "node_count": count_mindmap_nodes(root),
@@ -10094,6 +12152,12 @@ def build_mindmap_json_schema_prompt() -> str:
         '  "summary": "这张导图的总括摘要",\n'
         '  "structure_kind": "single_stock|peer_group|value_chain|theme_bundle",\n'
         '  "insights": ["核心判断 1", "核心判断 2"],\n'
+        '  "comparison_axes": [\n'
+        '    {"axis": "比较维度", "takeaway": "该维度的一句话判断", "source_refs": ["M01"], "views": [{"symbol": "NET", "stance": "领先|修复|承压|待定", "summary": "该标的在此维度下的判断", "source_refs": ["M01", "M02"]}]}\n'
+        "  ],\n"
+        '  "verification_targets": [\n'
+        '    {"question": "关键待验证点", "why_it_matters": "为什么重要", "evidence_gap": "当前证据缺口或冲突", "next_check": "下一步去哪里验证", "priority": "high|medium|low", "symbols": ["NET"], "source_refs": ["M02", "M05"]}\n'
+        "  ],\n"
         '  "timeline_highlights": [\n'
         '    {"date": "2026-03-11", "date_type": "event|published|meeting|inferred", "phase": "earliest|mid|latest", "label": "时间节点标题", "summary": "这一时点的信息变化", "source_refs": ["M01"]}\n'
         "  ],\n"
@@ -10165,6 +12229,9 @@ def validate_mindmap_research_payload(
         warnings.append("节点数量偏多，后续可继续压缩重复表达。")
 
     timeline = payload.get("timeline_highlights", []) if isinstance(payload.get("timeline_highlights"), list) else []
+    comparison_axes = payload.get("comparison_axes", []) if isinstance(payload.get("comparison_axes"), list) else []
+    verification_targets = payload.get("verification_targets", []) if isinstance(payload.get("verification_targets"), list) else []
+    selected_manifest = curated.get("selected_manifest", []) if isinstance(curated.get("selected_manifest"), list) else []
     selected_count = int((curated.get("stats") or {}).get("selected_material_count") or 0)
     if selected_count >= 4 and not timeline:
         errors.append("已有较多入选资料，但导图没有给出时间轴主线。")
@@ -10182,14 +12249,66 @@ def validate_mindmap_research_payload(
     if timeline and "earliest" not in phases:
         warnings.append("时间轴缺少 earliest 阶段，最早信号不够明确。")
 
+    selected_symbols = ordered_unique(
+        symbol
+        for item in selected_manifest
+        for symbol in normalize_stock_symbol_list(item.get("symbols", []))
+    )
+    multi_symbol_scope = payload.get("structure_kind") == "peer_group" or len(selected_symbols) >= 2
+    if multi_symbol_scope and len(comparison_axes) < 2:
+        errors.append("多标的/同行导图缺少统一比较轴，容易退化成按公司或资料平铺。")
+    elif selected_count >= 6 and not comparison_axes:
+        warnings.append("资料已经较多，但还没有显式比较轴，后续对位比较会偏弱。")
+
+    multi_symbol_axis_count = 0
+    covered_axis_count = 0
+    for axis in comparison_axes:
+        axis_views = axis.get("views", []) if isinstance(axis.get("views"), list) else []
+        axis_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in axis_views
+            if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+        }
+        if len(axis_symbols) >= 2:
+            multi_symbol_axis_count += 1
+        if axis.get("source_refs") or any(item.get("source_refs") for item in axis_views if isinstance(item, dict)):
+            covered_axis_count += 1
+
+    if multi_symbol_scope and comparison_axes and multi_symbol_axis_count <= 0:
+        errors.append("比较轴没有把至少两个标的放进同一维度下对位比较。")
+    elif multi_symbol_scope and len(comparison_axes) >= 2 and multi_symbol_axis_count < 2:
+        warnings.append("只有少数比较轴真正形成了跨标的对位比较，分析维度还可以继续收紧。")
+    if comparison_axes and covered_axis_count / max(len(comparison_axes), 1) < 0.6:
+        warnings.append("部分比较轴仍缺少明确来源引用，后续追溯会比较困难。")
+
     conflict_selected_count = sum(
         1
-        for source in curated.get("selected_manifest", [])
+        for source in selected_manifest
         if "conflict" in (source.get("weight_flags") or [])
     )
     has_risk_or_question = any(str(node.get("kind") or "") in {"question", "risk"} for node in nodes)
     if conflict_selected_count >= 2 and not has_risk_or_question:
         errors.append("入选资料里存在明显冲突，但导图里没有保留待验证或风险分支。")
+
+    if (conflict_selected_count >= 2 or selected_count >= 8) and len(verification_targets) < 2:
+        errors.append("资料冲突或信息密度已经较高，但还没有沉淀出足够明确的关键验证点。")
+    elif selected_count >= 5 and not verification_targets:
+        warnings.append("当前导图还没有显式验证账本，后续追踪主判断会偏散。")
+
+    actionable_target_count = sum(
+        1
+        for target in verification_targets
+        if str(target.get("evidence_gap") or "").strip() and str(target.get("next_check") or "").strip()
+    )
+    high_priority_target_count = sum(
+        1
+        for target in verification_targets
+        if str(target.get("priority") or "").strip().lower() == "high"
+    )
+    if verification_targets and actionable_target_count / max(len(verification_targets), 1) < 0.6:
+        warnings.append("部分验证点还不够可执行，最好同时写明证据缺口和下一步验证动作。")
+    if (conflict_selected_count >= 2 or multi_symbol_scope) and verification_targets and high_priority_target_count <= 0:
+        warnings.append("当前导图缺少高优先级验证点，主分歧的跟踪顺序还不够清晰。")
 
     research_nodes = [
         node
@@ -10209,6 +12328,13 @@ def validate_mindmap_research_payload(
     if not any(node.get("source_refs") for node in nodes):
         warnings.append("整张导图没有显式来源引用，后续回溯会比较困难。")
 
+    selected_kinds = {str(item.get("kind") or "").strip() for item in selected_manifest}
+    if "earnings_call" in selected_kinds and multi_symbol_scope and not any(
+        str(item.get("date_type") or "").strip() in {"meeting", "published"} and str(item.get("phase") or "").strip() == "latest"
+        for item in timeline
+    ):
+        warnings.append("当前范围里已有较新的官方材料，但时间轴没有明确落下最新官方口径节点。")
+
     return {"errors": errors[:12], "warnings": warnings[:12]}
 
 
@@ -10221,22 +12347,28 @@ def build_mindmap_plan_prompt(
     source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
     return (
         "你现在在做研究导图的第一步：先梳理结构，再决定成图骨架。\n"
-        "目标：基于资料先抽出主题主线、时间主线、冲突点和待验证问题，形成一张可复用的骨架图。\n"
+        "目标：基于资料先抽出主题主线、比较维度、时间主线、冲突点和待验证问题，形成一张可复用的骨架图。\n"
         "重要约束：\n"
         "1. 只能基于下方资料正文，不得补外部事实。\n"
-        "2. 这是第一步，重点是结构判断，不需要把证据写满，但必须先把分叉逻辑、时间轴和冲突关系梳理清楚。\n"
+        "2. 这是第一步，重点是结构判断，不需要把证据写满，但必须先把分叉逻辑、比较维度、时间轴和冲突关系梳理清楚。\n"
         "3. 结构模式只能四选一：single_stock / peer_group / value_chain / theme_bundle。\n"
         "4. 时间轴必须区分最早信号、中段验证/修正、最新状态；date_type 要区分 event / published / meeting / inferred。\n"
         "5. 资料若存在冲突、修正、对冲，必须明确留下 risk 或 question 分支，不能强行消解成单边结论。\n"
         "6. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
         "7. 顶层分支控制在 4 到 6 个，总节点控制在 12 到 28 个，层级最多 4 层。\n"
         "8. 根节点不能写成“资料整理”“研究导图”之类的泛称，要直接写研究主题。\n"
-        "9. 如果资料里包含电话会议，要优先识别管理层最新口径、指引、问答争议点，并和日报/笔记互相验证。\n"
-        "10. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "9. 如果资料里包含电话会议，要优先识别管理层最新口径、指引、问答争议点，并和日报/笔记/专家材料互相验证。\n"
+        "10. 在内部先把资料拆成“判断卡片”：比较维度、时间位置、来源角色、立场方向；不要输出中间稿，只把它体现在 comparison_axes、source_relations 和 root/children 结构里。\n"
+        "11. 如果是 peer_group 或多标的主题，必须先抽 3 到 5 个统一比较轴，再决定分支结构；不能先按公司平铺，再事后硬补比较。\n"
+        "12. verification_targets 不是泛泛提问，而是高杠杆验证清单：要写清 why_it_matters、evidence_gap、next_check、priority。\n"
+        "13. 如果官方最新口径与渠道/笔记不同，要明确写成修正、冲突或待验证，不能揉成平均结论。\n"
+        "14. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
         "这一步的输出要求：\n"
         "- 使用最终 schema，但 evidence / time_signals / source_notes 可以先写最必要的 0 到 2 条。\n"
+        "- comparison_axes 要尽量先搭出 2 到 5 个；如果是同行/多标的导图，至少给出 3 个统一比较轴。\n"
         "- timeline_highlights 至少给出 3 个节点（如果资料不足，再明确说明不足原因）。\n"
-        "- 每个关键节点都尽量带 source_refs 和 confidence。\n\n"
+        "- 如果资料冲突明显或资料密度较高，verification_targets 至少给出 2 个高价值验证点。\n"
+        "- 每个关键节点、比较轴和验证点都尽量带 source_refs 和 confidence/priority。\n\n"
         "当前资料范围：\n"
         f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
         f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
@@ -10260,7 +12392,7 @@ def build_mindmap_finalize_prompt(
     plan_text = json.dumps(plan_payload, ensure_ascii=False, indent=2)
     return (
         "你现在在做研究导图的第二步：在既有骨架上补齐研究合法的成图结果。\n"
-        "目标：把骨架图补成一张可用于研究回看和后续验证的正式导图。\n"
+        "目标：把骨架图补成一张可用于研究回看、横向比较和后续验证的正式导图。\n"
         "重要约束：\n"
         "1. 只能基于下方资料正文和骨架 JSON，不得补外部事实。\n"
         "2. 尽量保留骨架里的 structure_kind、节点 id、主要分支和时间主线；可以小幅修正，但不要推翻结构。\n"
@@ -10270,8 +12402,11 @@ def build_mindmap_finalize_prompt(
         "6. 对于仍未解开的冲突，要留在 risk / question / source_notes 里，不要硬写成确定结论。\n"
         "7. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
         "8. summary、evidence、time_signals、source_notes 都要短、可扫读。\n"
-        "9. 如果资料里包含电话会议，要优先保留管理层最新口径、指引变化和问答争议，不要把它埋进泛泛摘要里。\n"
-        "10. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "9. comparison_axes 必须是统一比较维度，不是公司摘要列表；每个轴都要尽量把相关标的放到同一个维度下对位比较。\n"
+        "10. verification_targets 必须是可执行的验证账本：写清 why_it_matters、evidence_gap、next_check、priority，优先保留真正能改变主判断的验证点。\n"
+        "11. 如果资料里包含电话会议，要优先保留管理层最新口径、指引变化和问答争议，不要把它埋进泛泛摘要里。\n"
+        "12. 如果官方口径和渠道反馈都存在，要明确指出谁在验证谁、谁在修正谁，不能只做表面折中。\n"
+        "13. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
         "当前资料范围：\n"
         f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
         f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
@@ -10301,7 +12436,8 @@ def build_mindmap_repair_prompt(
         "1. 只能输出一个修复后的 JSON 对象，不要解释。\n"
         "2. 优先修复 errors；warnings 能顺手优化就优化。\n"
         "3. 保留已有 structure_kind、节点 id、主分支和时间轴主线，不要大改主题。\n"
-        "4. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n\n"
+        "4. 如果缺少 comparison_axes 或 verification_targets，要优先补齐能通过校验的最小可用版本。\n"
+        "5. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n\n"
         f"允许引用的来源列表：\n{source_roster}\n\n"
         f"必须修复的问题：\n{error_lines}\n\n"
         f"可顺手优化的问题：\n{warning_lines}\n\n"
@@ -10322,6 +12458,11 @@ def run_mindmap_codex_step(
     codex_cli_path = resolve_codex_cli_path()
     if codex_cli_path is None:
         raise RuntimeError("当前电脑没有检测到可用的 Codex 可执行文件。")
+    timeout_seconds = compute_mindmap_step_timeout_seconds(
+        step_slug=step_slug,
+        reasoning_effort=reasoning_effort,
+        prompt_text=prompt_text,
+    )
 
     output_path = MINDMAP_CONTEXT_DIR / f"{record_id}-{step_slug}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -10357,7 +12498,7 @@ def run_mindmap_codex_step(
             cwd=str(BASE_DIR),
         )
         register_mindmap_process(record_id, process)
-        stdout_text, stderr_text = process.communicate(prompt_text, timeout=AI_CODEX_TIMEOUT_SECONDS)
+        stdout_text, stderr_text = process.communicate(prompt_text, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         if process is not None:
             process.kill()
@@ -10365,7 +12506,10 @@ def run_mindmap_codex_step(
                 process.communicate(timeout=5)
             except Exception:
                 pass
-        raise RuntimeError(f"{step_label}等待时间过长，Codex 暂时没有在设定时间内返回结果。")
+        raise RuntimeError(
+            f"{step_label}等待时间过长，Codex 在 {timeout_seconds} 秒内没有返回结果。"
+            " 可以稍后重试，或缩小资料范围/降低思考深度。"
+        )
     finally:
         release_mindmap_process(record_id)
 
@@ -10434,9 +12578,10 @@ def run_mindmap_generation(
             return
 
         valid_source_refs = curated.get("selected_ref_set") or None
+        plan_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="plan")
         plan_prompt = build_mindmap_plan_prompt(
             scope_summary=scope_summary,
-            knowledge_text=knowledge_text,
+            knowledge_text=plan_knowledge_text,
             fingerprint=fingerprint,
         )
         plan_reply = run_mindmap_codex_step(
@@ -10457,9 +12602,10 @@ def run_mindmap_generation(
         fingerprint["plan_digest"] = sha256_text(serialize_stable_json(plan_payload))
         update_mindmap_record(record_id, fingerprint=fingerprint)
 
+        final_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="mindmap")
         final_prompt = build_mindmap_finalize_prompt(
             scope_summary=scope_summary,
-            knowledge_text=knowledge_text,
+            knowledge_text=final_knowledge_text,
             plan_payload=plan_payload,
             fingerprint=fingerprint,
         )
@@ -10483,8 +12629,9 @@ def run_mindmap_generation(
         repair_attempted = False
         if validation["errors"]:
             repair_attempted = True
+            repair_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="repair")
             repair_prompt = build_mindmap_repair_prompt(
-                knowledge_text=knowledge_text,
+                knowledge_text=repair_knowledge_text,
                 current_payload=payload,
                 validation=validation,
                 fingerprint=fingerprint,
@@ -12645,7 +14792,7 @@ def export_ai_package():
     try:
         archive_buffer, download_name = build_ai_export_archive(
             package_kind=package_kind,
-            symbol=symbol,
+            symbol=storage_symbol,
             days=days,
             include_reports=include_reports,
             include_notes=include_notes,
@@ -13221,35 +15368,108 @@ def export_mindmap_studio_document(document_id: str):
 
 @app.route("/")
 def index() -> str:
-    reports = collect_reports()
-    selected_name = request.args.get("report")
-
-    active_report = None
-    if reports:
-        available_names = {str(report.get("filename") or "") for report in reports}
-        default_name = selected_name if selected_name in available_names else reports[0]["filename"]
-        active_report = load_report(default_name)
-
-    return render_template(
-        "index.html",
-        reports=reports,
-        active_report=active_report,
-        reports_dir=str(REPORTS_DIR),
-        local_url=current_local_url(),
-        lan_url=guess_lan_url(current_port()),
-        **build_navigation_context(active_page="archive", reports=reports),
-    )
+    selected_name = str(request.args.get("report") or "").strip()
+    if selected_name:
+        return redirect(url_for("monitor_page", report=selected_name))
+    return redirect(url_for("monitor_page"))
 
 
 @app.get("/monitor")
 def monitor_page() -> str:
     store = load_stock_store()
     reports = collect_reports()
+    selected_signal_report = str(request.args.get("signal_report") or "").strip()
+    active_tab = normalize_monitor_workspace_tab(
+        request.args.get("tab"),
+        fallback="signals" if selected_signal_report else "info",
+    )
     return render_template(
         "monitor.html",
         reports_dir=str(REPORTS_DIR),
-        **build_monitor_page_context(store),
+        signal_reports_dir=str(SIGNAL_MONITOR_REPORTS_DIR),
+        monitor_active_tab=active_tab,
+        **build_monitor_page_context(store, all_reports=reports),
+        **build_signal_monitor_page_context(selected_name=selected_signal_report),
         **build_navigation_context(active_page="monitor", reports=reports, stock_store=store),
+    )
+
+
+@app.get("/data-monitor")
+def data_monitor_page() -> str:
+    reports = collect_reports()
+    stock_store = load_stock_store()
+    active_tab = normalize_data_monitor_tab(request.args.get("tab"))
+    return render_template(
+        "data_monitor.html",
+        data_monitor_active_tab=active_tab,
+        **build_stablecoin_data_monitor_context(),
+        **build_navigation_context(active_page="data_monitor", reports=reports, stock_store=stock_store),
+    )
+
+
+@app.get("/data-monitor/stablecoins/status")
+def stablecoin_monitor_status():
+    cache = load_stablecoin_market_cache()
+    runtime = sync_stablecoin_monitor_runtime()
+    latest_snapshot = cache.get("latest_snapshot", {}) if isinstance(cache.get("latest_snapshot"), dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "runtime": {
+                **runtime,
+                "status_label": monitor_runtime_status_label(runtime["status"]),
+                "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                "is_running": runtime["status"] == "running",
+                "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+                "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+            },
+            "updated_at_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "尚未抓取",
+            "is_stale": stablecoin_market_cache_is_stale(cache),
+            "latest_market_cap_label": format_compact_currency(latest_snapshot.get("total_market_cap") or 0.0),
+            "latest_volume_label": format_compact_currency(latest_snapshot.get("total_volume") or 0.0),
+        }
+    )
+
+
+@app.post("/data-monitor/stablecoins/refresh")
+def refresh_stablecoin_monitor():
+    runtime = sync_stablecoin_monitor_runtime()
+    started = False
+    if runtime["status"] != "running":
+        runtime = start_stablecoin_market_refresh("manual_refresh")
+        started = True
+
+    message = "稳定币数据刷新已启动。" if started else "稳定币数据正在刷新中。"
+    if expects_json_response():
+        return jsonify(
+            {
+                "ok": True,
+                "started": started,
+                "message": message,
+                "runtime": {
+                    **runtime,
+                    "status_label": monitor_runtime_status_label(runtime["status"]),
+                    "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                    "is_running": runtime["status"] == "running",
+                    "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+                    "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+                },
+            }
+        )
+
+    flash(message, "success")
+    return redirect(url_for("data_monitor_page", tab="stablecoins"))
+
+
+@app.get("/reports/<path:filename>/preview-fragment")
+def preview_report_fragment(filename: str):
+    report = load_report(filename)
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return redirect(url_for("monitor_page", report=report["filename"]))
+    return render_template(
+        "report_modal.html",
+        report=report,
+        is_monitor_report=is_monitor_report_entry(report),
     )
 
 
@@ -13359,22 +15579,8 @@ def delete_monitor_report(filename: str):
 
 @app.get("/signals")
 def signal_monitor_page() -> str:
-    store = load_stock_store()
-    reports = collect_reports()
-    signal_reports = collect_signal_reports()
-    selected_name = request.args.get("report", "").strip()
-    active_report = None
-    if signal_reports:
-        active_name = selected_name or signal_reports[0]["filename"]
-        active_report = get_signal_report(active_name)
-
-    return render_template(
-        "signal_monitor.html",
-        signal_reports_dir=str(SIGNAL_MONITOR_REPORTS_DIR),
-        active_signal_report=active_report,
-        **build_signal_monitor_page_context(),
-        **build_navigation_context(active_page="signals", reports=reports, stock_store=store),
-    )
+    selected_name = str(request.args.get("report") or request.args.get("signal_report") or "").strip()
+    return redirect_to_monitor_workspace(tab="signals", signal_report=selected_name or None)
 
 
 @app.post("/signals/config")
@@ -13394,10 +15600,10 @@ def save_signal_monitor_defaults():
     ]
     if not sources:
         flash("请先添加至少一个要监控的大 V 或来源。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
     if not any(source.get("enabled", True) for source in sources):
         flash("请至少保留一个启用中的来源。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     try:
         default_window_days = min(max(int(request.form.get("default_window_days") or config.get("default_window_days") or SIGNAL_MONITOR_DEFAULT_WINDOW_DAYS), 1), 30)
@@ -13409,7 +15615,7 @@ def save_signal_monitor_defaults():
     config["updated_at"] = now_iso()
     save_signal_monitor_config(config)
     flash("信息监控默认来源已更新。", "success")
-    return redirect(url_for("signal_monitor_page"))
+    return redirect_to_monitor_workspace(tab="signals")
 
 
 @app.post("/signals/run")
@@ -13428,20 +15634,20 @@ def run_signal_monitor_job():
     ]
     if not sources:
         flash("请先添加至少一个要监控的大 V 或来源。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
     if not any(source.get("enabled", True) for source in sources):
         flash("请至少保留一个启用中的来源。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     runtime = sync_signal_monitor_runtime()
     if runtime["status"] == "running":
         flash("程序已在运行，是否终止。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     today_reports = collect_today_signal_reports()
     if today_reports and request.form.get("confirm_existing_today") != "1":
         flash("当天已经存在一份监测结果，是否继续运行。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     enabled_sources = [source for source in sources if source.get("enabled", True)]
     cooldown_hits = get_signal_monitor_cooldown_hits(enabled_sources)
@@ -13451,7 +15657,7 @@ def run_signal_monitor_job():
             for item in cooldown_hits[:3]
         )
         flash(f"这些来源刚跑过，不建议高频扫描。{earliest_label}", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     config = load_signal_monitor_config()
     try:
@@ -13467,10 +15673,10 @@ def run_signal_monitor_job():
         start_signal_monitor_process(sources)
     except Exception as exc:
         flash(f"启动信息监控失败：{exc}", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     flash("信息监控任务已经在后台启动。跑完后会自动写入独立归档，不会混进正式研究报告。", "success")
-    return redirect(url_for("signal_monitor_page"))
+    return redirect_to_monitor_workspace(tab="signals")
 
 
 @app.post("/signals/terminate")
@@ -13478,11 +15684,11 @@ def terminate_signal_monitor_job():
     current = sync_signal_monitor_runtime()
     if current["status"] != "running":
         flash("当前没有正在运行的信息监控任务。", "error")
-        return redirect(url_for("signal_monitor_page"))
+        return redirect_to_monitor_workspace(tab="signals")
 
     terminate_signal_monitor_process(current)
     flash("后台信息监控任务已终止。", "success")
-    return redirect(url_for("signal_monitor_page"))
+    return redirect_to_monitor_workspace(tab="signals")
 
 
 @app.get("/signals/status")
@@ -13534,7 +15740,7 @@ def delete_signal_report(filename: str):
             }
         )
     flash(message, "success")
-    return redirect(url_for("signal_monitor_page"))
+    return redirect_to_monitor_workspace(tab="signals")
 
 
 @app.route("/signals/files/<path:filename>")
@@ -14071,12 +16277,13 @@ def restore_trash_item(trash_id: str):
         entry["notes"].append(payload)
         touch_stock(store, symbol)
     elif item_type == "file":
-        if not symbol:
+        storage_symbol = stock_file_storage_symbol(payload, symbol) or symbol
+        if not storage_symbol:
             abort(400)
-        entry = ensure_stock_entry(store, symbol)
+        entry = ensure_stock_entry(store, storage_symbol)
         payload["id"] = ensure_unique_id(payload.get("id", ""), {item["id"] for item in entry["files"]})
         entry["files"].append(payload)
-        touch_stock(store, symbol)
+        touch_stock_symbols(store, stock_file_linked_symbols(payload, storage_symbol))
     elif item_type == "transcript":
         payload["id"] = ensure_unique_id(payload.get("id", ""), {item["id"] for item in store.get("transcripts", [])})
         store.setdefault("transcripts", []).append(payload)
@@ -14160,6 +16367,363 @@ def permanently_delete_trash_item(trash_id: str):
     return redirect(next_url)
 
 
+def build_global_search_context(
+    store: dict[str, Any],
+    reports: list[dict[str, Any]],
+    *,
+    query: str,
+    kind_filter: str,
+    symbol_filter: str,
+    tag_filter: str,
+) -> dict[str, Any]:
+    terms = split_search_terms(query)
+    folded_terms = fold_search_terms(terms)
+    normalized_symbol = normalize_stock_symbol(symbol_filter or "") or ""
+    normalized_tag = normalize_tag_value(tag_filter) or ""
+    selected_kind = kind_filter if kind_filter in SEARCH_KIND_META else ""
+    results: list[dict[str, Any]] = []
+
+    for symbol in sorted(list_stock_symbols(store)):
+        entry = ensure_stock_entry(store, symbol)
+        for note in entry["notes"]:
+            if selected_kind and selected_kind != "note":
+                continue
+            tags = normalize_tag_list(note.get("tags", []))
+            search_text = " ".join(
+                [
+                    symbol,
+                    note.get("title") or "",
+                    note.get("content_text") or "",
+                    " ".join(tags),
+                ]
+            )
+            if normalized_symbol and symbol != normalized_symbol:
+                continue
+            if normalized_tag and not tag_match(tags, normalized_tag):
+                continue
+            if terms and not text_contains_all_terms(
+                search_text,
+                terms,
+                text_casefolded=search_text.casefold(),
+                folded_terms=folded_terms,
+            ):
+                continue
+
+            results.append(
+                {
+                    "kind": "note",
+                    "kind_label": SEARCH_KIND_META["note"]["label"],
+                    "kind_tone": SEARCH_KIND_META["note"]["tone"],
+                    "title": note.get("title") or "未命名笔记",
+                    "summary": build_match_excerpt(
+                        note.get("content_text") or "",
+                        terms,
+                        summarize_text_block(note.get("content_text") or ""),
+                    ),
+                    "symbol": symbol,
+                    "display_time": note_display_time(note),
+                    "sort_value": coerce_sort_timestamp(note.get("created_at")),
+                    "tags": tags,
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="notes",
+                        item_kind="note",
+                        item_id=str(note.get("id") or ""),
+                        anchor=f"note-{note.get('id')}",
+                    ),
+                }
+            )
+
+        for call in build_stock_earnings_call_cards(entry):
+            if selected_kind and selected_kind != "earnings_call":
+                continue
+            if normalized_symbol and symbol != normalized_symbol:
+                continue
+            if normalized_tag:
+                continue
+
+            search_text = " ".join(
+                [
+                    symbol,
+                    str(call.get("display_title") or ""),
+                    str(call.get("original_title") or ""),
+                    str(call.get("transcript_text") or ""),
+                    str(call.get("source_query_label") or ""),
+                ]
+            )
+            if terms and not text_contains_all_terms(
+                search_text,
+                terms,
+                text_casefolded=search_text.casefold(),
+                folded_terms=folded_terms,
+            ):
+                continue
+
+            results.append(
+                {
+                    "kind": "earnings_call",
+                    "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
+                    "kind_tone": SEARCH_KIND_META["earnings_call"]["tone"],
+                    "title": call["display_title"],
+                    "summary": build_match_excerpt(
+                        call.get("transcript_text") or "",
+                        terms,
+                        call["summary_excerpt"],
+                    ),
+                    "symbol": symbol,
+                    "display_time": call.get("display_call_date") or call.get("display_published_at"),
+                    "sort_value": coerce_sort_timestamp(call.get("call_date") or call.get("published_at")),
+                    "tags": [],
+                    "url": build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="earnings-calls",
+                        item_kind="earnings_call",
+                        item_id=str(call.get("id") or ""),
+                        anchor=f"earnings-call-{call.get('id')}",
+                    ),
+                    "secondary_url": call.get("source_url") or "",
+                    "secondary_label": "打开来源",
+                }
+            )
+
+    for record in iter_stock_file_records(store, symbol_filter=normalized_symbol or None):
+        if selected_kind and selected_kind != "file":
+            continue
+
+        file_entry = record["file_entry"]
+        access_symbol = normalized_symbol or record["storage_symbol"]
+        tags = normalize_tag_list(file_entry.get("tags", []))
+        search_text = " ".join(
+            [
+                " ".join(record["linked_symbols"]),
+                file_entry.get("original_name") or "",
+                file_entry.get("description") or "",
+                file_entry.get("linked_note_title") or "",
+                " ".join(tags),
+            ]
+        )
+        if normalized_tag and not tag_match(tags, normalized_tag):
+            continue
+        if terms and not text_contains_all_terms(
+            search_text,
+            terms,
+            text_casefolded=search_text.casefold(),
+            folded_terms=folded_terms,
+        ):
+            continue
+
+        results.append(
+            {
+                "kind": "file",
+                "kind_label": SEARCH_KIND_META["file"]["label"],
+                "kind_tone": SEARCH_KIND_META["file"]["tone"],
+                "title": file_entry.get("original_name") or "未命名文件",
+                "summary": build_match_excerpt(
+                    " ".join(
+                        [
+                            file_entry.get("description") or "",
+                            file_entry.get("linked_note_title") or "",
+                        ]
+                    ),
+                    terms,
+                    summarize_text_block(file_entry.get("description") or file_entry.get("original_name") or ""),
+                ),
+                "symbol": access_symbol,
+                "display_time": file_display_time(file_entry),
+                "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
+                "tags": tags,
+                "url": build_stock_detail_deep_link(
+                    symbol=access_symbol,
+                    panel="files",
+                    item_kind="file",
+                    item_id=str(file_entry.get("id") or ""),
+                    anchor=f"file-{file_entry.get('id')}",
+                ),
+                "secondary_url": url_for("download_stock_file", symbol=access_symbol, file_id=file_entry["id"]),
+                "secondary_label": "下载文件",
+            }
+        )
+
+    for transcript in build_transcript_cards(store):
+        if selected_kind and selected_kind != "transcript":
+            continue
+        symbols = transcript.get("linked_symbols", [])
+        symbol = (
+            normalized_symbol
+            if normalized_symbol and normalized_symbol in symbols
+            else (symbols[0] if len(symbols) == 1 else "")
+        )
+        tags = normalize_tag_list(transcript.get("tags", []))
+        search_text = " ".join(
+            [
+                transcript.get("linked_symbols_label") or "",
+                transcript.get("display_title") or "",
+                transcript.get("transcript_text") or "",
+                transcript.get("original_name") or "",
+                " ".join(tags),
+            ]
+        )
+        if normalized_symbol and normalized_symbol not in symbols:
+            continue
+        if normalized_tag and not tag_match(tags, normalized_tag):
+            continue
+        if terms and not text_contains_all_terms(
+            search_text,
+            terms,
+            text_casefolded=search_text.casefold(),
+            folded_terms=folded_terms,
+        ):
+            continue
+
+        results.append(
+            {
+                "kind": "transcript",
+                "kind_label": SEARCH_KIND_META["transcript"]["label"],
+                "kind_tone": SEARCH_KIND_META["transcript"]["tone"],
+                "title": transcript["display_title"],
+                "summary": build_match_excerpt(
+                    transcript.get("transcript_text") or "",
+                    terms,
+                    transcript["summary_excerpt"],
+                ),
+                "symbol": symbol,
+                "symbols": symbols,
+                "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
+                "sort_value": coerce_sort_timestamp(transcript.get("meeting_date") or transcript.get("created_at")),
+                "tags": tags,
+                "url": (
+                    build_stock_detail_deep_link(
+                        symbol=symbol,
+                        panel="transcripts",
+                        item_kind="transcript",
+                        item_id=str(transcript.get("id") or ""),
+                        anchor=f"transcript-{transcript.get('id')}",
+                    )
+                    if symbol
+                    else url_for("transcripts_page")
+                ),
+            }
+        )
+
+    for schedule_item in store.get("schedule_items", []):
+        if selected_kind and selected_kind != "schedule":
+            continue
+        tags = normalize_tag_list(schedule_item.get("tags", []))
+        symbol = str(schedule_item.get("symbol") or "")
+        search_text = " ".join(
+            [
+                symbol,
+                str(schedule_item.get("company") or ""),
+                str(schedule_item.get("title") or ""),
+                str(schedule_item.get("note") or ""),
+                str(schedule_item.get("location") or ""),
+                " ".join(tags),
+            ]
+        )
+        if normalized_symbol and symbol != normalized_symbol:
+            continue
+        if normalized_tag and not tag_match(tags, normalized_tag):
+            continue
+        if terms and not text_contains_all_terms(
+            search_text,
+            terms,
+            text_casefolded=search_text.casefold(),
+            folded_terms=folded_terms,
+        ):
+            continue
+
+        schedule_date = str(schedule_item.get("scheduled_date") or "")
+        results.append(
+            {
+                "kind": "schedule",
+                "kind_label": SEARCH_KIND_META["schedule"]["label"],
+                "kind_tone": SEARCH_KIND_META["schedule"]["tone"],
+                "title": str(schedule_item.get("title") or "未命名日程"),
+                "summary": build_match_excerpt(
+                    " ".join(
+                        [
+                            str(schedule_item.get("note") or ""),
+                            str(schedule_item.get("location") or ""),
+                            str(schedule_item.get("company") or ""),
+                        ]
+                    ),
+                    terms,
+                    summarize_text_block(
+                        str(schedule_item.get("note") or "")
+                        or str(schedule_item.get("location") or "")
+                        or build_schedule_time_label(schedule_item)
+                    ),
+                ),
+                "symbol": symbol,
+                "display_time": f"{schedule_date} 路 {build_schedule_time_label(schedule_item)}",
+                "sort_value": schedule_item_sort_datetime(schedule_item).timestamp(),
+                "tags": tags,
+                "url": (
+                    url_for("schedule_page", month=schedule_date[:7], date=schedule_date, focus=schedule_item["id"])
+                    + f"#schedule-item-{schedule_item['id']}"
+                ),
+            }
+        )
+
+    report_symbol_pattern = (
+        re.compile(rf"(?<![A-Z0-9]){re.escape(normalized_symbol)}(?![A-Z0-9])", re.IGNORECASE)
+        if normalized_symbol
+        else None
+    )
+    for report in reports:
+        if selected_kind and selected_kind != "report":
+            continue
+        content = str(report.get("content") or "") or read_report_text(REPORTS_DIR / report["filename"])
+        combined_text = " ".join([report["title"], report["summary"], report["filename"], content])
+        if normalized_symbol and report_symbol_pattern and not report_symbol_pattern.search(combined_text):
+            continue
+        if terms and not text_contains_all_terms(
+            combined_text,
+            terms,
+            text_casefolded=combined_text.casefold(),
+            folded_terms=folded_terms,
+        ):
+            continue
+        if normalized_tag:
+            continue
+
+        results.append(
+            {
+                "kind": "report",
+                "kind_label": SEARCH_KIND_META["report"]["label"],
+                "kind_tone": SEARCH_KIND_META["report"]["tone"],
+                "title": report["title"],
+                "summary": build_match_excerpt(content, terms, report["summary"]),
+                "symbol": normalized_symbol if normalized_symbol else "",
+                "display_time": report["report_date"],
+                "sort_value": float(report["sort_key"]),
+                "tags": [],
+                "url": url_for("index", report=report["filename"]),
+            }
+        )
+
+    results.sort(key=lambda item: (float(item["sort_value"]), item["title"]), reverse=True)
+    counts = Counter(item["kind"] for item in results)
+
+    return {
+        "query": query.strip(),
+        "selected_kind": selected_kind,
+        "selected_symbol": normalized_symbol,
+        "selected_tag": normalized_tag,
+        "results": results,
+        "result_count": len(results),
+        "result_counts": counts,
+        "kind_options": [{"value": "", "label": "全部"}]
+        + [
+            {"value": key, "label": meta["label"]}
+            for key, meta in SEARCH_KIND_META.items()
+            if key != "group"
+        ],
+        "stock_options": build_stock_selector_options(store),
+        "popular_tags": build_stock_tag_summary(store)[:14],
+    }
+
+
 @app.get("/transcripts")
 def transcripts_page() -> str:
     store = load_stock_store()
@@ -14194,15 +16758,31 @@ def transcripts_page() -> str:
 @app.post("/transcripts")
 def create_transcript_job():
     store = load_stock_store()
-    uploaded = request.files.get("transcript_media")
+    uploaded_files = [
+        uploaded
+        for uploaded in request.files.getlist("transcript_media")
+        if uploaded is not None and str(uploaded.filename or "").strip()
+    ]
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    if uploaded is None or not uploaded.filename:
+    if not uploaded_files:
         flash("请先选择要上传的音频或视频文件。", "error")
         return redirect(next_url)
 
-    if not is_transcript_source_allowed(uploaded.filename):
-        flash("当前只支持常见音频/视频文件，如 mp3、wav、mp4、mov、mkv。", "error")
+    invalid_filenames = [
+        str(uploaded.filename or "").strip()
+        for uploaded in uploaded_files
+        if not is_transcript_source_allowed(str(uploaded.filename or ""))
+    ]
+    if invalid_filenames:
+        preview_names = "; ".join(invalid_filenames[:3])
+        suffix = " 等文件" if len(invalid_filenames) > 3 else ""
+        flash(f"以下文件格式暂不支持：{preview_names}{suffix}。当前支持常见音频/视频格式，如 mp3、wav、mp4、mov、mkv。", "error")
+        return redirect(next_url)
+
+    file_url_hint = request.form.get("file_url_hint", "").strip()[:2000]
+    if file_url_hint and len(uploaded_files) > 1:
+        flash("批量上传本地文件时，请不要同时填写公网文件地址。这个高级选项目前只适合单个文件。", "error")
         return redirect(next_url)
 
     link_to_stock = request.form.get("link_to_stock") == "on"
@@ -14265,28 +16845,19 @@ def create_transcript_job():
     if summarization_enabled and not summarization_types:
         summarization_types = ["Paragraph"]
 
-    safe_name = secure_filename(uploaded.filename)
-    original_suffix = Path(uploaded.filename).suffix.lower()
-    if not safe_name:
-        safe_name = f"meeting-recording{original_suffix or '.bin'}"
-    elif original_suffix and not safe_name.lower().endswith(original_suffix):
-        safe_name = f"{Path(safe_name).stem}{original_suffix}"
+    base_title = request.form.get("transcript_title", "").strip()[:160]
+    first_filename_date = infer_date_from_filename(uploaded_files[0].filename)
+    meeting_date_is_manual = request.form.get("meeting_date_is_manual") == "1"
+    submitted_meeting_date = normalize_date_field(request.form.get("meeting_date"))
+    meeting_date_has_custom_value = bool(submitted_meeting_date and submitted_meeting_date != today_date_iso())
+    resolved_meeting_date = (
+        submitted_meeting_date
+        if meeting_date_is_manual or meeting_date_has_custom_value
+        else (first_filename_date or submitted_meeting_date)
+    ) or today_date_iso()
+    is_batch_upload = len(uploaded_files) > 1
 
-    timestamp = now_iso()
-    stored_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{safe_name}"
-    TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = TRANSCRIPT_UPLOADS_DIR / stored_name
-    uploaded.save(target_path)
-
-    transcript_entry = {
-        "id": uuid.uuid4().hex[:10],
-        "title": request.form.get("transcript_title", "").strip()[:160],
-        "meeting_date": normalize_date_field(request.form.get("meeting_date")) or iso_to_date(timestamp) or today_date_iso(),
-        "created_at": timestamp,
-        "updated_at": timestamp,
-        "stored_name": stored_name,
-        "original_name": uploaded.filename[:240],
-        "media_kind": detect_transcript_media_kind(uploaded.filename),
+    transcript_base_payload = {
         "provider": "tingwu",
         "status": "pending_api",
         "provider_task_id": "",
@@ -14296,7 +16867,7 @@ def create_transcript_job():
         "last_synced_at": "",
         "last_error": "",
         "provider_result_urls": {},
-        "file_url_hint": request.form.get("file_url_hint", "").strip()[:2000],
+        "file_url_hint": file_url_hint,
         "source_bucket_name": "",
         "source_object_key": "",
         "source_endpoint": "",
@@ -14325,50 +16896,116 @@ def create_transcript_job():
         "tags": normalize_tag_list(request.form.get("transcript_tags", "")),
     }
 
-    normalized_transcript = normalize_transcript_entry(transcript_entry)
-    if normalized_transcript is None:
+    tingwu_status = build_tingwu_status()
+    oss_status = build_oss_status()
+    normalized_transcripts: list[dict[str, Any]] = []
+    auto_submitted_count = 0
+    auto_source_ready_count = 0
+    auto_submit_errors: list[str] = []
+
+    TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    for uploaded in uploaded_files:
+        original_name = str(uploaded.filename or "").strip()
+        safe_name = secure_filename(original_name)
+        original_suffix = Path(original_name).suffix.lower()
+        if not safe_name:
+            safe_name = f"meeting-recording{original_suffix or '.bin'}"
+        elif original_suffix and not safe_name.lower().endswith(original_suffix):
+            safe_name = f"{Path(safe_name).stem}{original_suffix}"
+
+        timestamp = now_iso()
+        stored_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{safe_name}"
+        target_path = TRANSCRIPT_UPLOADS_DIR / stored_name
+        uploaded.save(target_path)
+
+        transcript_title = base_title
+        if is_batch_upload and transcript_title:
+            title_suffix = fallback_title(Path(original_name))
+            if title_suffix:
+                transcript_title = f"{transcript_title} - {title_suffix}"[:160]
+
+        transcript_entry = {
+            "id": uuid.uuid4().hex[:10],
+            "title": transcript_title,
+            "meeting_date": resolved_meeting_date or iso_to_date(timestamp) or today_date_iso(),
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "stored_name": stored_name,
+            "original_name": original_name[:240],
+            "media_kind": detect_transcript_media_kind(original_name),
+            **deepcopy(transcript_base_payload),
+        }
+
+        normalized_transcript = normalize_transcript_entry(transcript_entry)
+        if normalized_transcript is None:
+            auto_submit_errors.append(f"{original_name or '未命名文件'}: 任务写入失败")
+            continue
+
+        auto_submit_error = ""
+        auto_source_ready = False
+        if tingwu_status["is_ready"] and not normalized_transcript["file_url_hint"] and oss_status["is_ready"]:
+            try:
+                ensure_transcript_source_url(normalized_transcript)
+                auto_source_ready = True
+            except Exception as exc:
+                normalized_transcript["last_error"] = str(exc)[:2000]
+                normalized_transcript["updated_at"] = now_iso()
+                auto_submit_error = str(exc)
+
+        if tingwu_status["is_ready"] and (normalized_transcript["file_url_hint"] or normalized_transcript["source_object_key"]):
+            try:
+                submit_transcript_job_to_tingwu(normalized_transcript)
+                auto_submitted_count += 1
+            except Exception as exc:
+                normalized_transcript["last_error"] = str(exc)[:2000]
+                normalized_transcript["updated_at"] = now_iso()
+                auto_submit_error = str(exc)
+
+        if auto_source_ready:
+            auto_source_ready_count += 1
+        if auto_submit_error:
+            auto_submit_errors.append(f"{original_name or '未命名文件'}: {auto_submit_error}")
+
+        normalized_transcripts.append(normalized_transcript)
+
+    if not normalized_transcripts:
         flash("转录任务写入失败，请重试。", "error")
         return redirect(next_url)
 
-    tingwu_status = build_tingwu_status()
-    oss_status = build_oss_status()
-    auto_submitted = False
-    auto_submit_error = ""
-    auto_source_ready = False
-    if tingwu_status["is_ready"] and not normalized_transcript["file_url_hint"] and oss_status["is_ready"]:
-        try:
-            ensure_transcript_source_url(normalized_transcript)
-            auto_source_ready = True
-        except Exception as exc:
-            normalized_transcript["last_error"] = str(exc)[:2000]
-            normalized_transcript["updated_at"] = now_iso()
-            auto_submit_error = str(exc)
-
-    if tingwu_status["is_ready"] and (normalized_transcript["file_url_hint"] or normalized_transcript["source_object_key"]):
-        try:
-            submit_transcript_job_to_tingwu(normalized_transcript)
-            auto_submitted = True
-        except Exception as exc:
-            normalized_transcript["last_error"] = str(exc)[:2000]
-            normalized_transcript["updated_at"] = now_iso()
-            auto_submit_error = str(exc)
-
     with STOCK_STORE_LOCK:
         store = load_stock_store()
-        store.setdefault("transcripts", []).append(normalized_transcript)
-        touch_transcript_stocks(store, normalized_transcript)
+        transcript_entries = store.setdefault("transcripts", [])
+        for transcript in normalized_transcripts:
+            transcript_entries.append(transcript)
+            touch_transcript_stocks(store, transcript)
         save_stock_store(store)
 
-    if auto_submitted:
-        flash("会议转录任务已保存，并已提交到听悟。后续请用“刷新状态”主动轮询结果。", "success")
-    elif auto_submit_error:
-        flash(f"任务已保存，但提交到听悟失败：{auto_submit_error}", "error")
-    elif auto_source_ready:
-        flash("会议转录任务已保存，源文件也已自动上传到 OSS。你可以稍后继续提交到听悟。", "success")
-    elif transcript_entry["file_url_hint"]:
-        flash("会议转录任务已保存。当前可以随时手动提交到听悟。", "success")
+    if len(normalized_transcripts) == 1:
+        normalized_transcript = normalized_transcripts[0]
+        if auto_submitted_count:
+            flash("会议转录任务已保存，并已提交到听悟。后续请用“刷新状态”主动轮询结果。", "success")
+        elif auto_submit_errors:
+            flash(f"任务已保存，但提交到听悟失败：{auto_submit_errors[0].split(': ', 1)[-1]}", "error")
+        elif auto_source_ready_count:
+            flash("会议转录任务已保存，源文件也已自动上传到 OSS。你可以稍后继续提交到听悟。", "success")
+        elif normalized_transcript["file_url_hint"]:
+            flash("会议转录任务已保存。当前可以随时手动提交到听悟。", "success")
+        else:
+            flash("会议转录任务已保存。系统还没拿到可用的云端地址，稍后可以直接点“提交到听悟”再试。", "success")
     else:
-        flash("会议转录任务已保存。系统还没拿到可用的云端地址，稍后可以直接点“提交到听悟”再试。", "success")
+        flash(f"已批量保存 {len(normalized_transcripts)} 个会议转录任务。", "success")
+        if auto_submitted_count:
+            flash(f"其中 {auto_submitted_count} 个任务已自动提交到听悟。", "success")
+        elif auto_source_ready_count:
+            flash(f"其中 {auto_source_ready_count} 个任务的源文件已自动上传到 OSS，可以稍后继续提交。", "success")
+        elif file_url_hint:
+            flash("这批任务已沿用你填写的公网文件地址保存。", "success")
+
+        if auto_submit_errors:
+            preview_errors = "; ".join(auto_submit_errors[:2])
+            suffix = " 等" if len(auto_submit_errors) > 2 else ""
+            flash(f"{len(auto_submit_errors)} 个任务自动处理失败：{preview_errors}{suffix}", "error")
     return redirect(next_url)
 
 
@@ -14729,6 +17366,7 @@ def stock_detail(symbol: str) -> str:
     return render_template(
         "stock_detail.html",
         stock=detail,
+        stock_options=build_stock_selector_options(store),
         related_reports=detail["related_reports"],
         available_groups=available_groups,
         stock_calendar=stock_calendar,
@@ -14943,7 +17581,7 @@ def toggle_favorite(symbol: str):
         store["favorites"].append(symbol)
         flash(f"{symbol} 已加入自选。", "success")
 
-    touch_stock(store, symbol)
+    touch_stock_symbols(store, stock_file_linked_symbols(file_entry, storage_symbol))
     save_stock_store(store)
     return redirect(safe_next_url(request.form.get("next_url"), url_for("stocks_workspace")))
 
@@ -15073,6 +17711,13 @@ def upload_stock_file(symbol: str):
     note_comment_text = request.form.get("file_note_content", "").strip()
     extract_text_to_note = request.form.get("extract_text_to_note") == "on"
     next_url = safe_next_url(request.form.get("next_url"), url_for("stock_detail", symbol=symbol))
+    linked_symbols = ordered_unique([symbol] + normalize_stock_symbol_list(request.form.getlist("linked_symbols")))
+    known_symbols = set(list_stock_symbols(store))
+    missing_symbols = [item for item in linked_symbols if item not in known_symbols]
+
+    if missing_symbols:
+        flash(f"These stocks are not in the workspace yet: {', '.join(missing_symbols)}", "error")
+        return redirect(next_url)
 
     if uploaded is None or not uploaded.filename:
         flash("请先选择要上传的文件。", "error")
@@ -15099,6 +17744,8 @@ def upload_stock_file(symbol: str):
         "linked_note_title": "",
         "extract_text": extract_text_to_note,
         "tags": normalize_tag_list(request.form.get("file_tags", "")),
+        "storage_symbol": symbol,
+        "linked_symbols": linked_symbols,
     }
 
     extracted_text: str | None = None
@@ -15135,7 +17782,7 @@ def upload_stock_file(symbol: str):
         file_entry["linked_note_title"] = resolved_title
 
     entry["files"].append(file_entry)
-    touch_stock(store, symbol)
+    touch_stock_symbols(store, linked_symbols)
     save_stock_store(store)
     if file_entry["linked_note_id"] and extracted_success:
         flash(f"{symbol} 文件已上传，文字已抽取进笔记。", "success")
@@ -15195,13 +17842,76 @@ def build_stock_file_preview_context(
     }
 
 
+def get_stock_file_entry(store: dict[str, Any], symbol: str, file_id: str) -> dict[str, Any]:
+    return get_stock_file_record(store, symbol, file_id)["file_entry"]
+
+
+def build_stock_file_preview_context(
+    store: dict[str, Any],
+    symbol: str,
+    file_record: dict[str, Any],
+) -> dict[str, Any]:
+    file_entry = file_record["file_entry"]
+    linked_note = get_stock_file_linked_note(store, file_record)
+    original_name = str(file_entry.get("original_name") or "")
+    file_path = stock_upload_dir(file_record["storage_symbol"]) / str(file_entry.get("stored_name") or "")
+    preview_text = ""
+    is_truncated = False
+
+    if is_text_previewable(original_name):
+        preview_text, is_truncated = load_text_preview(file_path)
+
+    preview_note_html = ""
+    if is_image_previewable(original_name):
+        if linked_note and linked_note.get("content_html"):
+            preview_note_html = linked_note["content_html"]
+        elif file_entry.get("description"):
+            preview_note_html = plain_text_to_html(str(file_entry.get("description") or "").strip())
+
+    return {
+        "file_entry": build_stock_file_card(store, file_record, access_symbol=symbol),
+        "preview_text": preview_text,
+        "is_truncated": is_truncated,
+        "preview_note_html": preview_note_html,
+        "image_url": url_for("inline_stock_file", symbol=symbol, file_id=file_entry["id"])
+        if is_image_previewable(original_name)
+        else "",
+    }
+
+
+@app.post("/stocks/<symbol>/files/<file_id>/links")
+def update_stock_file_links(symbol: str, file_id: str):
+    store = load_stock_store()
+    symbol = require_stock_symbol(symbol)
+    record = get_stock_file_record(store, symbol, file_id)
+    file_entry = record["file_entry"]
+    next_url = safe_next_url(request.form.get("next_url"), url_for("stock_detail", symbol=symbol))
+    known_symbols = set(list_stock_symbols(store))
+    selected_symbols = normalize_stock_symbol_list(request.form.getlist("linked_symbols"))
+    missing_symbols = [item for item in selected_symbols if item not in known_symbols]
+
+    if missing_symbols:
+        flash(f"These stocks are not in the workspace yet: {', '.join(missing_symbols)}", "error")
+        return redirect(next_url)
+
+    previous_symbols = stock_file_linked_symbols(file_entry, record["storage_symbol"])
+    linked_symbols = ordered_unique([record["storage_symbol"]] + selected_symbols)
+    file_entry["storage_symbol"] = record["storage_symbol"]
+    file_entry["linked_symbols"] = linked_symbols
+    touch_stock_symbols(store, previous_symbols + linked_symbols)
+    save_stock_store(store)
+    flash("Research file links updated.", "success")
+    return redirect(next_url)
+
+
 @app.get("/stocks/<symbol>/files/<file_id>")
 def download_stock_file(symbol: str, file_id: str):
     store = load_stock_store()
     symbol = require_stock_symbol(symbol)
-    file_entry = get_stock_file_entry(store, symbol, file_id)
+    file_record = get_stock_file_record(store, symbol, file_id)
+    file_entry = file_record["file_entry"]
     return send_from_directory(
-        stock_upload_dir(symbol),
+        stock_upload_dir(file_record["storage_symbol"]),
         file_entry["stored_name"],
         as_attachment=True,
         download_name=file_entry["original_name"],
@@ -15212,9 +17922,10 @@ def download_stock_file(symbol: str, file_id: str):
 def inline_stock_file(symbol: str, file_id: str):
     store = load_stock_store()
     symbol = require_stock_symbol(symbol)
-    file_entry = get_stock_file_entry(store, symbol, file_id)
+    file_record = get_stock_file_record(store, symbol, file_id)
+    file_entry = file_record["file_entry"]
     return send_from_directory(
-        stock_upload_dir(symbol),
+        stock_upload_dir(file_record["storage_symbol"]),
         file_entry["stored_name"],
         as_attachment=False,
         download_name=file_entry["original_name"],
@@ -15225,7 +17936,8 @@ def inline_stock_file(symbol: str, file_id: str):
 def preview_stock_file(symbol: str, file_id: str):
     store = load_stock_store()
     symbol = require_stock_symbol(symbol)
-    file_entry = get_stock_file_entry(store, symbol, file_id)
+    file_record = get_stock_file_record(store, symbol, file_id)
+    file_entry = file_record["file_entry"]
 
     if not is_file_previewable(file_entry["original_name"]):
         flash("该文件类型暂不支持在线预览。", "error")
@@ -15234,7 +17946,7 @@ def preview_stock_file(symbol: str, file_id: str):
     return render_template(
         "stock_file_preview.html",
         stock=build_stock_detail(store, symbol),
-        **build_stock_file_preview_context(store, symbol, file_entry),
+        **build_stock_file_preview_context(store, symbol, file_record),
         **build_navigation_context(active_page="stocks", stock_store=store),
     )
 
@@ -15243,7 +17955,8 @@ def preview_stock_file(symbol: str, file_id: str):
 def preview_stock_file_fragment(symbol: str, file_id: str):
     store = load_stock_store()
     symbol = require_stock_symbol(symbol)
-    file_entry = get_stock_file_entry(store, symbol, file_id)
+    file_record = get_stock_file_record(store, symbol, file_id)
+    file_entry = file_record["file_entry"]
 
     if not is_file_previewable(file_entry["original_name"]):
         abort(404)
@@ -15251,7 +17964,7 @@ def preview_stock_file_fragment(symbol: str, file_id: str):
     return render_template(
         "stock_file_modal.html",
         stock_symbol=symbol,
-        **build_stock_file_preview_context(store, symbol, file_entry),
+        **build_stock_file_preview_context(store, symbol, file_record),
     )
 
 
@@ -15259,8 +17972,14 @@ def preview_stock_file_fragment(symbol: str, file_id: str):
 def delete_stock_file(symbol: str, file_id: str):
     store = load_stock_store()
     symbol = require_stock_symbol(symbol)
-    entry = ensure_stock_entry(store, symbol)
-    file_entry = get_stock_file_entry(store, symbol, file_id)
+    file_record = get_stock_file_record(store, symbol, file_id)
+    file_entry = file_record["file_entry"]
+    storage_symbol = file_record["storage_symbol"]
+    if storage_symbol != symbol:
+        flash("请回到这份资料最初上传的股票页再删除文件。", "error")
+        return redirect(safe_next_url(request.form.get("next_url"), url_for("stock_detail", symbol=symbol)))
+
+    entry = ensure_stock_entry(store, storage_symbol)
     append_to_trash(
         store,
         create_trash_entry(
@@ -15293,6 +18012,7 @@ if __name__ == "__main__":
     STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STOCK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    maybe_start_stablecoin_monitor_scheduler()
     host = os.getenv("HOST", "0.0.0.0")
     port = current_port()
     app.run(host=host, port=port, debug=False)
