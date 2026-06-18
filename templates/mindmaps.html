@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>研究导图</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='mindmap-workspace.js', v='20260330-mindmap-submit2') }}" defer></script>
 </head>
 <body>
@@ -146,7 +146,7 @@
           </div>
         {% endif %}
 
-        <form class="ai-composer mindmap-composer" action="{{ url_for('generate_mindmap') }}" method="post">
+        <form class="ai-composer mindmap-composer" action="{{ url_for('generate_mindmap') }}" method="post" enctype="multipart/form-data">
           <input type="hidden" name="use_stock_scope" value="{{ '1' if mindmap_scope_settings.use_stock_scope else '0' }}" data-ai-scope-hidden="use_stock_scope">
           <input type="hidden" name="scope_symbols" value="{{ mindmap_scope_settings.symbols_text }}" data-ai-scope-hidden="scope_symbols">
           <input type="hidden" name="scope_content_kinds" value="{{ mindmap_scope_settings.content_kinds_text }}" data-ai-scope-hidden="scope_content_kinds">
@@ -161,6 +161,26 @@
               <strong>生成分叉思维图</strong>
               <p class="section-caption">默认会自动判断是单股拆解、同行对比、产业链传导还是主题资料包，并强制抽出时间主线与资料关系。</p>
             </div>
+            <label class="form-field mindmap-prompt-field">
+              <span class="field-label">额外归纳要求</span>
+              <textarea
+                name="generation_prompt"
+                rows="4"
+                placeholder="可选：比如“帮我重点分析新增量/变化，再列一个思维导图”或“按管理层最新口径 vs 旧判断的变化去归纳”"
+                {% if not codex_ready %}disabled{% endif %}
+              >{{ mindmap_generation_prompt }}</textarea>
+              <span class="field-help">不填就按默认逻辑归纳；填了会优先按你的方向整理结构、变化点和待验证项。</span>
+            </label>
+            <label class="form-field mindmap-upload-field">
+              <span class="field-label">摘要底稿 PDF / Word</span>
+              <input
+                type="file"
+                name="generation_brief_file"
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                {% if not codex_ready %}disabled{% endif %}
+              >
+              <span class="field-help">可选：上传你自己写的周报、summary 或摘要底稿，系统会先拆出你的逻辑链，再回到资料库找依据、冲突点和待验证环节。</span>
+            </label>
             <div class="mindmap-composer-controls">
               <label class="form-field ai-compact-field">
                 <span class="field-label">模型</span>
@@ -239,6 +259,24 @@
                   <span class="meta-chip">{{ active_record.scope_summary.stock_label }}</span>
                   <span class="meta-chip">{{ active_record.scope_summary.time_label }}</span>
                   <span class="meta-chip">{{ active_record.scope_summary.content_label }}</span>
+                </div>
+              {% endif %}
+
+              {% if active_record.generation_prompt %}
+                <div class="mindmap-generation-note">
+                  <span class="meta-chip">本次归纳要求</span>
+                  <p>{{ active_record.generation_prompt }}</p>
+                </div>
+              {% endif %}
+
+              {% if active_record.generation_brief and active_record.generation_brief.text %}
+                <div class="mindmap-generation-note mindmap-brief-note">
+                  <span class="meta-chip">本次摘要底稿</span>
+                  <p class="mindmap-brief-file">{{ active_record.generation_brief.original_name or active_record.generation_brief.stored_name }}</p>
+                  {% if active_record.generation_brief.summary %}
+                    <p>{{ active_record.generation_brief.summary }}</p>
+                  {% endif %}
+                  <p class="field-help">生成时会先拆这份底稿的逻辑主线，允许不同的链条有不同层数，再结合资料库补证据、反例和时间传导。</p>
                 </div>
               {% endif %}
 
@@ -418,3 +456,4 @@
   </div>
 </body>
 </html>
+

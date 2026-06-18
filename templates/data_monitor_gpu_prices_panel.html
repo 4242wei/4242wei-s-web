@@ -1,0 +1,358 @@
+{% macro render_gpu_price_line_chart(chart) %}
+  <section class="panel stablecoin-chart-panel gpu-price-chart-panel">
+    <div class="section-header">
+      <div>
+        <p class="eyebrow">Time Series</p>
+        <h3>{{ chart.title }}</h3>
+        <p class="section-caption">{{ chart.subtitle }}</p>
+      </div>
+      <div class="stablecoin-legend-row" aria-label="GPU price index series">
+        {% if chart.filterable is not defined or chart.filterable %}
+          {% for series in chart.series %}
+            <button
+              class="stablecoin-legend-chip gpu-price-legend-chip"
+              type="button"
+              data-gpu-price-legend="{{ series.symbol }}"
+              aria-pressed="false"
+            >
+              <span class="stablecoin-legend-swatch" style="--stablecoin-color: {{ series.color }}"></span>
+              {{ series.label }}
+            </button>
+          {% endfor %}
+        {% else %}
+          {% for series in chart.series %}
+            <span class="stablecoin-legend-chip gpu-price-legend-chip is-static">
+              <span class="stablecoin-legend-swatch" style="--stablecoin-color: {{ series.color }}"></span>
+              {{ series.label }}
+            </span>
+          {% endfor %}
+        {% endif %}
+      </div>
+    </div>
+    <div
+      class="stablecoin-chart-shell gpu-price-chart-shell"
+      data-gpu-price-chart
+      data-chart-title="{{ chart.title }}"
+      data-chart-visible-limit="{{ chart.visible_point_limit }}"
+    >
+      <div class="stablecoin-chart-viewport" data-chart-viewport>
+        <svg
+          class="stablecoin-chart-svg gpu-price-chart-svg"
+          viewBox="0 0 880 468"
+          role="img"
+          aria-label="{{ chart.title }}"
+          preserveAspectRatio="xMidYMid meet"
+        ></svg>
+      </div>
+      <div class="stablecoin-chart-scrollbar" data-chart-scrollbar hidden aria-label="{{ chart.title }} timeline scrollbar">
+        <div class="stablecoin-chart-scrollbar-inner" data-chart-scrollbar-inner></div>
+      </div>
+      <p class="field-help stablecoin-chart-filter-note" data-chart-filter-note>
+        {{ chart.filter_note or "Click a GPU family above to isolate one price series. The horizontal scrollbar moves along the stored date axis." }}
+      </p>
+      <script type="application/json" data-gpu-price-chart-seed>{{ chart|tojson }}</script>
+    </div>
+  </section>
+{% endmacro %}
+
+<main class="data-monitor-layout">
+  <section class="data-monitor-main">
+    <section class="panel applovin-overview-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">GPU Price Index</p>
+          <h3>Daily on-demand medians</h3>
+          <p class="section-caption">
+            MVP series use one-GPU rows with 16-32 vCPU and 120-256 GB RAM per GPU. Custom quotes stay out of the index.
+          </p>
+        </div>
+      </div>
+
+      <div class="applovin-overview-grid">
+        {% for item in gpu_price_latest_cards %}
+          <article class="stablecoin-summary-card gpu-price-index-card">
+            <p class="eyebrow">{{ item.gpu_family }} / {{ item.variant }}</p>
+            <h4>{{ item.available_standardized_price_label }}</h4>
+            <p class="field-help">
+              {{ item.available_provider_count }} providers / {{ item.available_sample_size }} quality-window samples.
+              Cheapest visible: {{ item.cheapest_provider or "n/a" }} {{ item.cheapest_price_label }}.
+            </p>
+            <div class="gpu-price-index-method">
+              <span>Method: {{ item.index_method_label }}</span>
+              <span>{{ item.index_formula_label }}</span>
+              <span>{{ item.index_dispersion_label }}</span>
+              <span>Scope: {{ item.index_scope_label }}</span>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel applovin-overview-panel gpu-price-b-series-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">B-Series Coverage</p>
+          <h3>B200 / B100 information</h3>
+          <p class="section-caption">
+            B-series cards stay separate from H-series because memory capacity, bandwidth and Blackwell inference/training characteristics are not directly comparable.
+          </p>
+        </div>
+      </div>
+      <div class="applovin-overview-grid">
+        {% for item in gpu_price_b_series_cards %}
+          <article class="stablecoin-summary-card gpu-price-index-card">
+            <p class="eyebrow">{{ item.gpu_family }} / {{ item.variant }}</p>
+            <h4>{{ item.available_standardized_price_label }}</h4>
+            <p class="field-help">
+              Offers in current snapshot: {{ item.offer_count }}.
+              {% if not item.price_index_enabled %}Availability-only until public numeric pricing is deep enough.{% endif %}
+            </p>
+            <div class="gpu-price-index-method">
+              <span>Specs: {{ item.vram_label }} VRAM / {{ item.mem_bw_label }} bandwidth / {{ item.fp16_label }}</span>
+              <span>VRAM-normalized: {{ item.usd_per_80gb_vram_label }} per 80GB VRAM-hour</span>
+              <span>Bandwidth-normalized: {{ item.usd_per_tbps_label }} per TB/s-hour</span>
+              <span>FP16-normalized: {{ item.usd_per_pf16_label }} per PF16-hour</span>
+              <span>{{ item.note }}</span>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    {{ render_gpu_price_line_chart(gpu_price_line_chart) }}
+
+    <section class="panel applovin-overview-panel gpu-price-spot-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Spot Index</p>
+          <h3>Spot / preemptible medians</h3>
+          <p class="section-caption">
+            Spot is stored as a separate billing-type index, not mixed into the on-demand curve.
+            Core market rows stay separate from CSP official rows; Azure is charted below for big-cloud comparison.
+          </p>
+        </div>
+      </div>
+      <div class="applovin-overview-grid">
+        {% for item in gpu_price_spot_cards %}
+          <article class="stablecoin-summary-card gpu-price-index-card{% if not item.has_index %} is-muted{% endif %}">
+            <p class="eyebrow">{{ item.gpu_family }} / spot</p>
+            <h4>{{ item.spot_standardized_price_label }}</h4>
+            <p class="field-help">
+              {{ item.spot_provider_count }} providers / {{ item.spot_sample_size }} spot samples.
+              Discount vs on-demand: {{ item.spot_discount_label }}.
+            </p>
+            <div class="gpu-price-index-method">
+              <span>Method: {{ item.index_method_label }}</span>
+              <span>{{ item.index_formula_label }}</span>
+              <span>{{ item.index_dispersion_label }}</span>
+              <span>Scope: {{ item.index_scope_label }}</span>
+              {% if not item.has_index %}
+                <span>No parsed spot rows yet. GetDeploying/Vast spot rows can populate this without touching the on-demand index.</span>
+              {% endif %}
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    {{ render_gpu_price_line_chart(gpu_price_spot_line_chart) }}
+
+    <section class="panel applovin-overview-panel gpu-price-csp-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Azure CSP Reference</p>
+          <h3>Official cloud price curve</h3>
+          <p class="section-caption">
+            Azure Retail Prices rows are indexed independently because CSP list prices and NCP market prices can differ materially.
+          </p>
+        </div>
+      </div>
+      <div class="applovin-overview-grid">
+        {% for item in gpu_price_csp_cards %}
+          <article class="stablecoin-summary-card gpu-price-index-card{% if not item.has_index %} is-muted{% endif %}">
+            <p class="eyebrow">Azure / {{ item.gpu_family }} / {{ item.variant }}</p>
+            <h4>{{ item.on_demand_price_label }}</h4>
+            <p class="field-help">
+              On-demand: {{ item.on_demand_sample_size }} Azure SKUs.
+              Spot: {{ item.spot_price_label }} from {{ item.spot_sample_size }} SKUs.
+              Spot discount: {{ item.spot_discount_label }}.
+            </p>
+            <div class="gpu-price-index-method">
+              <span>Method: trimmed median</span>
+              <span>{{ item.index_formula_label }}</span>
+              <span>On-demand dispersion: {{ item.on_demand_dispersion_label }}</span>
+              <span>Spot dispersion: {{ item.spot_dispersion_label }}</span>
+              <span>{{ item.index_storage_label }}</span>
+              {% if not item.has_index %}
+                <span>No Azure per-GPU index yet; current rows may lack safely inferable GPU counts or quality-window fields.</span>
+              {% endif %}
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    {{ render_gpu_price_line_chart(gpu_price_csp_line_chart) }}
+
+    <section class="panel applovin-chart-panel">
+      <details class="stablecoin-details gpu-price-details">
+        <summary class="stablecoin-details-summary">
+          <div>
+            <p class="eyebrow">Stored Series</p>
+            <h3>Index rows</h3>
+            <p class="section-caption">
+              Same-day refreshes replace earlier rows for the same date and series key, so the table keeps the latest daily result.
+            </p>
+          </div>
+          <span class="stablecoin-details-toggle" aria-hidden="true">
+            <span class="stablecoin-details-toggle-open">展开明细</span>
+            <span class="stablecoin-details-toggle-close">收起明细</span>
+          </span>
+        </summary>
+        <div class="stablecoin-details-body">
+          <div class="applovin-table-shell">
+            <table class="applovin-category-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Series</th>
+                  <th>Mode</th>
+                  <th>Median</th>
+                  <th>P25-P75</th>
+                  <th>Samples</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in gpu_price_index_rows %}
+              <tr>
+                <td>{{ row.date }}</td>
+                <td>{{ row.gpu_variant_canonical }}</td>
+                <td>{{ row.availability_mode }}</td>
+                <td>{{ row.price_standardized_label }}</td>
+                <td>{{ row.p25_label }} - {{ row.p75_label }}</td>
+                <td>{{ row.sample_size }} / {{ row.provider_count }} providers</td>
+              </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel applovin-table-panel">
+      <details class="stablecoin-details gpu-price-details">
+        <summary class="stablecoin-details-summary">
+          <div>
+            <p class="eyebrow">Normalized Offers</p>
+            <h3>Current provider summary rows</h3>
+            <p class="section-caption">
+              Raw source rows normalized to provider, GPU family, hourly price, bundle size, availability and region.
+            </p>
+          </div>
+          <span class="stablecoin-details-toggle" aria-hidden="true">
+            <span class="stablecoin-details-toggle-open">展开明细</span>
+            <span class="stablecoin-details-toggle-close">收起明细</span>
+          </span>
+        </summary>
+        <div class="stablecoin-details-body">
+          <div class="applovin-table-shell">
+            <table class="applovin-sdk-table">
+              <thead>
+                <tr>
+                  <th>GPU</th>
+                  <th>Provider</th>
+                  <th>Price</th>
+                  <th>Bundle</th>
+                  <th>Availability</th>
+                  <th>Regions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in gpu_price_offer_rows %}
+              <tr>
+                <td>{{ row.gpu_family }}</td>
+                <td>{{ row.provider_name }}</td>
+                <td>{{ row.price_label }}</td>
+                <td>{{ row.bundle_label }}</td>
+                <td>{{ row.availability_status }}</td>
+                <td>{{ row.region_label }}</td>
+              </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+  </section>
+
+  <aside class="data-monitor-sidebar">
+    <section class="panel monitor-status-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Runtime</p>
+          <h3>Refresh status</h3>
+        </div>
+      </div>
+      <div class="monitor-status-grid">
+        <article class="mini-fact">
+          <span class="mini-label">Status</span>
+          <strong>{{ gpu_price_runtime.status_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">Started</span>
+          <strong>{{ gpu_price_runtime.started_at_label }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">Finished</span>
+          <strong>{{ gpu_price_runtime.finished_at_label }}</strong>
+        </article>
+      </div>
+      {% if gpu_price_runtime.message %}
+        <p class="field-help">{{ gpu_price_runtime.message }}</p>
+      {% endif %}
+      {% if gpu_price_runtime.error %}
+        <p class="field-help">{{ gpu_price_runtime.error }}</p>
+      {% endif %}
+    </section>
+
+    <section class="panel monitor-reference-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Source Health</p>
+          <h3>Fetch checks</h3>
+        </div>
+      </div>
+      <div class="cdn-side-list">
+        {% for row in gpu_price_health_rows %}
+          <article class="cdn-side-card">
+            <h4>{{ row.source_name }} / {{ row.gpu_family }}</h4>
+            <p class="field-help">
+              {{ row.status_label }}; HTTP {{ row.status_code or "n/a" }};
+              rows {{ row.rows_parsed }}; providers {{ row.providers_found }}.
+            </p>
+            {% if row.notes %}
+              <p class="field-help">{{ row.notes }}</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel monitor-reference-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Method</p>
+          <h3>Data notes</h3>
+        </div>
+      </div>
+      <p class="field-help">{{ gpu_price_notes }}</p>
+      <p class="field-help">
+        CSP note: GPUs.io gives mostly NCP/market provider summaries. Azure Retail Prices API is connected and stored in a separate CSP index;
+        AWS and GCP can be added as separate official-source connectors.
+      </p>
+      <p class="field-help">Source: {{ gpu_price_source_name }}. Last refresh: {{ gpu_price_last_updated_label }}.</p>
+    </section>
+  </aside>
+</main>

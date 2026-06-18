@@ -105,9 +105,13 @@ Current persistent stores:
 - `data/stocks.json`: stock workspace state, notes, groups, files, earnings
 - `data/ai_chats.json`: AI chat sessions
 - `data/ai_context/`: AI context snapshots and exports
+- `data/ai_native/`: AI-native manifest/doc cache plus the SQLite search sidecar used by GPT-facing retrieval
+- `data/ai_native/agent_ops.json`: guarded preview/commit operation log for AI agent writes
+- `data/ai_native/artifacts.json`: durable saved timeline/compare analysis artifacts for reuse in UI or GPT tools
+- `data/ai_native/jobs.json`: background job queue state for artifact generation
 - `data/mindmaps.json`: generated research mindmap records
 - `data/mindmap_context/`: generated mindmap context payloads
-- `data/mindmap_studio.json`: editable studio documents
+- `data/mindmap_studio.json`: editable studio documents plus structured graph metadata, revision history, reusable exports, diff/baseline snapshots, and restore state
 - `data/monitor/`: monitor config, runtime, prompts, trash
 - `data/signal_monitor/`: signal monitor config, runtime, prompts, reports, trash
 - `uploads/stocks/`: stock-linked uploads
@@ -127,6 +131,9 @@ To avoid debt buildup, keep using these rules:
 - Shared UI utilities belong in one of the existing shared shell scripts.
 - When a template adds a new page-specific asset, keep the asset reference next to the page template instead of hiding it in a global include.
 - Keep cache-busting version strings per-template when assets change.
+- When a lab page grows new backend abilities, wire them into the page controls in the same change so the capability does not drift unused behind the template.
+- AI-native retrieval, analysis, and agent-tool routes should stay additive and read-only unless a separate write flow explicitly introduces preview/diff/commit safeguards.
+- Long-running AI-native analysis should prefer the artifact/job layer so page requests stay short and polling-friendly instead of doing heavier work inline.
 
 ## Safe Way To Add A New Module
 
@@ -158,6 +165,8 @@ Keep those layers separate:
 - generated output remains the baseline record
 - studio edits remain the editable working layer
 - synchronization between them should go through dedicated sync helpers, not ad hoc field copying
+- when generated output is projected into `mindmap_studio`, preserve reusable structure instead of flattening everything into freeform notes
+- document-level exports or analysis should derive from the studio document itself, so future tooling can reuse one stable graph contract
 
 ## What We Are Intentionally Not Doing Yet
 

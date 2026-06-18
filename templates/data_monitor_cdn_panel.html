@@ -1,0 +1,557 @@
+{% macro render_cdn_trend_chart(chart) %}
+  <article class="cdn-trend-card">
+    <div class="section-header">
+      <div>
+        <p class="eyebrow">趋势图</p>
+        <h3>{{ chart.title }}</h3>
+        <p class="section-caption">{{ chart.subtitle }}</p>
+      </div>
+    </div>
+
+    {% if chart.points %}
+      <div class="cdn-trend-shell" data-cdn-trend-chart data-trend-namespace="cdn" data-chart-key="{{ chart.chart_key }}" data-chart-visible-limit="{{ chart.visible_point_limit }}">
+        <div class="cdn-trend-viewport" data-cdn-chart-viewport>
+          <svg
+            class="cdn-trend-svg"
+            viewBox="0 0 760 336"
+            role="img"
+            aria-label="{{ chart.title }}"
+            preserveAspectRatio="xMidYMid meet"
+          ></svg>
+        </div>
+        <div class="cdn-trend-scrollbar" data-cdn-chart-scrollbar hidden>
+          <div class="cdn-trend-scrollbar-inner" data-cdn-chart-scrollbar-inner></div>
+        </div>
+        <p class="field-help cdn-trend-filter-note" data-cdn-chart-filter-note>点击上方 provider，单独查看它在时间序列里的变化。</p>
+        <script type="application/json" data-cdn-trend-chart-seed>{{ chart|tojson }}</script>
+      </div>
+    {% else %}
+      <div class="empty-card">
+        <p>当前还没有可用历史快照。手动刷新几轮后，这里会开始累积 provider 的时间序列。</p>
+      </div>
+    {% endif %}
+  </article>
+{% endmacro %}
+
+<main class="stock-layout data-monitor-layout">
+  <section class="stock-main data-monitor-main">
+    <section class="panel cdn-overview-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">概览</p>
+          <h3>网站级 CDN / Edge Tracker</h3>
+          <p class="section-caption">{{ cdn_notes }}</p>
+        </div>
+      </div>
+
+      <div class="cdn-overview-grid">
+        <article class="module-card cdn-summary-card">
+          <p class="eyebrow">覆盖样本</p>
+          <h4>跟踪网站</h4>
+          <p class="stablecoin-summary-value">{{ cdn_tracked_count }}</p>
+          <p class="field-help">目标样本当前设为 top {{ cdn_target_count_goal }} 网站；当前缓存里已有 {{ cdn_tracked_count }} 个。</p>
+        </article>
+        <article class="module-card cdn-summary-card">
+          <p class="eyebrow">可达性</p>
+          <h4>成功探测</h4>
+          <p class="stablecoin-summary-value">{{ cdn_reachable_count }}</p>
+          <p class="field-help">至少能返回主入口响应头的站点数量。</p>
+        </article>
+        <article class="module-card cdn-summary-card">
+          <p class="eyebrow">Primary Provider</p>
+          <h4>识别结果</h4>
+          <p class="stablecoin-summary-value">{{ cdn_detected_count }}</p>
+          <p class="field-help">当前能通过公开信号识别到 provider 的站点数量。</p>
+        </article>
+        <article class="module-card cdn-summary-card">
+          <p class="eyebrow">Multi-Provider Hint</p>
+          <h4>混合前门</h4>
+          <p class="stablecoin-summary-value">{{ cdn_multi_provider_count }}</p>
+          <p class="field-help">资源域名里观察到多个 provider 线索的站点。</p>
+        </article>
+        <article class="module-card cdn-summary-card">
+          <p class="eyebrow">对比上次</p>
+          <h4>近期变化</h4>
+          <p class="stablecoin-summary-value">{{ cdn_changed_count }}</p>
+          <p class="field-help">与上一个缓存快照相比，provider 或可达性变化的站点。</p>
+        </article>
+      </div>
+
+      <div class="cdn-method-list" role="list" aria-label="CDN 追踪方法">
+        {% for point in cdn_method_points %}
+          <div class="cdn-method-item" role="listitem">{{ point }}</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel monitor-signal-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Signals</p>
+          <h3>Monitor Health</h3>
+          <p class="section-caption">把可比样本、抓取稳定性和最近变化放在一处，先判断这组趋势能不能信，再决定要不要深挖。</p>
+        </div>
+      </div>
+
+      {% if cdn_confidence_items %}
+        <div class="monitor-confidence-grid">
+          {% for item in cdn_confidence_items %}
+            <article class="monitor-confidence-card" data-tone="{{ item.tone }}">
+              <span class="mini-label">{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+              {% if item.detail %}
+                <p class="field-help">{{ item.detail }}</p>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if cdn_highlight_cards %}
+        <div class="monitor-highlight-grid">
+          {% for item in cdn_highlight_cards %}
+            <article class="monitor-highlight-card" data-tone="{{ item.tone }}">
+              <span class="mini-label">{{ item.title }}</span>
+              {% if item.value %}
+                <strong>{{ item.value }}</strong>
+              {% endif %}
+              <p class="field-help">{{ item.summary }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="monitor-signal-list">
+        {% for item in cdn_signal_items %}
+          <article class="monitor-signal-item" data-tone="{{ item.tone }}">
+            <div>
+              <strong>{{ item.title }}</strong>
+              <p class="field-help">{{ item.summary }}</p>
+            </div>
+            {% if item.timestamp_label %}
+              <span class="meta-chip">{{ item.timestamp_label }}</span>
+            {% endif %}
+          </article>
+        {% else %}
+          <div class="empty-card">
+            <p>当前还没有足够明显的 CDN 变化信号，继续积累日快照后这里会更有判断力。</p>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <div class="cdn-chart-grid cdn-chart-grid-single">
+      <section class="panel cdn-chart-panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">统计图</p>
+            <h3>Primary Provider Distribution</h3>
+            <p class="section-caption">先看集中度。当前 {{ cdn_tracked_count }} 个样本里每家 provider 拿下多少主入口站点，一眼就能看到份额与长尾。</p>
+          </div>
+        </div>
+
+        <div class="cdn-distribution-chart" role="img" aria-label="Primary provider distribution chart">
+          {% for bar in cdn_distribution_bars %}
+            <article class="cdn-distribution-bar">
+              <div class="cdn-distribution-bar-shell">
+                <div class="cdn-distribution-bar-track">
+                  <span class="cdn-distribution-bar-fill" style="height: {{ '%.1f'|format(bar.height_pct) }}%; --cdn-provider-color: {{ bar.color }}"></span>
+                </div>
+              </div>
+              <strong>{{ bar.count }}</strong>
+              <span>{{ bar.provider }}</span>
+              <em>{{ bar.share_label }}</em>
+            </article>
+          {% endfor %}
+        </div>
+
+        <div class="cdn-provider-stack">
+          {% for row in cdn_provider_rows %}
+            <article class="cdn-provider-row">
+              <div class="cdn-provider-row-head">
+                <div class="card-inline-meta">
+                  <span class="meta-chip">
+                    <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ row.color }}"></span>
+                    {{ row.provider }}
+                  </span>
+                  <span class="meta-chip">{{ row.count }} 个</span>
+                </div>
+                <strong>{{ row.share_label }}</strong>
+              </div>
+              <div class="cdn-provider-meter" aria-hidden="true">
+                <span class="cdn-provider-meter-fill" style="width: {{ row.share_pct }}%; --cdn-provider-color: {{ row.color }}"></span>
+              </div>
+              <p class="field-help">
+                {% if row.site_labels %}
+                  {{ row.site_labels|join(" · ") }}
+                {% else %}
+                  暂无样本
+                {% endif %}
+              </p>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    </div>
+
+    <section class="panel cdn-trend-stage">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">时间序列</p>
+          <h3>Provider Trendboard</h3>
+          <p class="section-caption">
+            静态份额回答“现在谁大”，趋势图回答“这几家是怎么变过来的”。当前趋势图只使用 {{ cdn_trend_snapshot_count }} 次可比快照，
+            默认展示当前样本里份额靠前的几家 provider；同一天如果抓到多次，只保留当天最后一次结果。
+          </p>
+        </div>
+        <div class="monitor-trend-toolbar" data-trend-controls data-trend-namespace="cdn">
+          <div class="monitor-control-group">
+            <span class="mini-label">Window</span>
+            <div class="monitor-chip-row">
+              <button class="detail-chip detail-chip-button" type="button" data-trend-window="7d">7D</button>
+              <button class="detail-chip detail-chip-button is-active" type="button" data-trend-window="30d">30D</button>
+              <button class="detail-chip detail-chip-button" type="button" data-trend-window="90d">90D</button>
+              <button class="detail-chip detail-chip-button" type="button" data-trend-window="all">All</button>
+            </div>
+          </div>
+          <div class="monitor-control-group">
+            <span class="mini-label">View</span>
+            <div class="monitor-chip-row">
+              <button class="detail-chip detail-chip-button is-active" type="button" data-trend-view="raw">Raw</button>
+              <button class="detail-chip detail-chip-button" type="button" data-trend-view="smooth">Smoothed</button>
+              <button class="detail-chip detail-chip-button" type="button" data-trend-view="indexed">Indexed</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {% if cdn_history_span_label %}
+        <div class="card-inline-meta">
+          <span class="meta-chip">{{ cdn_history_span_label }}</span>
+        </div>
+      {% endif %}
+
+      {% if cdn_hidden_history_snapshot_count %}
+        <p class="field-help">
+          另有 {{ cdn_hidden_history_snapshot_count }} 次旧快照因为样本规模不同被自动忽略，避免从小样本扩到大样本时折线被动跳升。
+        </p>
+      {% endif %}
+
+      {% if cdn_collapsed_same_day_snapshot_count %}
+        <p class="field-help">
+          另有 {{ cdn_collapsed_same_day_snapshot_count }} 次同日内重复快照已折叠为当天最新值，避免趋势线在同一天里来回抖动。
+        </p>
+      {% endif %}
+
+      {% if cdn_trend_providers %}
+        <div class="cdn-trend-legend" aria-label="CDN provider trend legend">
+          {% for provider in cdn_trend_providers %}
+            <button
+              class="detail-chip detail-chip-button cdn-trend-legend-chip"
+              type="button"
+              data-cdn-trend-legend="{{ provider.provider }}"
+              aria-pressed="false"
+            >
+              <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ provider.color }}"></span>
+              <strong>{{ provider.provider }}</strong>
+              <span>{{ provider.share_label }} · {{ provider.count_label }}</span>
+            </button>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="cdn-trend-grid">
+        {{ render_cdn_trend_chart(cdn_share_trend_chart) }}
+        {{ render_cdn_trend_chart(cdn_count_trend_chart) }}
+      </div>
+    </section>
+
+    <section class="panel cdn-site-panel">
+      <details class="stablecoin-details cdn-details" data-cdn-sites-details data-cdn-sites-url="{{ url_for('cdn_monitor_sites') }}">
+        <summary class="stablecoin-details-summary">
+          <div>
+            <p class="eyebrow">站点明细</p>
+            <h3>逐站点探测结果</h3>
+            <p class="section-caption">默认折叠。为了减少首屏负担，{{ cdn_tracked_count }} 个站点的逐站点结果会在展开时再加载；展开后仍然只在卡片内部滚动，不会把整页一起撑开。</p>
+          </div>
+          <span class="stablecoin-details-toggle" aria-hidden="true">
+            <span class="stablecoin-details-toggle-open">展开明细</span>
+            <span class="stablecoin-details-toggle-close">收起明细</span>
+          </span>
+        </summary>
+
+        <div class="stablecoin-details-body">
+          <div class="empty-card" data-cdn-sites-loading hidden>
+            <p class="mini-label">加载中</p>
+            <strong>正在读取逐站点结果</strong>
+            <p class="field-help">首次展开时才会请求缓存里的 {{ cdn_tracked_count }} 个站点明细。</p>
+          </div>
+          <div class="empty-card" data-cdn-sites-error hidden>
+            <p class="mini-label">读取失败</p>
+            <strong>逐站点结果暂时没有拿到</strong>
+            <p class="field-help" data-cdn-sites-error-copy>收起后重新展开会自动重试。</p>
+          </div>
+          <div class="empty-card" data-cdn-sites-empty hidden>
+            <p class="mini-label">暂无明细</p>
+            <strong>当前缓存里还没有逐站点结果。</strong>
+          </div>
+          <div class="cdn-site-table-shell" data-cdn-sites-shell hidden>
+            <table class="cdn-site-table">
+              <colgroup>
+                <col class="cdn-site-col-rank">
+                <col class="cdn-site-col-site">
+                <col class="cdn-site-col-primary">
+                <col class="cdn-site-col-observed">
+                <col class="cdn-site-col-summary">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>网站</th>
+                  <th>Primary</th>
+                  <th>Observed</th>
+                  <th>摘要</th>
+                </tr>
+              </thead>
+              <tbody data-cdn-sites-body></tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel cdn-category-panel">
+      <details class="stablecoin-details cdn-details">
+        <summary class="stablecoin-details-summary">
+          <div>
+            <p class="eyebrow">Rank Bucket</p>
+            <h3>按排名分层的统计</h3>
+            <p class="section-caption">默认折叠。把按 rank 的结构分布和 bucket 表都收到底部，避免和上面的总览份额重复。</p>
+          </div>
+          <span class="stablecoin-details-toggle" aria-hidden="true">
+            <span class="stablecoin-details-toggle-open">展开 bucket 统计</span>
+            <span class="stablecoin-details-toggle-close">收起 bucket 统计</span>
+          </span>
+        </summary>
+
+        <div class="stablecoin-details-body">
+          <div class="cdn-category-stack">
+            <div>
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">结构图</p>
+                  <h3>Provider Mix By Rank Bucket</h3>
+                  <p class="section-caption">看越靠前的网站是否更偏向某几家边缘网络，以及不同 rank bucket 的集中度差异。</p>
+                </div>
+              </div>
+
+              <div class="cdn-bucket-stack">
+                {% for row in cdn_category_composition_rows %}
+                  <article class="cdn-bucket-row">
+                    <div class="cdn-bucket-row-head">
+                      <strong>{{ row.category }}</strong>
+                      <span>{{ row.tracked_count }} 个样本</span>
+                    </div>
+                    <div class="cdn-bucket-meter" aria-hidden="true">
+                      {% for segment in row.segments %}
+                        <span class="cdn-bucket-meter-fill" style="width: {{ '%.2f'|format(segment.width_pct) }}%; --cdn-provider-color: {{ segment.color }}"></span>
+                      {% endfor %}
+                    </div>
+                    <div class="cdn-chip-row">
+                      {% for provider in row.top_providers %}
+                        <span class="detail-chip cdn-provider-badge">
+                          <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ provider.color }}"></span>
+                          <strong>{{ provider.provider }}</strong>
+                          <span>{{ provider.count }}</span>
+                        </span>
+                      {% endfor %}
+                    </div>
+                  </article>
+                {% endfor %}
+              </div>
+            </div>
+
+            <div>
+              <div class="section-header">
+                <div>
+                  <p class="eyebrow">表格</p>
+                  <h3>Rank Bucket 明细</h3>
+                  <p class="section-caption">保留表格版，方便快速扫 bucket 的 reachability 和 multi-provider 线索数量。</p>
+                </div>
+              </div>
+
+              <div class="cdn-category-table-shell">
+                <table class="cdn-category-table">
+                  <thead>
+                    <tr>
+                      <th>Bucket</th>
+                      <th>样本</th>
+                      <th>可达</th>
+                      <th>混合前门</th>
+                      <th>Top Providers</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in cdn_category_rows %}
+                      <tr>
+                        <td>{{ row.category }}</td>
+                        <td>{{ row.tracked_count }}</td>
+                        <td>{{ row.reachable_count }}</td>
+                        <td>{{ row.multi_provider_count }}</td>
+                        <td>
+                          <div class="cdn-chip-row">
+                            {% for provider in row.top_providers %}
+                              <span class="detail-chip cdn-provider-badge">
+                                <span class="stablecoin-inline-swatch" style="--stablecoin-color: {{ provider.color }}"></span>
+                                <strong>{{ provider.provider }}</strong>
+                                <span>{{ provider.share_label }}</span>
+                              </span>
+                            {% endfor %}
+                          </div>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+    </section>
+  </section>
+
+  <aside class="stock-sidebar data-monitor-sidebar">
+    {% if not is_visitor_mode %}
+      <section
+        class="panel monitor-status-panel"
+        data-cdn-status-panel
+        data-status-url="{{ url_for('cdn_monitor_status') }}"
+        data-cdn-running="{{ 'true' if cdn_runtime.is_running else 'false' }}"
+        data-cdn-status="{{ cdn_runtime.status }}"
+        data-cdn-poll-seconds="{{ cdn_status_poll_seconds }}"
+      >
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">刷新状态</p>
+            <h3>后台更新</h3>
+          </div>
+        </div>
+        <div class="monitor-status-grid">
+          <article class="mini-fact">
+            <span class="mini-label">状态</span>
+            <strong data-cdn-status-label>{{ cdn_runtime.status_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">开始时间</span>
+            <strong data-cdn-started-at>{{ cdn_runtime.started_at_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">结束时间</span>
+            <strong data-cdn-finished-at>{{ cdn_runtime.finished_at_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">缓存时间</span>
+            <strong data-cdn-last-updated-side>{{ cdn_last_updated_label }}</strong>
+          </article>
+        </div>
+        {% if cdn_runtime.message %}
+          <p class="field-help" data-cdn-message>{{ cdn_runtime.message }}</p>
+        {% else %}
+          <p class="field-help" data-cdn-message hidden></p>
+        {% endif %}
+        {% if cdn_runtime.error %}
+          <p class="field-help" data-cdn-error>{{ cdn_runtime.error }}</p>
+        {% else %}
+          <p class="field-help" data-cdn-error hidden></p>
+        {% endif %}
+      </section>
+    {% endif %}
+
+    <section class="panel monitor-reference-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">来源与口径</p>
+          <h3>抓取配置</h3>
+        </div>
+      </div>
+      <div class="access-list">
+        <div class="access-item">
+          <span class="access-label">样本源</span>
+          <span class="access-path">
+            {% if cdn_target_source_url %}
+              <a class="text-link" href="{{ cdn_target_source_url }}" target="_blank" rel="noreferrer">{{ cdn_target_source_name }}</a>
+            {% else %}
+              {{ cdn_target_source_name }}
+            {% endif %}
+          </span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">样本同步</span>
+          <span class="access-path">{{ cdn_target_source_updated_label }}</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">探测方法</span>
+          <span class="access-path">{{ cdn_source_endpoint }}</span>
+        </div>
+        <div class="access-item">
+          <span class="access-label">自动刷新</span>
+          <span class="access-path">{{ cdn_auto_refresh_label }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel cdn-side-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">最近变化</p>
+          <h3>与上次缓存对比</h3>
+        </div>
+      </div>
+      {% if cdn_recent_changes %}
+        <div class="cdn-side-list">
+          {% for item in cdn_recent_changes %}
+            <article class="module-card cdn-side-card">
+              <div class="card-inline-meta">
+                <span class="meta-chip">{{ item.category }}</span>
+              </div>
+              <h4>{{ item.label }}</h4>
+              <p class="field-help">{{ item.summary }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-card">
+          <p>当前还没有可对比的变化记录。下一次刷新后，这里会开始累积 provider 变化。</p>
+        </div>
+      {% endif %}
+    </section>
+
+    <section class="panel cdn-side-panel">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">刷新历史</p>
+          <h3>最近几次快照</h3>
+        </div>
+      </div>
+      {% if cdn_history_rows %}
+        <div class="cdn-side-list">
+          {% for item in cdn_history_rows %}
+            <article class="module-card cdn-side-card">
+              <div class="card-inline-meta">
+                <span class="meta-chip">{{ item.updated_at_label }}</span>
+                <span class="meta-chip">{{ item.tracked_count }} 个样本</span>
+              </div>
+              <h4>{{ item.leader_label }}</h4>
+              <p class="field-help">可达 {{ item.reachable_count }} 个，multi-provider 线索 {{ item.multi_provider_count }} 个。</p>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-card">
+          <p>首次刷新后，这里会保留最近几次快照摘要，方便观察 provider 分布是否变化。</p>
+        </div>
+      {% endif %}
+    </section>
+  </aside>
+</main>

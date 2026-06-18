@@ -26,7 +26,7 @@ OSS_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 OSS_PART_SIZE = 8 * 1024 * 1024
 OSS_UPLOAD_RETRIES = 3
 OSS_CHECKPOINT_DIR = Path(__file__).resolve().parent / "data" / ".oss-checkpoints"
-OSS_STATUS_CACHE_TTL_SECONDS = 45
+OSS_STATUS_CACHE_TTL_SECONDS = 300
 OSS_BRIDGE_CACHE_LOCK = threading.RLock()
 OSS_BRIDGE_CACHE: dict[str, Any] = {
     "key": None,

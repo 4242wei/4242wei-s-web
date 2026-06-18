@@ -1,0 +1,78 @@
+<div
+  class="compose-overlay clipboard-overlay"
+  data-clipboard-overlay
+  data-clipboard-bootstrap-url="{{ url_for('clipboard_bootstrap') }}"
+  data-clipboard-create-url="{{ url_for('create_clipboard_item') }}"
+  data-clipboard-update-url-template="{{ url_for('update_clipboard_item', item_id='__ITEM_ID__') }}"
+  data-clipboard-delete-url-template="{{ url_for('delete_clipboard_item', item_id='__ITEM_ID__') }}"
+  hidden
+>
+  <div class="compose-overlay-backdrop" data-clipboard-close></div>
+  <div class="compose-dialog clipboard-dialog" role="dialog" aria-modal="true" aria-label="剪贴板">
+    <div class="compose-dialog-shell panel clipboard-dialog-shell">
+      <div class="reader-sheet-head compose-dialog-head clipboard-dialog-head">
+        <div>
+          <p class="eyebrow">跨设备临时传输</p>
+          <h3>剪贴板</h3>
+          <p class="section-caption">先放一段文字或一张截图，别的电脑登录后就能继续拿。</p>
+        </div>
+        <div class="clipboard-dialog-head-actions">
+          <span class="meta-chip">共 <strong data-clipboard-count>0</strong> 条</span>
+          <button class="icon-button" type="button" aria-label="关闭剪贴板" data-clipboard-close>X</button>
+        </div>
+      </div>
+
+      <div class="clipboard-status" data-clipboard-status hidden></div>
+
+      <section class="clipboard-compose">
+        <div class="clipboard-compose-grid">
+          <label class="field clipboard-compose-field">
+            <span>新内容</span>
+            <textarea
+              class="clipboard-textarea"
+              rows="6"
+              maxlength="40000"
+              placeholder="贴一段文字，或先截图后在这里 Ctrl+V。"
+              data-clipboard-create-text
+              data-clipboard-paste-target
+            ></textarea>
+          </label>
+          <div class="clipboard-compose-side">
+            <label class="clipboard-upload-box">
+              <strong>加图片</strong>
+              <span class="section-caption">支持 PNG / JPG / WEBP，也支持在文字框里直接粘贴截图。</span>
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+                multiple
+                data-clipboard-create-files
+              >
+            </label>
+            <div class="clipboard-file-summary" data-clipboard-create-summary>还没选图片。</div>
+            <div class="story-actions compose-dialog-actions">
+              <button class="button button-primary" type="button" data-clipboard-create-submit>保存到剪贴板</button>
+              <button class="button button-secondary" type="button" data-clipboard-refresh>刷新</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="clipboard-list-section">
+        <div class="section-header-slider">
+          <div class="section-slider-shell">
+            <div class="section-slider-card">
+              <div>
+                <p class="eyebrow">共享内容</p>
+                <h3>文字和截图</h3>
+                <p class="section-caption">改文字、补图、删条目都在这里做，保持轻量就好。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="clipboard-empty" data-clipboard-empty>现在还是空的，先塞一条给后面的电脑用。</div>
+        <div class="clipboard-list" data-clipboard-list></div>
+      </section>
+    </div>
+  </div>
+</div>

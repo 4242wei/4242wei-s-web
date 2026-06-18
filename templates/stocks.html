@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>股票工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
 </head>
 <body>
@@ -46,10 +46,12 @@
           <span class="mini-label">分组</span>
           <strong>{{ groups|length }} 万定义分组</strong>
         </article>
-        <article class="mini-fact">
-          <span class="mini-label">报告目录</span>
-          <strong>{{ reports_dir }}</strong>
-        </article>
+        {% if not is_visitor_mode %}
+          <article class="mini-fact">
+            <span class="mini-label">报告目录</span>
+            <strong>{{ reports_dir }}</strong>
+          </article>
+        {% endif %}
       </aside>
     </section>
 
@@ -323,3 +325,4 @@
   </div>
 </body>
 </html>
+

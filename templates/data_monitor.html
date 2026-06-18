@@ -5,90 +5,263 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>数据监控工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260401-data-monitor9') }}">
-  <script src="{{ url_for('static', filename='data-monitor-page.js', v='20260401-stablecoins8') }}" defer></script>
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
+  <script src="{{ url_for('static', filename='data-monitor-page.js', v='20260416-gpuprices2') }}" defer></script>
 </head>
 <body>
   <div class="page-shell">
     {% include "_masthead.html" %}
 
-    <section class="stock-hero panel data-monitor-hero">
+    <section class="stock-hero panel data-monitor-hero"{% if data_monitor_active_tab == "applovin" %} data-applovin-hero-shell{% endif %}>
       <div class="stock-hero-copy">
-        <p class="eyebrow">数据监控</p>
-        <h2>稳定币数据工作台</h2>
-        <p class="story-dek">
-          把稳定币做成一个可持续刷新的数据面板：市值序列向前追到 2024-01，交易量保留近 365 天月累计；
-          左侧看连续月份主线，图下可横向拖动回看更早月份，右侧再补一个独立的当日快照。
-        </p>
+        <p class="eyebrow">Data Monitor</p>
+        <h2>数据监控工作台</h2>
+        {% if data_monitor_active_tab == "cdn" %}
+          <p class="story-dek">
+            用本地可复刻的 HTTP 头、DNS alias 和首页资源域名信号，持续跟踪网站级 CDN / edge provider 的分布变化。
+          </p>
+        {% elif data_monitor_active_tab == "applovin" %}
+          <p class="story-dek">
+            参考 42matters 的展示方式，保留双平台筛选，并只跟踪对 AppLovin 最重要的 3 个分类:
+            Ad Mediation、Ad Networks、Attribution。
+          </p>
+        {% elif data_monitor_active_tab == "gpu_prices" %}
+          <p class="story-dek">
+            Track H100 / H200 / B200 public cloud GPU prices as a daily time series, with billing type and bundle quality kept separate.
+          </p>
+        {% else %}
+          <p class="story-dek">
+            把稳定币月度结构和当前快照放在同一页里，便于同时看长期结构变化和短期状态。
+          </p>
+        {% endif %}
         <div class="monitor-tab-switcher monitor-tab-switcher-hero" role="tablist" aria-label="数据监控子功能">
-          <button
-            class="monitor-tab-button is-active"
-            type="button"
-            role="tab"
-            aria-selected="true"
-            aria-controls="data-monitor-panel-stablecoins"
-            id="data-monitor-trigger-stablecoins"
+          <a
+            class="monitor-tab-button{% if data_monitor_active_tab == 'stablecoins' %} is-active{% endif %}"
+            href="{{ url_for('data_monitor_page', tab='stablecoins') }}"
+            {% if data_monitor_active_tab == 'stablecoins' %}aria-current="page"{% endif %}
           >
             稳定币
-          </button>
+          </a>
+          <a
+            class="monitor-tab-button{% if data_monitor_active_tab == 'cdn' %} is-active{% endif %}"
+            href="{{ url_for('data_monitor_page', tab='cdn') }}"
+            {% if data_monitor_active_tab == 'cdn' %}aria-current="page"{% endif %}
+          >
+            CDN 跟踪
+          </a>
+          <a
+            class="monitor-tab-button{% if data_monitor_active_tab == 'applovin' %} is-active{% endif %}"
+            href="{{ url_for('data_monitor_page', tab='applovin') }}"
+            {% if data_monitor_active_tab == 'applovin' %}aria-current="page"{% endif %}
+          >
+            AppLovin SDK
+          </a>
+          <a
+            class="monitor-tab-button{% if data_monitor_active_tab == 'gpu_prices' %} is-active{% endif %}"
+            href="{{ url_for('data_monitor_page', tab='gpu-prices') }}"
+            {% if data_monitor_active_tab == 'gpu_prices' %}aria-current="page"{% endif %}
+          >
+            GPU Prices
+          </a>
         </div>
       </div>
 
       <aside class="stock-hero-aside">
-        <article class="mini-fact">
-          <span class="mini-label">追踪币种</span>
-          <strong>{{ stablecoin_tracked_count }} 个</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">最新总市值</span>
-          <strong>{{ stablecoin_latest_market_cap_label }}</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">最新成交量</span>
-          <strong>{{ stablecoin_latest_volume_label }}</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">最近刷新</span>
-          <strong data-stablecoin-last-updated>{{ stablecoin_last_updated_label }}</strong>
-        </article>
+        {% if data_monitor_active_tab == "cdn" %}
+          <article class="mini-fact">
+            <span class="mini-label">样本站点</span>
+            <strong>{{ cdn_tracked_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">成功探测</span>
+            <strong>{{ cdn_reachable_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">识别 Provider</span>
+            <strong>{{ cdn_detected_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最近刷新</span>
+            <strong data-cdn-last-updated>{{ cdn_last_updated_label }}</strong>
+          </article>
+        {% elif data_monitor_active_tab == "applovin" %}
+          <article class="mini-fact">
+            <span class="mini-label">跟踪页面</span>
+            <strong>{{ applovin_tracked_page_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">有 AppLovin</span>
+            <strong>{{ applovin_present_page_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">当前排名</span>
+            <strong>{{ applovin_primary_rank_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最近刷新</span>
+            <strong data-applovin-last-updated>{{ applovin_last_updated_label }}</strong>
+          </article>
+        {% elif data_monitor_active_tab == "gpu_prices" %}
+          <article class="mini-fact">
+            <span class="mini-label">Families</span>
+            <strong>{{ gpu_price_family_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">Offers</span>
+            <strong>{{ gpu_price_offer_count }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">Providers</span>
+            <strong>{{ gpu_price_provider_count }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">Last Refresh</span>
+            <strong>{{ gpu_price_last_updated_label }}</strong>
+          </article>
+        {% else %}
+          <article class="mini-fact">
+            <span class="mini-label">跟踪币种</span>
+            <strong>{{ stablecoin_tracked_count }} 个</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最新总市值</span>
+            <strong>{{ stablecoin_latest_market_cap_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最新成交量</span>
+            <strong>{{ stablecoin_latest_volume_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">最近刷新</span>
+            <strong data-stablecoin-last-updated>{{ stablecoin_last_updated_label }}</strong>
+          </article>
+        {% endif %}
       </aside>
     </section>
 
-    <section class="panel monitor-subnav-panel data-monitor-subnav-panel">
+    <section class="panel monitor-subnav-panel data-monitor-subnav-panel"{% if data_monitor_active_tab == "applovin" %} data-applovin-subnav-shell{% endif %}>
       <div class="section-header monitor-subnav-head data-monitor-toolbar-head">
         <div>
           <p class="eyebrow">子功能区</p>
-          <h3>稳定币</h3>
-          <p class="section-caption">
-            数据来自 {{ stablecoin_source_name }}，当前按月展示“{{ stablecoin_market_cap_window_label }}的月均市值 + {{ stablecoin_volume_window_label }}月累计成交量”，
-            图表下方可拖动横向滑动条查看更早月份，右侧独立补一个当日总市值与最新 24h 成交量。
-          </p>
+          {% if data_monitor_active_tab == "cdn" %}
+            <h3>CDN 跟踪</h3>
+            <p class="section-caption">
+              当前口径是 unweighted website tracker，先看 provider 覆盖与结构变化，不做真实流量加权。
+            </p>
+          {% elif data_monitor_active_tab == "applovin" %}
+            <h3>AppLovin / 42matters Tracker</h3>
+            <p class="section-caption">
+              当前保留 Google Play 与 App Store 两个平台，并聚焦 AppLovin 最重要的 3 个分类。
+            </p>
+          {% elif data_monitor_active_tab == "gpu_prices" %}
+            <h3>GPU Price Tracker</h3>
+            <p class="section-caption">
+              Public on-demand provider summaries, normalized to one-GPU quality windows before daily median indexing.
+            </p>
+          {% else %}
+            <h3>稳定币</h3>
+            <p class="section-caption">
+              数据来自 {{ stablecoin_source_name }}，当前页面把月度结构与当前快照合并展示，方便把长期与短期放在一起看。
+            </p>
+          {% endif %}
         </div>
-        <form action="{{ url_for('refresh_stablecoin_monitor') }}" method="post" data-stablecoin-refresh-form>
-          <button class="button button-primary" type="submit" data-stablecoin-refresh-button>
-            {% if stablecoin_runtime.is_running %}更新中{% else %}立即更新{% endif %}
-          </button>
-        </form>
+        {% if not is_visitor_mode %}
+          {% if data_monitor_active_tab == "cdn" %}
+            <form action="{{ url_for('refresh_cdn_monitor') }}" method="post" data-cdn-refresh-form>
+              <button class="button button-primary" type="submit" data-cdn-refresh-button>
+                {% if cdn_runtime.is_running %}刷新中{% else %}立即刷新{% endif %}
+              </button>
+            </form>
+          {% elif data_monitor_active_tab == "applovin" %}
+            <form action="{{ url_for('refresh_applovin_monitor') }}" method="post" data-applovin-refresh-form>
+              <input type="hidden" name="platform" value="{{ applovin_selected_platform_id }}">
+              <input type="hidden" name="category" value="{{ applovin_selected_category_id }}">
+              <button class="button button-primary" type="submit" data-applovin-refresh-button>
+                {% if applovin_runtime.is_running %}刷新中{% else %}立即刷新{% endif %}
+              </button>
+            </form>
+          {% elif data_monitor_active_tab == "gpu_prices" %}
+            <form
+              action="{{ url_for('refresh_gpu_price_monitor') }}"
+              method="post"
+              data-gpu-price-refresh-form
+              data-has-fresh-today="{{ 'true' if gpu_price_has_fresh_today else 'false' }}"
+              data-confirm-message="{{ gpu_price_refresh_confirm_message }}"
+            >
+              <button class="button button-primary" type="submit" data-gpu-price-refresh-button>
+                {% if gpu_price_runtime.is_running %}Refreshing{% else %}Refresh Now{% endif %}
+              </button>
+            </form>
+          {% else %}
+            <form action="{{ url_for('refresh_stablecoin_monitor') }}" method="post" data-stablecoin-refresh-form>
+              <button class="button button-primary" type="submit" data-stablecoin-refresh-button>
+                {% if stablecoin_runtime.is_running %}刷新中{% else %}立即刷新{% endif %}
+              </button>
+            </form>
+          {% endif %}
+        {% else %}
+          <span class="button button-ghost button-static">访客模式仅查看当前缓存</span>
+        {% endif %}
       </div>
       <div class="monitor-tab-copy-stack">
-        <p class="monitor-tab-copy is-active">
-          覆盖区间：<span class="inline-path">{{ stablecoin_coverage_label }}</span>。
-          自动刷新：<span class="inline-path">{{ stablecoin_auto_refresh_label }}</span>。
-          {% if stablecoin_is_stale %}
-            当前缓存已经偏旧，系统会优先在后台拉新数据，但页面会先保留上一版可读结果。
-          {% endif %}
-        </p>
+        {% if data_monitor_active_tab == "cdn" %}
+          <p class="monitor-tab-copy is-active">
+            当前样本 {{ cdn_tracked_count }} 个站点，自动刷新 <span class="inline-path">{{ cdn_auto_refresh_label }}</span>。
+            方法说明 <span class="inline-path">{{ cdn_source_endpoint }}</span>。
+            {% if cdn_refresh_hint %}
+              {{ cdn_refresh_hint }}
+            {% endif %}
+          </p>
+        {% elif data_monitor_active_tab == "applovin" %}
+          <p class="monitor-tab-copy is-active">
+            当前选择 <span class="inline-path">{{ applovin_selected_platform_title }}</span> /
+            <span class="inline-path">{{ applovin_selected_category_title }}</span>，
+            来源更新时间 <span class="inline-path">{{ applovin_selected_source_updated_label }}</span>，
+            自动刷新 <span class="inline-path">{{ applovin_auto_refresh_label }}</span>。
+            {% if applovin_page_error_count %}
+              最近一次抓取中有 {{ applovin_page_error_count }} 个页面沿用了旧缓存。
+            {% endif %}
+          </p>
+        {% elif data_monitor_active_tab == "gpu_prices" %}
+          <p class="monitor-tab-copy is-active">
+            Tracking <span class="inline-path">{{ gpu_price_family_label }}</span>;
+            auto refresh is <span class="inline-path">{{ gpu_price_auto_refresh_label }}</span>.
+            Source path: <span class="inline-path">{{ gpu_price_source_endpoint }}</span>.
+            {% if gpu_price_is_stale %}
+              Cache is stale; the background refresher will keep the last readable snapshot while pulling new pages.
+            {% endif %}
+          </p>
+        {% else %}
+          <p class="monitor-tab-copy is-active">
+            覆盖区间 <span class="inline-path">{{ stablecoin_coverage_label }}</span>，
+            自动刷新 <span class="inline-path">{{ stablecoin_auto_refresh_label }}</span>。
+            {% if stablecoin_is_stale %}
+              当前缓存已经偏旧，系统会优先在后台拉新数据，但页面会先保留上一版可读结果。
+            {% endif %}
+          </p>
+        {% endif %}
+        {% if data_monitor_export_json_url or data_monitor_export_markdown_url %}
+          <div class="monitor-export-row">
+            {% if data_monitor_export_json_url %}
+              <a class="monitor-export-link" href="{{ data_monitor_export_json_url }}" target="_blank" rel="noreferrer">JSON Export</a>
+            {% endif %}
+            {% if data_monitor_export_markdown_url %}
+              <a class="monitor-export-link" href="{{ data_monitor_export_markdown_url }}" target="_blank" rel="noreferrer">Markdown Export</a>
+            {% endif %}
+          </div>
+        {% endif %}
       </div>
     </section>
 
-    <section
-      class="monitor-tab-panel is-active"
-      id="data-monitor-panel-stablecoins"
-      role="tabpanel"
-      aria-labelledby="data-monitor-trigger-stablecoins"
-    >
+    {% if data_monitor_active_tab == "cdn" %}
+      {% include "data_monitor_cdn_panel.html" %}
+    {% elif data_monitor_active_tab == "applovin" %}
+      {% include "data_monitor_applovin_panel.html" %}
+    {% elif data_monitor_active_tab == "gpu_prices" %}
+      {% include "data_monitor_gpu_prices_panel.html" %}
+    {% else %}
       {% include "data_monitor_stablecoins_panel.html" %}
-    </section>
+    {% endif %}
   </div>
 </body>
 </html>

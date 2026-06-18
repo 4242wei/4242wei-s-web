@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Monitor 工作台</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260331-monitor-tabs1') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='report-sources.js', v='20260316-source-toggle') }}" defer></script>
-  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260331-monitorreader1') }}" defer></script>
+<script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260411-reader-dom-stable1') }}" defer></script>
   <script src="{{ url_for('static', filename='monitor-tabs.js', v='20260331-monitor-tabs1') }}" defer></script>
   <script src="{{ url_for('static', filename='monitor-page.js', v='20260331-monitorreports2') }}" defer></script>
   <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260331-signalpanel1') }}" defer></script>
@@ -87,10 +87,18 @@
       </div>
       <div class="monitor-tab-copy-stack">
         <p class="monitor-tab-copy{% if monitor_active_tab == 'info' %} is-active{% endif %}" data-monitor-tab-copy="info" {% if monitor_active_tab != 'info' %}hidden{% endif %}>
-          信息监控聚焦股票池与日报结果，资料都写入 <span class="inline-path">{{ reports_dir }}</span>。
+          {% if is_visitor_mode %}
+            信息监控聚焦股票池与日报结果，这里只保留阅读与回看。
+          {% else %}
+            信息监控聚焦股票池与日报结果，资料都写入 <span class="inline-path">{{ reports_dir }}</span>。
+          {% endif %}
         </p>
         <p class="monitor-tab-copy{% if monitor_active_tab == 'signals' %} is-active{% endif %}" data-monitor-tab-copy="signals" {% if monitor_active_tab != 'signals' %}hidden{% endif %}>
-          大V监控聚焦 X / 公开来源，结果写入 <span class="inline-path">{{ signal_reports_dir }}</span>，不会混进正式研究报告。
+          {% if is_visitor_mode %}
+            大V监控聚焦 X / 公开来源，这里只展示已整理好的结果。
+          {% else %}
+            大V监控聚焦 X / 公开来源，结果写入 <span class="inline-path">{{ signal_reports_dir }}</span>，不会混进正式研究报告。
+          {% endif %}
         </p>
       </div>
     </section>
@@ -114,3 +122,4 @@
   </div>
 </body>
 </html>
+

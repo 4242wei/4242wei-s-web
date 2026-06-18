@@ -27,6 +27,16 @@
   {"key": "search", "label": "全局搜索", "short": "搜", "href": url_for("global_search")},
   {"key": "trash", "label": "回收站", "short": "回", "href": url_for("trash_page")},
 ] %}
+{% if is_visitor_mode %}
+  {% set visitor_nav_keys = ["monitor", "data_monitor", "stocks", "schedule", "experts", "transcripts", "search"] %}
+  {% set visitor_nav_items = namespace(items=[]) %}
+  {% for item in nav_items %}
+    {% if item.key in visitor_nav_keys %}
+      {% set visitor_nav_items.items = visitor_nav_items.items + [item] %}
+    {% endif %}
+  {% endfor %}
+  {% set nav_items = visitor_nav_items.items %}
+{% endif %}
 {% set theme_options = [
   {"key": "cloud-blue", "label": "云岸淡蓝", "caption": "云岸淡蓝，晨雾、海风和柔白纸面。", "swatches": ["#edf3ff", "#fbfdff", "#cfdcff"]},
   {"key": "race", "label": "RACE", "caption": "", "swatches": ["#fff7f0", "#d70f1f", "#b90b19", "#ffd339"]},
@@ -43,9 +53,18 @@
   {"key": "autumn-amber", "label": "秋山暖茶", "caption": "茶棕、栗金和轻暖米纸。", "swatches": ["#fbf0e3", "#fffaf2", "#d8b78b"]},
   {"key": "monet-parasol", "label": "莫奈晴风", "caption": "高空云白、伞面柔粉、草地新绿和被风抬起的午后蓝，灵感取自《撑阳伞的女人》。", "swatches": ["#fbfdf7", "#d9eef8", "#81abd2", "#9dc986", "#f2c4c2"]},
   {"key": "impression-sunrise", "label": "印象日出", "caption": "港口晨雾、蓝灰水面、橙色日轮和薄雾里的反光，灵感取自《印象·日出》。", "swatches": ["#f7faf8", "#d8e7ea", "#89a7bd", "#5d748d", "#ef9357"]},
-  {"key": "wild-lotus", "label": "野荷", "caption": "艳红往外炸开，野地里的叶筋和茎骨也得把它稳稳托住。", "swatches": ["#fbf8f1", "#dde7d9", "#e04859", "#6c9d52", "#2f3829"]},
+  {"key": "harbor-mist", "label": "雾港晨灰", "caption": "潮雾、钢蓝和一点暖砂，像清晨码头刚亮灯的纸面。", "swatches": ["#fbfbf7", "#dce7ea", "#9fb2bc", "#5a717d", "#263844"]},
+  {"key": "verdigris-studio", "label": "铜绿书房", "caption": "旧铜器的绿、亚麻纸的暖白和一点陶土边光。", "swatches": ["#fbf6ed", "#d7e2da", "#8aa79a", "#4f746d", "#c67b4e"]},
+  {"key": "midnight-ember", "label": "午夜余烬", "caption": "墨蓝放映厅、黄铜边灯和暗火余温，整体更克制也更聚焦。", "swatches": ["#141b24", "#243144", "#c48a45", "#f2e5cf", "#9f5538"]},
 ] %}
 {% set current_page_title = page_titles.get(active_page, "Monitor") %}
+
+{% if access_mode %}
+  <script>
+    document.documentElement.dataset.accessMode = {{ access_mode|tojson }};
+    document.body.dataset.accessMode = {{ access_mode|tojson }};
+  </script>
+{% endif %}
 
 <aside class="workspace-rail" aria-label="功能索引">
   <div class="workspace-rail-shell">
@@ -86,7 +105,27 @@
   <div class="masthead-top">
     <div class="masthead-brand">
       <span class="brand-label">研究归档</span>
-      <h1>股票每日分析</h1>
+      <div class="masthead-brand-row">
+        <h1>股票每日分析</h1>
+        {% if is_admin_mode %}
+          <form class="masthead-ai-direct-form" action="{{ url_for('update_ai_direct_access') }}" method="post">
+            <input type="hidden" name="next_url" value="{{ request.full_path if request.query_string else request.path }}">
+            <input type="hidden" name="enabled" value="{{ 0 if ai_direct_access_enabled else 1 }}">
+            <button
+              class="masthead-ai-direct-button {% if ai_direct_access_enabled %}is-enabled{% endif %}"
+              type="submit"
+              title="{{ '已允许 GPT 直接读取 /api/ai/*' if ai_direct_access_enabled else '打开后允许 GPT 直接读取 /api/ai/*' }}"
+            >
+              <span class="masthead-ai-direct-dot" aria-hidden="true"></span>
+              <span class="masthead-ai-direct-label">允许AI直连</span>
+              <span class="masthead-ai-direct-state">{{ "已开" if ai_direct_access_enabled else "已关" }}</span>
+            </button>
+          </form>
+        {% endif %}
+      </div>
+      {% if is_visitor_mode %}
+        <span class="masthead-access-badge">访客只读</span>
+      {% endif %}
     </div>
     <div class="masthead-theme" data-theme-switcher>
       <button
@@ -175,21 +214,38 @@
         </div>
         <script type="application/json" data-stock-jump-options>{{ nav_stock_search_options|tojson }}</script>
       </form>
-      <a class="masthead-utility-button" href="{{ url_for('download_workspace_backup') }}" title="下载当前网页与资料备份">
-        备份
+      {% if not is_visitor_mode %}
+        <a class="masthead-utility-button" href="{{ url_for('download_workspace_backup') }}" title="下载当前网页与资料备份">
+          备份
+        </a>
+      {% endif %}
+      <a class="masthead-utility-button" href="{{ access_reenter_url }}" title="重新输入访问密码或切换身份">
+        切换身份
       </a>
     </div>
   </div>
-  <div class="masthead-bottom">
-    <div class="masthead-context">
-      <span class="masthead-context-label">当前工作区</span>
-      <strong>{{ current_page_title }}</strong>
+  {% if not hide_masthead_bottom|default(false) %}
+    <div class="masthead-bottom">
+      <div class="masthead-context">
+        <span class="masthead-context-label">当前工作区</span>
+        <strong>{{ current_page_title }}</strong>
+      </div>
+      <div class="masthead-bottom-actions">
+        {% if is_admin_mode %}
+          <button
+            class="masthead-clipboard-button"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-label="打开剪贴板"
+            data-clipboard-open
+          >
+            剪贴板
+          </button>
+        {% endif %}
+      </div>
     </div>
-    <div class="masthead-meta">
-      <span>{{ nav_reports_count }} 篇报告</span>
-      <span>{{ nav_stock_count }} 只股票 | {{ nav_favorites_count }} 只自选 | {{ nav_group_count }} 个分组 | {{ nav_schedule_count }} 条待处理日程 | {{ nav_expert_count }} 位专家 | {{ nav_transcript_count }} 个转录任务 | {{ nav_trash_count }} 个回收站条目</span>
-    </div>
-  </div>
+  {% endif %}
   <nav class="masthead-nav masthead-nav--fallback" aria-label="主导航">
     {% for item in nav_items %}
       <a
@@ -228,12 +284,19 @@
   </div>
 </div>
 
-<script src="{{ url_for('static', filename='calendar-modal.js', v='20260316-modalfix1') }}" defer></script>
-<script src="{{ url_for('static', filename='confirm-modal.js', v='20260315-confirmfix') }}" defer></script>
-<script src="{{ url_for('static', filename='flash-messages.js') }}" defer></script>
-<script src="{{ url_for('static', filename='masthead-stock-search.js', v='20260331-stockjump1') }}" defer></script>
-<script src="{{ url_for('static', filename='theme-switcher.js', v='20260325-seabreeze1') }}" defer></script>
-<script src="{{ url_for('static', filename='workspace-rail.js', v='20260317-railfold') }}" defer></script>
+{% if is_admin_mode %}
+  {% include "_clipboard_modal.html" %}
+{% endif %}
+
+<script src="{{ static_asset_url('calendar-modal.js') }}" defer></script>
+<script src="{{ static_asset_url('confirm-modal.js') }}" defer></script>
+<script src="{{ static_asset_url('flash-messages.js') }}" defer></script>
+<script src="{{ static_asset_url('masthead-stock-search.js') }}" defer></script>
+<script src="{{ static_asset_url('theme-switcher.js') }}" defer></script>
+<script src="{{ static_asset_url('workspace-rail.js') }}" defer></script>
+{% if is_admin_mode %}
+  <script src="{{ static_asset_url('clipboard-modal.js') }}" defer></script>
+{% endif %}
 
 {% with flashes = get_flashed_messages(with_categories=true) %}
   {% if flashes %}

@@ -15,10 +15,17 @@
     <a class="text-link" href="{{ url_for('raw_report', filename=report.filename) }}" target="_blank" rel="noreferrer">原 Markdown</a>
     <a class="text-link" href="{{ url_for('monitor_page', report=report.filename) }}">固定到当前页</a>
   </div>
+  {% if report_reader_signature %}
+    <script type="application/json" data-reader-bootstrap>{{ report_reader_bootstrap | tojson }}</script>
+    <section class="reader-memory-strip" data-reader-history-panel hidden>
+      <div class="reader-memory-meta" data-reader-history-meta></div>
+      <button class="reader-memory-resume" type="button" data-reader-history-resume hidden>继续阅读</button>
+    </section>
+  {% endif %}
   <div class="reader-section-marker"><span>正文</span></div>
   <div class="reader-sheet-stage">
-    <div class="reader-sheet-body report-reader-body">
-      <article class="markdown-body">
+    <div class="reader-sheet-body report-reader-body" data-reader-annotatable>
+      <article class="markdown-body" data-reader-prose>
         {{ report.html | safe }}
       </article>
     </div>

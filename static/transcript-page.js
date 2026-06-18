@@ -787,20 +787,6 @@
       category
     );
 
-    const template = document.getElementById(`transcript-reader-${transcriptId}`);
-    if (template instanceof HTMLTemplateElement) {
-      updateTranscriptCategoryChipCollection(
-        template.content.querySelectorAll("[data-transcript-category-chip]"),
-        transcriptId,
-        category
-      );
-      updateTranscriptCategoryButtonCollection(
-        template.content.querySelectorAll("[data-transcript-category-set]"),
-        transcriptId,
-        category
-      );
-    }
-
     applyTranscriptCategoryFilter();
     syncTranscriptStats();
   }
@@ -958,15 +944,6 @@
 
     card.classList.add("is-removing");
     card.setAttribute("aria-hidden", "true");
-
-    const detachedTemplate = document.getElementById(`transcript-reader-${transcriptId}`);
-    if (detachedTemplate instanceof HTMLElement && !card.contains(detachedTemplate)) {
-      detachedTemplate.remove();
-    }
-    const detachedContentTemplate = document.getElementById(`transcript-content-${transcriptId}`);
-    if (detachedContentTemplate instanceof HTMLElement && !card.contains(detachedContentTemplate)) {
-      detachedContentTemplate.remove();
-    }
 
     window.setTimeout(function () {
       card.remove();
@@ -1138,63 +1115,6 @@
     });
 
     syncTranscriptCategoryFilterCards();
-  }
-
-  function hydrateTranscriptContentHosts(root) {
-    if (!root || typeof root.querySelectorAll !== "function") {
-      return;
-    }
-
-    root.querySelectorAll("[data-transcript-content-host]").forEach(function (host) {
-      if (!(host instanceof HTMLElement) || host.dataset.transcriptContentReady === "true") {
-        return;
-      }
-
-      const transcriptId = host.getAttribute("data-transcript-content-host") || "";
-      if (!transcriptId) {
-        return;
-      }
-
-      const template = document.getElementById(`transcript-content-${transcriptId}`);
-      if (!(template instanceof HTMLTemplateElement)) {
-        return;
-      }
-
-      host.innerHTML = template.innerHTML;
-      host.dataset.transcriptContentReady = "true";
-    });
-  }
-
-  function setupTranscriptContentHydration() {
-    document.querySelectorAll("details[data-transcript-card]").forEach(function (card) {
-      if (!(card instanceof HTMLDetailsElement)) {
-        return;
-      }
-
-      if (card.open) {
-        hydrateTranscriptContentHosts(card);
-      }
-
-      card.addEventListener("toggle", function () {
-        if (card.open) {
-          hydrateTranscriptContentHosts(card);
-        }
-      });
-    });
-
-    const readerContent = document.querySelector("[data-reader-content]");
-    if (!(readerContent instanceof HTMLElement) || typeof MutationObserver === "undefined") {
-      return;
-    }
-
-    const observer = new MutationObserver(function () {
-      hydrateTranscriptContentHosts(readerContent);
-    });
-    observer.observe(readerContent, {
-      childList: true,
-      subtree: true,
-    });
-    hydrateTranscriptContentHosts(readerContent);
   }
 
   function setupAutoSyncPolling() {
@@ -1434,7 +1354,6 @@
     setupCategoryFilters();
     setupCategoryToggles();
     setupDeleteForms();
-    setupTranscriptContentHydration();
     syncTranscriptStats();
     setupAutoSyncPolling();
   });

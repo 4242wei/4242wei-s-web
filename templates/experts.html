@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>专家记录</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
-  <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260317-searchjump1') }}" defer></script>
+<script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260411-reader-dom-stable1') }}" defer></script>
   <script src="{{ url_for('static', filename='experts-page.js', v='20260319-expertdirectorytoggle1') }}" defer></script>
 </head>
 <body>
@@ -123,16 +123,20 @@
           <a class="button button-secondary" href="{{ url_for('stocks_workspace') }}">股票工作台</a>
           <span class="button button-ghost button-static">当前已录入 {{ expert_stats.total_count }} 位专家</span>
         </div>
-        <div class="experts-view-switch" aria-label="专家记录功能区切换">
-          <a class="experts-view-chip {% if current_expert_view == 'manage' %}is-active{% endif %}" href="{{ expert_view_links.manage }}">
-            <strong>已有专家</strong>
-            <span>进入已有专家的资料信息操作台，维护关系、访谈和勾稽内容。</span>
-          </a>
-          <a class="experts-view-chip {% if current_expert_view == 'create' %}is-active{% endif %}" href="{{ expert_view_links.create }}">
-            <strong>新增专家</strong>
-            <span>单独录入新专家档案，先建卡，再慢慢补访谈和资料。</span>
-          </a>
-        </div>
+        {% if not is_visitor_mode %}
+          <div class="experts-view-switch" aria-label="专家记录功能区切换">
+            <a class="experts-view-chip {% if current_expert_view == 'manage' %}is-active{% endif %}" href="{{ expert_view_links.manage }}">
+              <strong>已有专家</strong>
+              <span>进入已有专家的资料信息操作台，维护关系、访谈和勾稽内容。</span>
+            </a>
+            <a class="experts-view-chip {% if current_expert_view == 'create' %}is-active{% endif %}" href="{{ expert_view_links.create }}">
+              <strong>新增专家</strong>
+              <span>单独录入新专家档案，先建卡，再慢慢补访谈和资料。</span>
+            </a>
+          </div>
+        {% else %}
+          <p class="section-caption">访客模式仅开放专家阅读与资料跳转，不显示新增、归档和勾稽操作。</p>
+        {% endif %}
       </div>
 
       <aside class="stock-hero-aside">
@@ -281,11 +285,13 @@
                       {% if selected_expert.related_symbols_label %}<span class="meta-chip">{{ selected_expert.related_symbols_label }}</span>{% endif %}
                     </div>
                   </div>
-                  <div class="experts-focus-actions">
-                    <a class="button button-secondary" href="#expert-profile">编辑档案</a>
-                    <a class="button button-secondary" href="#expert-interviews">访谈</a>
-                    <a class="button button-secondary" href="#expert-resources">资料</a>
-                  </div>
+                  {% if not is_visitor_mode %}
+                    <div class="experts-focus-actions">
+                      <a class="button button-secondary" href="#expert-profile">编辑档案</a>
+                      <a class="button button-secondary" href="#expert-interviews">访谈</a>
+                      <a class="button button-secondary" href="#expert-resources">资料</a>
+                    </div>
+                  {% endif %}
                 </div>
 
                 <div class="experts-focus-metrics">
@@ -542,6 +548,7 @@
           </div>
           </div>
         {% else %}
+          {% if not is_visitor_mode %}
           <section class="panel record-section experts-create-panel">
             <div class="section-header">
               <div>
@@ -568,6 +575,7 @@
               <article class="record-card"><h4>4. 当前是重点跟进还是观察</h4><p class="section-caption">覆盖状态先定下来，后面你看优先级时不会混乱。</p></article>
             </div>
           </section>
+          {% endif %}
         {% endif %}
       </section>
     </main>
@@ -634,3 +642,4 @@
   {% endif %}
 </body>
 </html>
+

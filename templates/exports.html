@@ -1,12 +1,12 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>资料导出</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
-  <script src="{{ url_for('static', filename='export-center.js', v='20260316-range2') }}" defer></script>
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
+  <script src="{{ url_for('static', filename='export-center.js', v='20260406-artifacts1') }}" defer></script>
 </head>
 <body>
   <div class="page-shell">
@@ -17,7 +17,7 @@
         <p class="eyebrow">导出给 GPT</p>
         <h2>导出中心</h2>
         <p class="story-dek">
-          先导出摘要包建立上下文，再按需补原始正文、日报、电话会议或会议音频。这样更稳，也更方便对照原文。
+          先导出摘要包建立上下文，再按需补原始正文、日报、电话会或会议音频。这样更稳，也更方便对照原文。
         </p>
       </div>
       <aside class="export-hero-stats">
@@ -33,10 +33,26 @@
           <span class="mini-label">输出格式</span>
           <strong>ZIP + Summary + Manifest</strong>
         </article>
+        <article class="mini-fact">
+          <span class="mini-label">分析产物</span>
+          <strong>{{ ai_artifact_bootstrap.counts.artifacts.total }} 条</strong>
+          <p class="section-caption">
+            队列中 {{ ai_artifact_bootstrap.counts.jobs.queued + ai_artifact_bootstrap.counts.jobs.running }} 个
+          </p>
+        </article>
       </aside>
     </section>
 
-    <section class="panel export-shell" data-export-center-root>
+    <section
+      class="panel export-shell"
+      data-export-center-root
+      data-ai-artifact-bootstrap-url="{{ ai_artifact_endpoints.bootstrap_url }}"
+      data-ai-artifact-list-url="{{ ai_artifact_endpoints.artifact_list_url }}"
+      data-ai-job-list-url="{{ ai_artifact_endpoints.job_list_url }}"
+      data-ai-timeline-job-url="{{ ai_artifact_endpoints.timeline_job_url }}"
+      data-ai-compare-job-url="{{ ai_artifact_endpoints.compare_job_url }}"
+      data-ai-artifact-poll-interval="{{ ai_artifact_bootstrap.poll_interval_ms }}"
+    >
       <article class="export-panel">
         <div class="export-panel-head">
           <div>
@@ -55,7 +71,7 @@
             <input type="hidden" name="content_mode" value="summary_plus_raw">
             <div class="ai-export-card-copy">
               <strong>本周资料包</strong>
-              <span>近 7 天的日报、笔记、研究资料、电话会议和会议转录</span>
+              <span>近 7 天的日报、笔记、研究资料、电话会和会议转录</span>
             </div>
             <button class="button button-secondary button-compact" type="submit">导出本周包</button>
           </form>
@@ -134,7 +150,7 @@
                 </label>
                 <label class="ai-export-mode-pill">
                   <input type="radio" name="date_scope" value="range" data-ai-export-date-mode>
-                  <span>起日期区间</span>
+                  <span>起止日期区间</span>
                 </label>
                 <label class="ai-export-mode-pill">
                   <input type="radio" name="date_scope" value="all" data-ai-export-date-mode>
@@ -151,18 +167,18 @@
 
           <div class="ai-export-date-range-grid" data-ai-export-range-group hidden>
             <label class="form-field" data-ai-export-start-date-field>
-              <span class="field-label">起日期</span>
+              <span class="field-label">起始日期</span>
               <input type="date" name="start_date" value="{{ default_export_start_date }}" data-ai-export-start-date>
             </label>
 
             <label class="form-field" data-ai-export-end-date-field>
-              <span class="field-label">终日期</span>
+              <span class="field-label">结束日期</span>
               <input type="date" name="end_date" value="{{ default_export_end_date }}" data-ai-export-end-date>
             </label>
           </div>
 
           <div class="ai-export-choice-row">
-            <span class="field-label">包含内</span>
+            <span class="field-label">包含内容</span>
             <div class="ai-inline-checks">
               <label><input type="checkbox" name="include_reports" value="1" checked data-ai-export-type="reports"> 日报</label>
               <label><input type="checkbox" name="include_notes" value="1" checked data-ai-export-type="notes"> 笔记</label>
@@ -185,7 +201,7 @@
               <span class="field-label">附加原件</span>
               <div class="ai-inline-checks">
                 <label><input type="checkbox" name="include_original_files" value="1" checked data-ai-export-original-files> 附研究原文件</label>
-                <label><input type="checkbox" name="include_source_media" value="1" checked data-ai-export-source-media> 附会议音频/视频</label>
+                <label><input type="checkbox" name="include_source_media" value="1" checked data-ai-export-source-media> 附会议音频 / 视频</label>
               </div>
             </div>
           </div>
@@ -195,6 +211,147 @@
             <button class="button button-primary" type="submit" data-ai-export-submit>生成自定义导出包</button>
           </div>
         </form>
+      </article>
+
+      <article class="export-panel export-panel-artifacts">
+        <div class="export-panel-head">
+          <div>
+            <p class="eyebrow">AI Native</p>
+            <h3>分析产物与后台队列</h3>
+            <p class="section-caption">
+              时间线 / 对比分析会先进入后台任务，再把结果保存成可复用产物，后面网页和 GPT 都能直接复读，不用每次重算。
+            </p>
+          </div>
+          <div class="export-panel-links">
+            <a class="button button-ghost button-compact" href="{{ ai_artifact_endpoints.bootstrap_url }}">Bootstrap</a>
+            <a class="button button-ghost button-compact" href="{{ ai_artifact_endpoints.artifact_list_url }}">Artifacts</a>
+            <a class="button button-ghost button-compact" href="{{ ai_artifact_endpoints.job_list_url }}">Jobs</a>
+          </div>
+        </div>
+
+        <section class="ai-artifact-hub">
+          <form class="ai-artifact-builder" data-ai-artifact-form>
+            <div class="ai-artifact-builder-grid">
+              <label class="form-field">
+                <span class="field-label">分析类型</span>
+                <select name="artifact_kind" data-ai-artifact-kind>
+                  <option value="timeline">时间线</option>
+                  <option value="compare">对比</option>
+                </select>
+              </label>
+
+              <label class="form-field">
+                <span class="field-label">股票代码</span>
+                <input type="text" name="symbols" value="{{ default_export_symbol }}" placeholder="例如 NET,FSLY" data-ai-artifact-symbols>
+              </label>
+
+              <label class="form-field">
+                <span class="field-label">聚焦问题</span>
+                <input type="text" name="query" placeholder="例如 security / pricing" data-ai-artifact-query>
+              </label>
+
+              <label class="form-field">
+                <span class="field-label">内容类型</span>
+                <input type="text" name="kinds" placeholder="note,file,transcript" data-ai-artifact-kinds>
+              </label>
+            </div>
+
+            <div class="ai-artifact-builder-grid ai-artifact-builder-grid-secondary">
+              <label class="form-field">
+                <span class="field-label" data-ai-artifact-limit-label>时间线条数</span>
+                <input type="number" name="limit" min="1" max="48" value="12" data-ai-artifact-limit>
+              </label>
+
+              <label class="checkbox-row ai-artifact-refresh-toggle">
+                <input type="checkbox" name="refresh" value="1" data-ai-artifact-refresh>
+                <span>先刷新检索索引再生成</span>
+              </label>
+
+              <div class="ai-artifact-builder-actions">
+                <button class="button button-primary" type="submit" data-ai-artifact-submit>排队生成分析产物</button>
+              </div>
+            </div>
+
+            <p class="section-caption ai-artifact-feedback" data-ai-artifact-feedback>
+              结果会先进入后台任务，完成后自动出现在下方列表。
+            </p>
+          </form>
+
+          <div class="ai-artifact-dashboard">
+            <section class="ai-artifact-summary" data-ai-artifact-summary>
+              <article class="mini-fact">
+                <span class="mini-label">产物总数</span>
+                <strong>{{ ai_artifact_bootstrap.counts.artifacts.total }}</strong>
+              </article>
+              <article class="mini-fact">
+                <span class="mini-label">排队 / 运行</span>
+                <strong>{{ ai_artifact_bootstrap.counts.jobs.queued }} / {{ ai_artifact_bootstrap.counts.jobs.running }}</strong>
+              </article>
+              <article class="mini-fact">
+                <span class="mini-label">最近完成</span>
+                <strong>{{ ai_artifact_bootstrap.counts.jobs.completed }}</strong>
+              </article>
+            </section>
+
+            <div class="ai-artifact-columns">
+              <section class="ai-artifact-column">
+                <div class="ai-artifact-column-head">
+                  <div>
+                    <p class="eyebrow">Recent</p>
+                    <h4>后台任务</h4>
+                  </div>
+                </div>
+                <div class="ai-artifact-card-list" data-ai-job-list>
+                  {% for job in ai_artifact_bootstrap.recent_jobs %}
+                    <article class="ai-artifact-card">
+                      <div class="ai-artifact-card-head">
+                        <strong>{{ job.title }}</strong>
+                        <span class="status-pill is-{{ job.status_tone }}">{{ job.status_label }}</span>
+                      </div>
+                      <p class="section-caption">{{ job.summary }}</p>
+                      <div class="card-inline-meta">
+                        <span class="meta-chip">{{ job.kind_label }}</span>
+                        <span class="section-caption">{{ job.display_updated_at }}</span>
+                      </div>
+                    </article>
+                  {% else %}
+                    <div class="empty-inline">
+                      <p>还没有后台分析任务。</p>
+                    </div>
+                  {% endfor %}
+                </div>
+              </section>
+
+              <section class="ai-artifact-column">
+                <div class="ai-artifact-column-head">
+                  <div>
+                    <p class="eyebrow">Saved</p>
+                    <h4>分析产物</h4>
+                  </div>
+                </div>
+                <div class="ai-artifact-card-list" data-ai-artifact-list>
+                  {% for artifact in ai_artifact_bootstrap.recent_artifacts %}
+                    <article class="ai-artifact-card">
+                      <div class="ai-artifact-card-head">
+                        <strong>{{ artifact.title }}</strong>
+                        <span class="meta-chip">{{ artifact.kind_label }}</span>
+                      </div>
+                      <p class="section-caption">{{ artifact.summary }}</p>
+                      <div class="card-inline-meta">
+                        <span class="meta-chip">{{ artifact.item_count }} items</span>
+                        <a class="button button-ghost button-compact" href="{{ artifact.markdown_url }}">Markdown</a>
+                      </div>
+                    </article>
+                  {% else %}
+                    <div class="empty-inline">
+                      <p>还没有保存过分析产物。</p>
+                    </div>
+                  {% endfor %}
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
       </article>
     </section>
   </div>

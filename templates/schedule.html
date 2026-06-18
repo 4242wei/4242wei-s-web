@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>日程</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='schedule-page.js', v='20260319-schedule4') }}" defer></script>
   <script src="{{ url_for('static', filename='stock-workspace.js', v='20260316-scrollfix2') }}" defer></script>
 </head>
@@ -201,10 +201,14 @@
           <a class="button button-secondary" href="{{ url_for('transcripts_page') }}">会议转录</a>
           <span class="button button-ghost button-static">当前待处理 {{ schedule_open_count }} 条</span>
         </div>
-        <div class="schedule-view-switch" aria-label="日程视图切换">
-          <a class="schedule-view-chip {% if current_schedule_view == 'board' %}is-active{% endif %}" href="{{ schedule_view_links.board }}">日程总览</a>
-          <a class="schedule-view-chip {% if current_schedule_view == 'form' %}is-active{% endif %}" href="{{ schedule_view_links.form }}">填写页面</a>
-        </div>
+        {% if not is_visitor_mode %}
+          <div class="schedule-view-switch" aria-label="日程视图切换">
+            <a class="schedule-view-chip {% if current_schedule_view == 'board' %}is-active{% endif %}" href="{{ schedule_view_links.board }}">日程总览</a>
+            <a class="schedule-view-chip {% if current_schedule_view == 'form' %}is-active{% endif %}" href="{{ schedule_view_links.form }}">填写页面</a>
+          </div>
+        {% else %}
+          <p class="section-caption">访客模式仅展示日程总览，不显示填写和状态修改入口。</p>
+        {% endif %}
       </div>
 
       <aside class="stock-hero-aside">
@@ -552,3 +556,4 @@
   </div>
 </body>
 </html>
+

@@ -1,75 +1,81 @@
 <main class="stock-layout monitor-layout">
   <section class="stock-main monitor-main">
-    <section class="panel monitor-builder-panel" id="monitor-builder">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">信息监控</p>
-          <h3>默认跟踪股票</h3>
-          <p class="section-caption">这里保存默认跟踪股票。后面如果你不改，手动运行时就直接用这组股票。</p>
+    {% if not is_visitor_mode %}
+      <section class="panel monitor-builder-panel" id="monitor-builder">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">信息监控</p>
+            <h3>默认跟踪股票</h3>
+            <p class="section-caption">这里保存默认跟踪股票。后面如果你不改，手动运行时就直接用这组股票。</p>
+          </div>
+          <span class="summary-count" data-monitor-chip-count>{{ monitor_config.stock_pool|length }}</span>
         </div>
-        <span class="summary-count" data-monitor-chip-count>{{ monitor_config.stock_pool|length }}</span>
-      </div>
 
-      <form
-        class="stack-form"
-        action="{{ url_for('save_monitor_defaults') }}"
-        method="post"
-        data-monitor-stock-form
-        data-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
-        data-today-exists="{{ 'true' if monitor_today_reports else 'false' }}"
-      >
-        <input type="hidden" name="stock_pool" value="{{ monitor_config.stock_pool|join(';') }}" data-monitor-stock-hidden>
-        <input type="hidden" name="confirm_existing_today" value="0" data-monitor-confirm-existing>
+        <form
+          class="stack-form"
+          action="{{ url_for('save_monitor_defaults') }}"
+          method="post"
+          data-monitor-stock-form
+          data-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
+          data-today-exists="{{ 'true' if monitor_today_reports else 'false' }}"
+        >
+          <input type="hidden" name="stock_pool" value="{{ monitor_config.stock_pool|join(';') }}" data-monitor-stock-hidden>
+          <input type="hidden" name="confirm_existing_today" value="0" data-monitor-confirm-existing>
 
-        <div class="monitor-builder">
-          <div class="monitor-chip-shell">
-            <div class="monitor-chip-list" data-monitor-chip-list></div>
-            <div class="monitor-chip-input-row">
-              <input
-                type="text"
-                placeholder="输入股票代码，例如 FTAI"
-                list="monitor-stock-suggestion-list"
-                data-monitor-chip-input
-              >
-              <button class="button button-secondary" type="button" data-monitor-chip-add>添加股票</button>
+          <div class="monitor-builder">
+            <div class="monitor-chip-shell">
+              <div class="monitor-chip-list" data-monitor-chip-list></div>
+              <div class="monitor-chip-input-row">
+                <input
+                  type="text"
+                  placeholder="输入股票代码，例如 FTAI"
+                  list="monitor-stock-suggestion-list"
+                  data-monitor-chip-input
+                >
+                <button class="button button-secondary" type="button" data-monitor-chip-add>添加股票</button>
+              </div>
+              <datalist id="monitor-stock-suggestion-list">
+                {% for symbol in monitor_stock_suggestions %}
+                  <option value="{{ symbol }}"></option>
+                {% endfor %}
+              </datalist>
             </div>
-            <datalist id="monitor-stock-suggestion-list">
-              {% for symbol in monitor_stock_suggestions %}
-                <option value="{{ symbol }}"></option>
+
+            <div class="chip-row monitor-suggestion-row">
+              {% for symbol in monitor_stock_suggestions[:12] %}
+                <button class="detail-chip detail-chip-button" type="button" data-monitor-suggestion="{{ symbol }}">{{ symbol }}</button>
               {% endfor %}
-            </datalist>
+            </div>
           </div>
 
-          <div class="chip-row monitor-suggestion-row">
-            {% for symbol in monitor_stock_suggestions[:12] %}
-              <button class="detail-chip detail-chip-button" type="button" data-monitor-suggestion="{{ symbol }}">{{ symbol }}</button>
-            {% endfor %}
+          <div class="story-actions monitor-builder-actions">
+            <button class="button button-secondary" type="submit">保存默认股票池</button>
+            <button
+              class="button button-primary"
+              type="submit"
+              formaction="{{ url_for('run_monitor_job') }}"
+              formmethod="post"
+              data-monitor-run-button
+            >
+              {% if monitor_runtime.is_running %}监测运行中{% else %}运行监测{% endif %}
+            </button>
           </div>
-        </div>
+        </form>
 
-        <div class="story-actions monitor-builder-actions">
-          <button class="button button-secondary" type="submit">保存默认股票池</button>
-          <button
-            class="button button-primary"
-            type="submit"
-            formaction="{{ url_for('run_monitor_job') }}"
-            formmethod="post"
-            data-monitor-run-button
-          >
-            {% if monitor_runtime.is_running %}监测运行中{% else %}运行监测{% endif %}
-          </button>
-        </div>
-      </form>
-
-      <form action="{{ url_for('terminate_monitor_job') }}" method="post" data-monitor-terminate-form hidden></form>
-    </section>
+        <form action="{{ url_for('terminate_monitor_job') }}" method="post" data-monitor-terminate-form hidden></form>
+      </section>
+    {% endif %}
 
     <section class="panel monitor-history-panel" id="report-library">
-      <div class="section-header">
-        <div>
+      <div class="section-header section-header-slider">
+        <div class="section-slider-shell" aria-label="信息监控报告说明">
+          <div class="section-slider-track">
+            <article class="section-slider-card">
           <p class="eyebrow">结果历史</p>
           <h3>信息监控报告</h3>
           <p class="section-caption">报告列表和阅读都放在这里。点击即可弹窗阅读，也兼容从个股页带着 report 参数直接跳进来。</p>
+            </article>
+          </div>
         </div>
         <span class="summary-count" data-monitor-report-count>{{ monitor_reports|length }}</span>
       </div>
@@ -194,72 +200,74 @@
   </section>
 
   <aside class="stock-sidebar monitor-sidebar">
-    <section class="panel monitor-status-panel">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">运行状态</p>
-          <h3>后台任务</h3>
+    {% if not is_visitor_mode %}
+      <section class="panel monitor-status-panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">运行状态</p>
+            <h3>后台任务</h3>
+          </div>
         </div>
-      </div>
-      <div
-        class="monitor-status-grid"
-        data-monitor-status-panel
-        data-status-url="{{ url_for('monitor_status') }}"
-        data-monitor-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
-        data-monitor-status="{{ monitor_runtime.status }}"
-        data-monitor-poll-seconds="{{ monitor_status_poll_seconds }}"
-      >
-        <article class="mini-fact">
-          <span class="mini-label">状态</span>
-          <strong data-monitor-status-label>{{ monitor_runtime.status_label }}</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">开始时间</span>
-          <strong data-monitor-started-at>{{ monitor_runtime.started_at_label }}</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">结束时间</span>
-          <strong data-monitor-finished-at>{{ monitor_runtime.finished_at_label }}</strong>
-        </article>
-        <article class="mini-fact">
-          <span class="mini-label">本轮股票池</span>
-          <strong data-monitor-runtime-stocks>{{ monitor_runtime.stock_pool|join(" · ") or "未运行" }}</strong>
-        </article>
-      </div>
-      {% if monitor_runtime.message %}
-        <p class="field-help" data-monitor-message>{{ monitor_runtime.message }}</p>
-      {% else %}
-        <p class="field-help" data-monitor-message hidden></p>
-      {% endif %}
-      {% if monitor_runtime.error %}
-        <p class="field-help" data-monitor-error>{{ monitor_runtime.error }}</p>
-      {% else %}
-        <p class="field-help" data-monitor-error hidden></p>
-      {% endif %}
-    </section>
+        <div
+          class="monitor-status-grid"
+          data-monitor-status-panel
+          data-status-url="{{ url_for('monitor_status') }}"
+          data-monitor-running="{{ 'true' if monitor_runtime.is_running else 'false' }}"
+          data-monitor-status="{{ monitor_runtime.status }}"
+          data-monitor-poll-seconds="{{ monitor_status_poll_seconds }}"
+        >
+          <article class="mini-fact">
+            <span class="mini-label">状态</span>
+            <strong data-monitor-status-label>{{ monitor_runtime.status_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">开始时间</span>
+            <strong data-monitor-started-at>{{ monitor_runtime.started_at_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">结束时间</span>
+            <strong data-monitor-finished-at>{{ monitor_runtime.finished_at_label }}</strong>
+          </article>
+          <article class="mini-fact">
+            <span class="mini-label">本轮股票池</span>
+            <strong data-monitor-runtime-stocks>{{ monitor_runtime.stock_pool|join(" · ") or "未运行" }}</strong>
+          </article>
+        </div>
+        {% if monitor_runtime.message %}
+          <p class="field-help" data-monitor-message>{{ monitor_runtime.message }}</p>
+        {% else %}
+          <p class="field-help" data-monitor-message hidden></p>
+        {% endif %}
+        {% if monitor_runtime.error %}
+          <p class="field-help" data-monitor-error>{{ monitor_runtime.error }}</p>
+        {% else %}
+          <p class="field-help" data-monitor-error hidden></p>
+        {% endif %}
+      </section>
 
-    <section class="panel monitor-reference-panel">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">参数</p>
-          <h3>运行配置</h3>
+      <section class="panel monitor-reference-panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">参数</p>
+            <h3>运行配置</h3>
+          </div>
         </div>
-      </div>
-      <div class="access-list">
-        <div class="access-item">
-          <span class="access-label">工作目录</span>
-          <span class="access-path">{{ monitor_config.workdir }}</span>
+        <div class="access-list">
+          <div class="access-item">
+            <span class="access-label">工作目录</span>
+            <span class="access-path">{{ monitor_config.workdir }}</span>
+          </div>
+          <div class="access-item">
+            <span class="access-label">超时</span>
+            <span class="access-path">{{ monitor_config.timeout_seconds }} 秒</span>
+          </div>
+          <div class="access-item">
+            <span class="access-label">结果目录</span>
+            <span class="access-path">{{ reports_dir }}</span>
+          </div>
         </div>
-        <div class="access-item">
-          <span class="access-label">超时</span>
-          <span class="access-path">{{ monitor_config.timeout_seconds }} 秒</span>
-        </div>
-        <div class="access-item">
-          <span class="access-label">结果目录</span>
-          <span class="access-path">{{ reports_dir }}</span>
-        </div>
-      </div>
-    </section>
+      </section>
+    {% endif %}
 
     <section class="panel monitor-today-panel">
       <div class="section-header">

@@ -26,8 +26,17 @@
       </div>
     {% endif %}
     <div class="reader-section-marker"><span>正文</span></div>
+    {% if note.reader_content_signature %}
+      <script type="application/json" data-reader-bootstrap>{{ note.reader_bootstrap | tojson }}</script>
+      <section class="reader-memory-strip" data-reader-history-panel hidden>
+        <div class="reader-memory-meta" data-reader-history-meta></div>
+        <button class="reader-memory-resume" type="button" data-reader-history-resume hidden>继续阅读</button>
+      </section>
+    {% endif %}
     <div class="reader-sheet-stage">
-      <div class="reader-sheet-body reader-sheet-prose rich-output">{{ note.content_html | safe }}</div>
+      <div class="reader-sheet-body" data-reader-annotatable>
+        <div class="reader-sheet-prose rich-output" data-reader-prose>{{ note.content_html | safe }}</div>
+      </div>
     </div>
   </article>
 {% elif preview_kind == "file" and file_entry %}
@@ -57,11 +66,20 @@
     {% if file_entry.description %}
       <p class="field-help">{{ file_entry.description }}</p>
     {% endif %}
+    {% if reader_content_signature %}
+      <script type="application/json" data-reader-bootstrap>{{ reader_bootstrap | tojson }}</script>
+      <section class="reader-memory-strip" data-reader-history-panel hidden>
+        <div class="reader-memory-meta" data-reader-history-meta></div>
+        <button class="reader-memory-resume" type="button" data-reader-history-resume hidden>继续阅读</button>
+      </section>
+    {% endif %}
     <div class="reader-section-marker"><span>{% if file_entry.is_previewable %}正文{% else %}说明{% endif %}</span></div>
     <div class="reader-sheet-stage file-preview-body">
       {% if file_entry.is_image_previewable and preview_note_html %}
-        <div class="reader-sheet-body reader-sheet-prose file-preview-copy rich-output">
-          {{ preview_note_html | safe }}
+        <div class="reader-sheet-body" data-reader-annotatable>
+          <div class="reader-sheet-prose file-preview-copy rich-output" data-reader-prose>
+            {{ preview_note_html | safe }}
+          </div>
         </div>
       {% endif %}
 
@@ -70,12 +88,12 @@
           <img class="file-preview-image" src="{{ image_url }}" alt="{{ file_entry.original_name }}">
         </div>
       {% elif file_entry.is_text_previewable %}
-        <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
-          <pre class="text-preview">{{ preview_text }}</pre>
+        <div class="reader-sheet-body reader-sheet-prose-plain" data-reader-annotatable>
+          <pre class="text-preview" data-reader-prose>{{ preview_text }}</pre>
         </div>
       {% else %}
-        <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
-          <p>这个文件类型暂时不支持页内预览，先在这里保留标题和说明，真正查看时直接下载就行。</p>
+        <div class="reader-sheet-body reader-sheet-prose-plain">
+          <p>这个文件类型暂时不支持页内预览，先保留标题和说明，真正查看时直接下载就行。</p>
         </div>
       {% endif %}
     </div>
@@ -121,8 +139,26 @@
     {% endif %}
 
     <div class="reader-section-marker"><span>正文</span></div>
+    {% if transcript.reader_content_signature %}
+      <script type="application/json" data-reader-bootstrap>
+        {{ {
+          "kind": "transcript",
+          "item_id": transcript.id,
+          "content_signature": transcript.reader_content_signature,
+          "annotations": transcript.reader_annotations,
+          "activity": transcript.reader_activity,
+          "save_url": url_for('persist_transcript_reader_state', transcript_id=transcript.id)
+        } | tojson }}
+      </script>
+      <section class="reader-memory-strip" data-reader-history-panel hidden>
+        <div class="reader-memory-meta" data-reader-history-meta></div>
+        <button class="reader-memory-resume" type="button" data-reader-history-resume hidden>继续阅读</button>
+      </section>
+    {% endif %}
     <div class="reader-sheet-stage">
-      <div class="reader-sheet-body reader-sheet-prose rich-output">{{ transcript.reader_content_html | safe }}</div>
+      <div class="reader-sheet-body"{% if transcript.has_transcript_content %} data-reader-annotatable{% endif %}>
+        <div class="reader-sheet-prose rich-output"{% if transcript.has_transcript_content %} data-reader-prose{% endif %}>{{ transcript.reader_content_html | safe }}</div>
+      </div>
     </div>
   </article>
 {% elif preview_kind == "schedule" and schedule_item %}
@@ -164,9 +200,16 @@
     </div>
 
     <div class="reader-section-marker"><span>备注</span></div>
+    {% if schedule_item.reader_content_signature %}
+      <script type="application/json" data-reader-bootstrap>{{ schedule_item.reader_bootstrap | tojson }}</script>
+      <section class="reader-memory-strip" data-reader-history-panel hidden>
+        <div class="reader-memory-meta" data-reader-history-meta></div>
+        <button class="reader-memory-resume" type="button" data-reader-history-resume hidden>继续阅读</button>
+      </section>
+    {% endif %}
     <div class="reader-sheet-stage">
-      <div class="reader-sheet-body reader-sheet-prose reader-sheet-prose-plain">
-        <p>{{ schedule_item.note or schedule_item.summary or "这条日程还没有补充更多说明。" }}</p>
+      <div class="reader-sheet-body reader-sheet-prose-plain" data-reader-annotatable>
+        <p data-reader-prose>{{ schedule_item.note or schedule_item.summary or "这条日程还没有补充更多说明。" }}</p>
       </div>
     </div>
   </article>

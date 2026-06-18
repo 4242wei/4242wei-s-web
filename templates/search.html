@@ -1,11 +1,11 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>全局搜索</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
 </head>
 <body>
@@ -17,6 +17,14 @@
         <p class="eyebrow">全局搜索</p>
         <h2>统一搜索</h2>
         <p class="story-dek">先用关键词定位，再用类型、股票和标签收窄范围。它更像研究工作台里的统一入口，不是零散地搜。</p>
+        <div class="search-hero-meta-strip" aria-label="站点概览">
+          <span>{{ nav_reports_count }} 篇报告</span>
+          {% if is_visitor_mode %}
+            <span>{{ nav_stock_count }} 只股票 | {{ nav_schedule_count }} 条待处理日程 | {{ nav_expert_count }} 位专家 | {{ nav_transcript_count }} 个转录任务</span>
+          {% else %}
+            <span>{{ nav_stock_count }} 只股票 | {{ nav_favorites_count }} 只自选 | {{ nav_group_count }} 个分组 | {{ nav_schedule_count }} 条待处理日程 | {{ nav_expert_count }} 位专家 | {{ nav_transcript_count }} 个转录任务 | {{ nav_trash_count }} 个回收站条目</span>
+          {% endif %}
+        </div>
       </div>
       <aside class="stock-hero-aside">
         <article class="mini-fact">

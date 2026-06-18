@@ -6,9 +6,9 @@
   <title>Mindmap Studio</title>
   {% include "_theme_bootstrap.html" %}
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='mindmap-studio-favicon.svg', v='20260324-studio2') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='mindmap-studio.css', v='20260324-studio2') }}">
-  <script src="{{ url_for('static', filename='mindmap-studio.js', v='20260324-studio2') }}" defer></script>
+  <script src="{{ url_for('static', filename='mindmap-studio.js', v='20260406-studio3') }}" defer></script>
 </head>
 <body class="studio-body">
   <div
@@ -16,11 +16,18 @@
     data-studio-root
     data-bootstrap-url="{{ mindmap_studio_bootstrap_url }}"
     data-create-url="{{ mindmap_studio_create_url }}"
+    data-import-url="{{ url_for('import_mindmap_studio_document') }}"
     data-current-url="{{ mindmap_studio_current_url }}"
     data-save-url-template="{{ url_for('save_mindmap_studio_document', document_id='__DOC_ID__') }}"
     data-duplicate-url-template="{{ url_for('duplicate_mindmap_studio_document', document_id='__DOC_ID__') }}"
     data-delete-url-template="{{ url_for('delete_mindmap_studio_document', document_id='__DOC_ID__') }}"
     data-export-url-template="{{ url_for('export_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-export-markdown-url-template="{{ url_for('export_mindmap_studio_document_markdown', document_id='__DOC_ID__') }}"
+    data-export-mermaid-url-template="{{ url_for('export_mindmap_studio_document_mermaid', document_id='__DOC_ID__') }}"
+    data-history-url-template="{{ url_for('mindmap_studio_document_history', document_id='__DOC_ID__') }}"
+    data-diff-url-template="{{ url_for('diff_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-restore-url-template="{{ url_for('restore_mindmap_studio_document', document_id='__DOC_ID__') }}"
+    data-analysis-url-template="{{ url_for('analyze_mindmap_studio_document', document_id='__DOC_ID__') }}"
     data-requested-doc="{{ requested_document_id }}"
   >
     <aside class="studio-rail">
@@ -89,10 +96,17 @@
             <span>密度</span>
             <select data-studio-density-select></select>
           </label>
+          <button class="studio-button" type="button" data-studio-import>导入 JSON</button>
+          <button class="studio-button" type="button" data-studio-history>版本</button>
+          <button class="studio-button" type="button" data-studio-diff>Diff</button>
+          <button class="studio-button" type="button" data-studio-analysis>诊断</button>
+          <button class="studio-button" type="button" data-studio-restore-baseline>恢复基线</button>
           <button class="studio-button" type="button" data-studio-baseline>记录当前为基线</button>
           <button class="studio-button" type="button" data-studio-duplicate>复制</button>
           <button class="studio-button studio-button-danger" type="button" data-studio-delete>删除</button>
           <button class="studio-button studio-button-primary" type="button" data-studio-export>导出 JSON</button>
+          <button class="studio-button" type="button" data-studio-export-markdown>导出 MD</button>
+          <button class="studio-button" type="button" data-studio-export-mermaid>导出 Mermaid</button>
         </div>
       </header>
 
@@ -251,7 +265,24 @@
           <p class="studio-muted">当前还没有记录生成基线。</p>
         </div>
       </section>
+
+      <section class="studio-panel">
+        <div class="studio-section-head">
+          <h2>版本与诊断</h2>
+        </div>
+        <div class="studio-baseline-box" data-studio-analysis-box>
+          <p class="studio-muted">这里会显示当前导图的结构诊断。</p>
+        </div>
+        <div class="studio-baseline-box" data-studio-diff-box>
+          <p class="studio-muted">这里会显示当前导图与基线或历史版本的差异。</p>
+        </div>
+        <div class="studio-baseline-box" data-studio-history-box>
+          <p class="studio-muted">这里会显示最近的版本历史。</p>
+        </div>
+      </section>
     </aside>
   </div>
+  <input type="file" accept=".json,application/json" hidden data-studio-import-input>
 </body>
 </html>
+

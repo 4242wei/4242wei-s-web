@@ -116,6 +116,11 @@
   const nodeIndex = new Map();
   const pathIndex = new Map();
   const collapsedNodes = new Set();
+  const DEFAULT_MIN_SCALE = 0.72;
+  const MIN_SCALE_FLOOR = 0.08;
+  const MAX_SCALE = 1.55;
+  const DEFAULT_ENTRY_SCALE = 0.42;
+  const ENTRY_SCALE_CEILING = 0.92;
 
   function setText(node, value) {
     if (node instanceof HTMLElement) {
@@ -1268,12 +1273,15 @@
       activeNodeId = payload.root.id;
     }
     selectNode(activeNodeId);
-    switchView(activeView);
-    setScale(currentScale);
+    switchView(activeView, { focusNode: false });
+    if (activeView === "canvas") {
+      setScale(getScaleBounds().entryScale, { recenterStage: true });
+    }
   }
 
   function clampScale(nextScale) {
-    return Math.min(1.55, Math.max(0.72, nextScale));
+    const bounds = getScaleBounds();
+    return Math.min(bounds.maxScale, Math.max(bounds.minScale, nextScale));
   }
 
   function queueViewportRefresh(options) {
@@ -1318,6 +1326,70 @@
     lastFullscreenState = active;
   }
 
+  function measureStageWorldSize() {
+    if (!(stage instanceof HTMLElement)) {
+      return {
+        stageWidth: 880,
+        stageHeight: 480,
+      };
+    }
+
+    return {
+      stageWidth: Math.max(stage.scrollWidth + 80, 880),
+      stageHeight: Math.max(stage.scrollHeight + 80, 480),
+    };
+  }
+
+  function getViewportPadding(viewportWidth, viewportHeight) {
+    return {
+      sidePadding: isFullscreenActive() ? Math.max(260, Math.round(viewportWidth * 0.32)) : Math.max(170, Math.round(viewportWidth * 0.18)),
+      verticalPadding: isFullscreenActive()
+        ? Math.max(190, Math.round(viewportHeight * 0.26))
+        : Math.max(120, Math.round(viewportHeight * 0.16)),
+    };
+  }
+
+  function getScaleBounds() {
+    if (!(stageViewport instanceof HTMLElement)) {
+      return {
+        minScale: DEFAULT_MIN_SCALE,
+        maxScale: MAX_SCALE,
+        fitScale: 1,
+        entryScale: 1,
+      };
+    }
+
+    const viewportWidth = Math.max(stageViewport.clientWidth, 0);
+    const viewportHeight = Math.max(stageViewport.clientHeight, 0);
+    if (!viewportWidth || !viewportHeight) {
+      return {
+        minScale: DEFAULT_MIN_SCALE,
+        maxScale: MAX_SCALE,
+        fitScale: 1,
+        entryScale: 1,
+      };
+    }
+
+    const { stageWidth, stageHeight } = measureStageWorldSize();
+    const { sidePadding, verticalPadding } = getViewportPadding(viewportWidth, viewportHeight);
+    const availableWidth = Math.max(140, viewportWidth - sidePadding * 2);
+    const availableHeight = Math.max(140, viewportHeight - verticalPadding * 2);
+    const rawFitScale = Math.min(1, availableWidth / stageWidth, availableHeight / stageHeight);
+    const fitScale = Number.isFinite(rawFitScale) && rawFitScale > 0 ? rawFitScale : 1;
+    const minScale = Math.max(MIN_SCALE_FLOOR, Math.min(DEFAULT_MIN_SCALE, fitScale * 0.88));
+    const entryScale =
+      fitScale >= 0.74
+        ? fitScale
+        : Math.min(ENTRY_SCALE_CEILING, Math.max(fitScale, DEFAULT_ENTRY_SCALE, fitScale * 1.14));
+
+    return {
+      minScale: minScale,
+      maxScale: MAX_SCALE,
+      fitScale: Math.max(MIN_SCALE_FLOOR, Math.min(MAX_SCALE, fitScale)),
+      entryScale: Math.max(MIN_SCALE_FLOOR, Math.min(MAX_SCALE, entryScale)),
+    };
+  }
+
   function updateViewportMetrics() {
     const transformLayer = ensureTransformLayer();
     if (
@@ -1329,14 +1401,10 @@
       return viewportMetrics;
     }
 
-    const stageWidth = Math.max(stage.scrollWidth + 80, 880);
-    const stageHeight = Math.max(stage.scrollHeight + 80, 480);
+    const { stageWidth, stageHeight } = measureStageWorldSize();
     const viewportWidth = Math.max(stageViewport.clientWidth, 0);
     const viewportHeight = Math.max(stageViewport.clientHeight, 0);
-    const sidePadding = isFullscreenActive() ? Math.max(260, Math.round(viewportWidth * 0.32)) : Math.max(170, Math.round(viewportWidth * 0.18));
-    const verticalPadding = isFullscreenActive()
-      ? Math.max(190, Math.round(viewportHeight * 0.26))
-      : Math.max(120, Math.round(viewportHeight * 0.16));
+    const { sidePadding, verticalPadding } = getViewportPadding(viewportWidth, viewportHeight);
     const scaledWidth = stageWidth * currentScale;
     const scaledHeight = stageHeight * currentScale;
     const workspaceWidth = Math.max(scaledWidth + sidePadding * 2, viewportWidth + sidePadding * 2);
@@ -1580,12 +1648,17 @@
 
     currentScale = clampScale(nextScale);
     const nextMetrics = updateViewportMetrics();
-    stageViewport.scrollLeft = worldX * currentScale + nextMetrics.offsetX - anchorViewportX;
-    stageViewport.scrollTop = worldY * currentScale + nextMetrics.offsetY - anchorViewportY;
+    if (options && options.recenterStage) {
+      stageViewport.scrollLeft = Math.max((scalerShell.scrollWidth - stageViewport.clientWidth) / 2, 0);
+      stageViewport.scrollTop = Math.max((scalerShell.scrollHeight - stageViewport.clientHeight) / 2, 0);
+    } else {
+      stageViewport.scrollLeft = worldX * currentScale + nextMetrics.offsetX - anchorViewportX;
+      stageViewport.scrollTop = worldY * currentScale + nextMetrics.offsetY - anchorViewportY;
+    }
     clampViewportScroll();
   }
 
-  function switchView(nextView) {
+  function switchView(nextView, options) {
     activeView = nextView === "outline" ? "outline" : "canvas";
     endViewportDrag();
     viewButtons.forEach(function (button) {
@@ -1610,7 +1683,7 @@
     syncPanHint();
     if (activeView === "canvas") {
       queueViewportRefresh({
-        focusNodeId: activeNodeId,
+        focusNodeId: options && options.focusNode === false ? "" : activeNodeId,
         behavior: "auto",
         redraw: true,
       });

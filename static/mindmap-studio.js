@@ -20,19 +20,30 @@
     showRelations: true,
     dirty: false,
     saving: false,
+    savePromise: null,
     saveTimer: 0,
     renderFrame: 0,
     isApplyingServerPayload: false,
+    historyPayload: null,
+    diffPayload: null,
+    analysisPayload: null,
   };
 
   const bootstrapUrl = root.dataset.bootstrapUrl || "";
   const createUrl = root.dataset.createUrl || "";
+  const importUrl = root.dataset.importUrl || "";
   const currentUrl = root.dataset.currentUrl || "";
   const requestedDocId = root.dataset.requestedDoc || "";
   const saveUrlTemplate = root.dataset.saveUrlTemplate || "";
   const duplicateUrlTemplate = root.dataset.duplicateUrlTemplate || "";
   const deleteUrlTemplate = root.dataset.deleteUrlTemplate || "";
   const exportUrlTemplate = root.dataset.exportUrlTemplate || "";
+  const exportMarkdownUrlTemplate = root.dataset.exportMarkdownUrlTemplate || "";
+  const exportMermaidUrlTemplate = root.dataset.exportMermaidUrlTemplate || "";
+  const historyUrlTemplate = root.dataset.historyUrlTemplate || "";
+  const diffUrlTemplate = root.dataset.diffUrlTemplate || "";
+  const restoreUrlTemplate = root.dataset.restoreUrlTemplate || "";
+  const analysisUrlTemplate = root.dataset.analysisUrlTemplate || "";
 
   const templateGrid = root.querySelector("[data-studio-template-grid]");
   const documentList = root.querySelector("[data-studio-document-list]");
@@ -45,10 +56,17 @@
   const densitySelect = root.querySelector("[data-studio-density-select]");
   const saveState = root.querySelector("[data-studio-save-state]");
   const documentMeta = root.querySelector("[data-studio-document-meta]");
+  const importButton = root.querySelector("[data-studio-import]");
   const duplicateButton = root.querySelector("[data-studio-duplicate]");
   const deleteButton = root.querySelector("[data-studio-delete]");
   const exportButton = root.querySelector("[data-studio-export]");
+  const exportMarkdownButton = root.querySelector("[data-studio-export-markdown]");
+  const exportMermaidButton = root.querySelector("[data-studio-export-mermaid]");
   const baselineButton = root.querySelector("[data-studio-baseline]");
+  const historyButton = root.querySelector("[data-studio-history]");
+  const diffButton = root.querySelector("[data-studio-diff]");
+  const analysisButton = root.querySelector("[data-studio-analysis]");
+  const restoreBaselineButton = root.querySelector("[data-studio-restore-baseline]");
 
   const canvasHeading = root.querySelector("[data-studio-canvas-heading]");
   const canvasDescription = root.querySelector("[data-studio-canvas-description]");
@@ -95,6 +113,10 @@
   const relationList = root.querySelector("[data-studio-relation-list]");
   const referenceList = root.querySelector("[data-studio-reference-list]");
   const baselineBox = root.querySelector("[data-studio-baseline-box]");
+  const analysisBox = root.querySelector("[data-studio-analysis-box]");
+  const diffBox = root.querySelector("[data-studio-diff-box]");
+  const historyBox = root.querySelector("[data-studio-history-box]");
+  const importInput = document.querySelector("[data-studio-import-input]");
 
   function urlFor(template, documentId) {
     return String(template || "").replace("__DOC_ID__", encodeURIComponent(documentId || ""));
@@ -155,6 +177,24 @@
     });
   }
 
+  function requestMultipartJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: body,
+    }).then(function (response) {
+      return response.json().then(function (payload) {
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || "请求失败。");
+        }
+        return payload;
+      });
+    });
+  }
+
   function getOptionMeta(options, key) {
     return (options || []).find(function (item) {
       return item.key === key;
@@ -163,6 +203,20 @@
 
   function activeDocument() {
     return state.activeDocument;
+  }
+
+  function ensureServerSynced() {
+    if (state.savePromise) {
+      return state.savePromise.then(function () {
+        return ensureServerSynced();
+      });
+    }
+    if (state.dirty) {
+      return Promise.resolve(saveDocument(true)).then(function () {
+        return ensureServerSynced();
+      });
+    }
+    return Promise.resolve(null);
   }
 
   function nodeMap(document) {
@@ -285,6 +339,13 @@
     return JSON.parse(JSON.stringify(document));
   }
 
+  function documentSignature(document) {
+    if (!document) {
+      return "";
+    }
+    return JSON.stringify(document);
+  }
+
   function applyBootstrapPayload(payload) {
     state.documents = Array.isArray(payload.documents) ? payload.documents : [];
     state.templateOptions = Array.isArray(payload.template_options) ? payload.template_options : [];
@@ -300,10 +361,16 @@
     state.scale = 1;
     state.dirty = false;
     state.saving = false;
+    state.historyPayload = null;
+    state.diffPayload = null;
+    state.analysisPayload = null;
     updateSaveState();
     replaceUrl(state.activeDocument ? state.activeDocument.id : "");
     renderShell();
     recenterViewport();
+    refreshDiagnostics().catch(function () {
+      renderDiagnostics();
+    });
   }
 
   async function loadBootstrap(documentId) {
@@ -319,6 +386,117 @@
       cache: "no-store",
     });
     applyBootstrapPayload(payload);
+  }
+
+  function resetDiagnostics() {
+    state.historyPayload = null;
+    state.diffPayload = null;
+    state.analysisPayload = null;
+    renderDiagnostics();
+  }
+
+  async function refreshDiagnostics(options) {
+    const document = activeDocument();
+    if (!document) {
+      resetDiagnostics();
+      return;
+    }
+
+    const mode = options && options.mode ? options.mode : "all";
+    const tasks = [];
+    if ((mode === "all" || mode === "history") && historyUrlTemplate) {
+      tasks.push(
+        requestJson(urlFor(historyUrlTemplate, document.id), {
+          headers: {
+            Accept: "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          cache: "no-store",
+        }).then(function (payload) {
+          state.historyPayload = payload;
+        })
+      );
+    }
+    if ((mode === "all" || mode === "analysis") && analysisUrlTemplate) {
+      tasks.push(
+        requestJson(urlFor(analysisUrlTemplate, document.id), {
+          headers: {
+            Accept: "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          cache: "no-store",
+        }).then(function (payload) {
+          state.analysisPayload = payload;
+        })
+      );
+    }
+    if ((mode === "all" || mode === "diff") && diffUrlTemplate) {
+      tasks.push(
+        requestJson(urlFor(diffUrlTemplate, document.id), {
+          headers: {
+            Accept: "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          cache: "no-store",
+        }).then(function (payload) {
+          state.diffPayload = payload;
+        })
+      );
+    }
+    if (!tasks.length) {
+      renderDiagnostics();
+      return;
+    }
+    await Promise.all(tasks);
+    renderDiagnostics();
+  }
+
+  async function importDocumentFromFile(file) {
+    if (!file || !importUrl) {
+      return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    const payload = await requestMultipartJson(importUrl, formData);
+    applyBootstrapPayload(payload);
+    showToast("success", "导图已导入工作台。");
+  }
+
+  async function downloadExport(templateUrl) {
+    if (!templateUrl) {
+      return;
+    }
+    await ensureServerSynced();
+    const document = activeDocument();
+    if (!document) {
+      return;
+    }
+    window.location.href = urlFor(templateUrl, document.id);
+  }
+
+  async function loadDiagnostics(mode) {
+    await ensureServerSynced();
+    await refreshDiagnostics({ mode: mode });
+  }
+
+  async function restoreDocument(source) {
+    const document = activeDocument();
+    if (!document || !restoreUrlTemplate) {
+      return;
+    }
+    const payload = await requestJson(urlFor(restoreUrlTemplate, document.id), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: JSON.stringify({
+        source: source,
+      }),
+    });
+    applyBootstrapPayload(payload);
+    showToast("success", (payload.restored_from || "所选版本") + " 已恢复。");
   }
 
   async function createDocument(templateKey) {
@@ -376,33 +554,86 @@
 
   async function saveDocument(immediate) {
     const document = activeDocument();
-    if (!document || state.saving || (!state.dirty && !immediate)) {
+    if (state.savePromise) {
+      return state.savePromise;
+    }
+    if (!document || (!state.dirty && !immediate)) {
       return;
     }
     window.clearTimeout(state.saveTimer);
     state.saving = true;
     updateSaveState();
+    const saveSnapshot = cloneDocument(document);
 
-    try {
-      const payload = await requestJson(urlFor(saveUrlTemplate, document.id), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        body: JSON.stringify({
-          document: document,
-        }),
+    const saveTask = requestJson(urlFor(saveUrlTemplate, saveSnapshot.id), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: JSON.stringify({
+        document: saveSnapshot,
+      }),
+    })
+      .then(function (payload) {
+        const currentDocument = activeDocument();
+        const localChangedSinceSave = Boolean(
+          currentDocument &&
+          currentDocument.id === saveSnapshot.id &&
+          documentSignature(currentDocument) !== documentSignature(saveSnapshot)
+        );
+        const preservedDocument = localChangedSinceSave ? cloneDocument(currentDocument) : null;
+        applyBootstrapPayload(payload);
+        if (preservedDocument) {
+          const serverDocument = activeDocument();
+          preservedDocument.schema_version = serverDocument && serverDocument.schema_version
+            ? serverDocument.schema_version
+            : preservedDocument.schema_version;
+          preservedDocument.created_at = serverDocument && serverDocument.created_at
+            ? serverDocument.created_at
+            : preservedDocument.created_at;
+          preservedDocument.revision = serverDocument && serverDocument.revision
+            ? serverDocument.revision
+            : preservedDocument.revision;
+          preservedDocument.history = serverDocument && Array.isArray(serverDocument.history)
+            ? serverDocument.history
+            : preservedDocument.history;
+          state.activeDocument = preservedDocument;
+          state.documents = state.documents.map(function (item) {
+            if (item.id !== preservedDocument.id) {
+              return item;
+            }
+            return Object.assign({}, item, {
+              title: preservedDocument.title,
+              updated_at: preservedDocument.updated_at,
+              revision: preservedDocument.revision,
+            });
+          });
+          state.dirty = true;
+          updateSaveState();
+          renderShell();
+          window.clearTimeout(state.saveTimer);
+          state.saveTimer = window.setTimeout(function () {
+            saveDocument(false);
+          }, 120);
+        }
+        return payload;
+      })
+      .catch(function (error) {
+        state.saving = false;
+        updateSaveState(error instanceof Error ? error.message : "保存失败。");
+        showToast("error", error instanceof Error ? error.message : "保存失败。");
+        throw error;
+      })
+      .finally(function () {
+        state.saving = false;
+        state.savePromise = null;
+        updateSaveState();
       });
-      applyBootstrapPayload(payload);
-      return payload;
-    } catch (error) {
-      state.saving = false;
-      updateSaveState(error instanceof Error ? error.message : "保存失败。");
-      showToast("error", error instanceof Error ? error.message : "保存失败。");
-      throw error;
-    }
+
+    state.savePromise = saveTask;
+    return saveTask;
   }
 
   function updateSaveState(message) {
@@ -1284,10 +1515,14 @@
 
   function renderBaselineBox() {
     const document = activeDocument();
-    if (!(baselineBox instanceof HTMLElement) || !document) {
+    if (!(baselineBox instanceof HTMLElement)) {
       return;
     }
     baselineBox.innerHTML = "";
+    if (!document) {
+      baselineBox.innerHTML = '<p class="studio-muted">请先选择一张导图。</p>';
+      return;
+    }
     const snapshot = document.generated_snapshot;
     if (!snapshot) {
       baselineBox.innerHTML = '<p class="studio-muted">当前还没有生成基线。你可以先整理出一版结构，再点击上方“记录当前为基线”。</p>';
@@ -1307,6 +1542,139 @@
         ? "这版基线生成时参考了 " + snapshot.reference_document_ids.length + " 张旧导图。"
         : "这版基线没有挂任何旧导图参考。";
     baselineBox.appendChild(note);
+  }
+
+  function renderAnalysisBox() {
+    const document = activeDocument();
+    if (!(analysisBox instanceof HTMLElement)) {
+      return;
+    }
+    analysisBox.innerHTML = "";
+    if (!document) {
+      analysisBox.innerHTML = '<p class="studio-muted">请先选择一张导图。</p>';
+      return;
+    }
+    const payload = state.analysisPayload && state.analysisPayload.analysis ? state.analysisPayload.analysis : null;
+    if (!payload) {
+      analysisBox.innerHTML = '<p class="studio-muted">这里会显示当前导图的结构诊断。</p>';
+      return;
+    }
+    const meta = window.document.createElement("div");
+    meta.className = "studio-baseline-meta";
+    meta.appendChild(buildStatChip("r" + (payload.revision || 1)));
+    meta.appendChild(buildStatChip((payload.history_count || 0) + " 版本"));
+    meta.appendChild(buildStatChip((payload.node_count || 0) + " 节点"));
+    meta.appendChild(buildStatChip((payload.relationship_count || 0) + " 关系"));
+    analysisBox.appendChild(meta);
+
+    const coverage = payload.coverage || {};
+    const note = window.document.createElement("p");
+    note.className = "studio-muted";
+    note.textContent =
+      "结构化支撑覆盖 " +
+      (coverage.with_structured_support || 0) +
+      "/" +
+      (coverage.content_node_count || 0) +
+      "，待重点处理节点 " +
+      ((payload.attention_nodes || []).length || 0) +
+      " 个。";
+    analysisBox.appendChild(note);
+  }
+
+  function renderDiffBox() {
+    const document = activeDocument();
+    if (!(diffBox instanceof HTMLElement)) {
+      return;
+    }
+    diffBox.innerHTML = "";
+    if (!document) {
+      diffBox.innerHTML = '<p class="studio-muted">请先选择一张导图。</p>';
+      return;
+    }
+    const payload = state.diffPayload && state.diffPayload.diff ? state.diffPayload : null;
+    if (!payload) {
+      diffBox.innerHTML = '<p class="studio-muted">这里会显示当前导图与基线或历史版本的差异。</p>';
+      return;
+    }
+    const diff = payload.diff || {};
+    const meta = window.document.createElement("div");
+    meta.className = "studio-baseline-meta";
+    meta.appendChild(buildStatChip((payload.left_label || "左侧") + " → " + (payload.right_label || "右侧")));
+    meta.appendChild(buildStatChip("节点改动 " + ((diff.node_changes || {}).changed_count || 0)));
+    meta.appendChild(buildStatChip("关系改动 " + ((diff.relationship_changes || {}).changed_count || 0)));
+    diffBox.appendChild(meta);
+
+    const note = window.document.createElement("p");
+    note.className = "studio-muted";
+    note.textContent =
+      "元数据 " + (diff.metadata_changes || []).length +
+      " 处，结构字段 " + (diff.structured_changes || []).length +
+      " 处，新增节点 " + (((diff.node_changes || {}).added_count) || 0) +
+      "，删除节点 " + (((diff.node_changes || {}).removed_count) || 0) + "。";
+    diffBox.appendChild(note);
+  }
+
+  function renderHistoryBox() {
+    const document = activeDocument();
+    if (!(historyBox instanceof HTMLElement)) {
+      return;
+    }
+    historyBox.innerHTML = "";
+    if (!document) {
+      historyBox.innerHTML = '<p class="studio-muted">请先选择一张导图。</p>';
+      return;
+    }
+    const payload = state.historyPayload && Array.isArray(state.historyPayload.history) ? state.historyPayload : null;
+    if (!payload) {
+      historyBox.innerHTML = '<p class="studio-muted">这里会显示最近的版本历史。</p>';
+      return;
+    }
+    const meta = window.document.createElement("div");
+    meta.className = "studio-baseline-meta";
+    meta.appendChild(buildStatChip("当前 r" + (payload.revision || 1)));
+    meta.appendChild(buildStatChip((payload.history || []).length + " 条历史"));
+    historyBox.appendChild(meta);
+
+    const list = window.document.createElement("div");
+    list.className = "studio-relation-list";
+    (payload.history || []).slice(0, 6).forEach(function (item, index) {
+      const row = window.document.createElement("div");
+      row.className = "studio-relation-item";
+      const copy = window.document.createElement("div");
+      copy.innerHTML =
+        "<strong>" + (item.title || item.label || ("版本 " + (item.revision || "?"))) + "</strong>" +
+        "<span>r" + (item.revision || 1) + " / " + (item.created_label || item.created_at || "") + " / " + (item.node_count || 0) + " 节点</span>";
+      row.appendChild(copy);
+      if (index > 0) {
+        const restoreButton = window.document.createElement("button");
+        restoreButton.type = "button";
+        restoreButton.className = "studio-mini-button";
+        restoreButton.textContent = "恢复";
+        restoreButton.addEventListener("click", function () {
+          if (!window.confirm("恢复后会用所选版本覆盖当前画布，当前内容仍会保留在历史中。继续吗？")) {
+            return;
+          }
+          ensureServerSynced()
+            .then(function () {
+              return restoreDocument("history:" + item.id);
+            })
+            .catch(function (error) {
+              if (error) {
+                showToast("error", error instanceof Error ? error.message : "恢复失败。");
+              }
+            });
+        });
+        row.appendChild(restoreButton);
+      }
+      list.appendChild(row);
+    });
+    historyBox.appendChild(list);
+  }
+
+  function renderDiagnostics() {
+    renderAnalysisBox();
+    renderDiffBox();
+    renderHistoryBox();
   }
 
   function renderInspector() {
@@ -1377,6 +1745,7 @@
     renderCanvasMeta();
     renderMap();
     renderInspector();
+    renderDiagnostics();
   }
 
   function addRelation() {
@@ -1463,15 +1832,88 @@
     }
     if (exportButton instanceof HTMLButtonElement) {
       exportButton.addEventListener("click", function () {
-        const document = activeDocument();
-        if (!document) {
+        downloadExport(exportUrlTemplate).catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "导出失败。");
+        });
+      });
+    }
+    if (importButton instanceof HTMLButtonElement && importInput instanceof HTMLInputElement) {
+      importButton.addEventListener("click", function () {
+        importInput.value = "";
+        importInput.click();
+      });
+    }
+    if (importInput instanceof HTMLInputElement) {
+      importInput.addEventListener("change", function () {
+        const file = importInput.files && importInput.files[0] ? importInput.files[0] : null;
+        if (!file) {
           return;
         }
-        window.location.href = urlFor(exportUrlTemplate, document.id);
+        importDocumentFromFile(file)
+          .catch(function (error) {
+            showToast("error", error instanceof Error ? error.message : "导入失败。");
+          })
+          .finally(function () {
+            importInput.value = "";
+          });
+      });
+    }
+    if (exportMarkdownButton instanceof HTMLButtonElement) {
+      exportMarkdownButton.addEventListener("click", function () {
+        downloadExport(exportMarkdownUrlTemplate).catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "导出 Markdown 失败。");
+        });
+      });
+    }
+    if (exportMermaidButton instanceof HTMLButtonElement) {
+      exportMermaidButton.addEventListener("click", function () {
+        downloadExport(exportMermaidUrlTemplate).catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "导出 Mermaid 失败。");
+        });
       });
     }
     if (baselineButton instanceof HTMLButtonElement) {
       baselineButton.addEventListener("click", recordBaselineSnapshot);
+    }
+    if (historyButton instanceof HTMLButtonElement) {
+      historyButton.addEventListener("click", function () {
+        loadDiagnostics("history").catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "版本历史刷新失败。");
+        });
+      });
+    }
+    if (diffButton instanceof HTMLButtonElement) {
+      diffButton.addEventListener("click", function () {
+        loadDiagnostics("diff").catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "Diff 刷新失败。");
+        });
+      });
+    }
+    if (analysisButton instanceof HTMLButtonElement) {
+      analysisButton.addEventListener("click", function () {
+        loadDiagnostics("analysis").catch(function (error) {
+          showToast("error", error instanceof Error ? error.message : "诊断刷新失败。");
+        });
+      });
+    }
+    if (restoreBaselineButton instanceof HTMLButtonElement) {
+      restoreBaselineButton.addEventListener("click", function () {
+        const document = activeDocument();
+        if (!document || !document.generated_snapshot) {
+          showToast("error", "当前还没有可恢复的基线。");
+          return;
+        }
+        if (!window.confirm("恢复基线会用生成时的结构覆盖当前画布，当前内容会自动进入历史。继续吗？")) {
+          return;
+        }
+        ensureServerSynced()
+          .then(function () {
+            return restoreDocument("baseline");
+          })
+          .catch(function (error) {
+            showToast("error", error instanceof Error ? error.message : "恢复基线失败。");
+          });
+      });
     }
 
     if (addChildButton instanceof HTMLButtonElement) {

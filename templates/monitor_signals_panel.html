@@ -1,5 +1,6 @@
 <main class="stock-layout monitor-layout signal-layout">
   <section class="stock-main monitor-main signal-main">
+    {% if not is_visitor_mode %}
     <section class="panel signal-builder-panel">
       <div class="section-header">
         <div>
@@ -85,6 +86,7 @@
 
       <form action="{{ url_for('terminate_signal_monitor_job') }}" method="post" data-signal-terminate-form hidden></form>
     </section>
+    {% endif %}
 
     <section class="panel signal-reading-panel" id="signal-reading-panel">
       <div class="section-header">
@@ -129,11 +131,15 @@
     </section>
 
     <section class="panel signal-history-panel">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">结果历史</p>
-          <h3>大V监控报告</h3>
-          <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+      <div class="section-header section-header-slider">
+        <div class="section-slider-shell" aria-label="大V监控报告说明">
+          <div class="section-slider-track">
+            <article class="section-slider-card">
+              <p class="eyebrow">结果历史</p>
+              <h3>大V监控报告</h3>
+              <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+            </article>
+          </div>
         </div>
         <span class="summary-count" data-signal-report-count>{{ signal_reports|length }}</span>
       </div>
@@ -196,6 +202,7 @@
   </section>
 
   <aside class="stock-sidebar monitor-sidebar signal-sidebar">
+    {% if not is_visitor_mode %}
     <section class="panel monitor-status-panel">
       <div class="section-header">
         <div>
@@ -295,6 +302,7 @@
         {% endfor %}
       </div>
     </section>
+    {% endif %}
 
     <section class="panel monitor-today-panel">
       <div class="section-header">

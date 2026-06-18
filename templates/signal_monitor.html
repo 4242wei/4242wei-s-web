@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>信息监控</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260318-signal-groups1') }}" defer></script>
 </head>
@@ -181,11 +181,15 @@
         </section>
 
         <section class="panel signal-history-panel">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">结果历史</p>
-              <h3>信息监控报告</h3>
-              <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+          <div class="section-header section-header-slider">
+            <div class="section-slider-shell" aria-label="信号监控报告说明">
+              <div class="section-slider-track">
+                <article class="section-slider-card">
+                  <p class="eyebrow">结果历史</p>
+                  <h3>信息监控报告</h3>
+                  <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+                </article>
+              </div>
             </div>
             <span class="summary-count" data-signal-report-count>{{ signal_reports|length }}</span>
           </div>
@@ -362,3 +366,4 @@
   </div>
 </body>
 </html>
+

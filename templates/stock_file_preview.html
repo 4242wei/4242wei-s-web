@@ -1,11 +1,11 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ file_entry.original_name }} - 文件预览</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260331-filelinks1') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
 </head>
 <body>
   <div class="page-shell">
@@ -74,3 +74,4 @@
   </div>
 </body>
 </html>
+

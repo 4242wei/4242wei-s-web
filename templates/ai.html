@@ -1,11 +1,11 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 研究助手</title>
   {% include "_theme_bootstrap.html" %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20260327-wildlotus5') }}">
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='ai-chat.js') }}?v=20260330-scope-earnings1" defer></script>
 </head>
 <body>
@@ -75,6 +75,27 @@
         <article class="mini-fact">
           <span class="mini-label">本地 Codex</span>
           <strong>{{ "已就绪" if codex_ready else "未检测到" }}</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">Agent APIs</span>
+          <strong><a href="{{ ai_agent_endpoints.bootstrap_url }}">Bootstrap</a></strong>
+          <p class="section-caption">
+            <a href="{{ ai_agent_endpoints.timeline_url }}">Timeline</a>
+            /
+            <a href="{{ ai_agent_endpoints.compare_url }}">Compare</a>
+            /
+            <a href="{{ ai_agent_endpoints.context_pack_url }}">Context</a>
+          </p>
+          <p class="section-caption">
+            <a href="{{ ai_agent_endpoints.artifact_bootstrap_url }}">Artifacts</a>
+            /
+            <a href="{{ ai_agent_endpoints.job_list_url }}">Jobs</a>
+          </p>
+          <p class="section-caption">
+            预览中 {{ ai_agent_write_summary.pending_previews }} 条
+            /
+            <a href="{{ ai_agent_endpoints.operations_url }}">Writes</a>
+          </p>
         </article>
       </aside>
     </section>
@@ -382,3 +403,4 @@
   </div>
 </body>
 </html>
+

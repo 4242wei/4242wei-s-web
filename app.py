@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import csv
 import hmac
 import hashlib
 import io
@@ -9,6 +10,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -16,13 +18,15 @@ import time
 import unicodedata
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 from html import escape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import bleach
 import markdown
@@ -43,6 +47,13 @@ from flask import (
     url_for,
 )
 from werkzeug.utils import secure_filename
+
+from gpu_price_tracker import (
+    GPU_FAMILY_CONFIGS,
+    build_gpu_price_dataset,
+    default_gpu_price_cache,
+    normalize_gpu_price_cache,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env.local", override=False)
@@ -83,6 +94,14 @@ IMAGE_PREVIEW_SUFFIXES = {
     ".svg",
 }
 TEXT_EXTRACTION_SUFFIXES = TEXT_PREVIEW_SUFFIXES | {".pdf", ".docx"}
+MAX_READER_ANNOTATIONS_PER_ITEM = 160
+MAX_READER_SELECTION_CHARS = 800
+MAX_READER_NOTE_CHARS = 280
+READER_ANNOTATION_KIND_META = {
+    "highlight": {"label": "高亮"},
+    "underline": {"label": "画线"},
+    "note": {"label": "附注"},
+}
 MAX_TEXT_PREVIEW_CHARS = 200_000
 MAX_NOTE_CONTENT_CHARS = 120_000
 NOTE_TRUNCATION_NOTICE = "\n\n[内容过长，已截断以保证笔记显示流畅。]"
@@ -132,6 +151,30 @@ AI_SCOPE_CONTENT_KIND_META = {
     "transcript": "转录",
 }
 AI_SCOPE_DEFAULT_CONTENT_KINDS = tuple(AI_SCOPE_CONTENT_KIND_META.keys())
+AI_NATIVE_DOCUMENT_KIND_META = {
+    "report": "日报",
+    "signal_report": "信号报告",
+    "stock_setup": "股票 Setup",
+    "expert": "专家资料",
+    "note": "笔记",
+    "file": "文件",
+    "earnings_call": "电话会议",
+    "transcript": "转录",
+    "data_snapshot": "数据快照",
+}
+AI_NATIVE_SCOPE_SUPPORTED_KINDS = tuple(AI_SCOPE_DEFAULT_CONTENT_KINDS)
+AI_NATIVE_CHUNK_TARGET_CHARS = max(600, int(os.getenv("AI_NATIVE_CHUNK_TARGET_CHARS", "1600")))
+AI_NATIVE_DEFAULT_SCOPE_LIMIT = max(1, int(os.getenv("AI_NATIVE_DEFAULT_SCOPE_LIMIT", "12")))
+AI_NATIVE_CDN_SITE_LIMIT_DEFAULT = max(10, int(os.getenv("AI_NATIVE_CDN_SITE_LIMIT_DEFAULT", "40")))
+AI_NATIVE_CDN_SITE_LIMIT_MAX = max(
+    AI_NATIVE_CDN_SITE_LIMIT_DEFAULT,
+    int(os.getenv("AI_NATIVE_CDN_SITE_LIMIT_MAX", "200")),
+)
+CLIPBOARD_ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+CLIPBOARD_MAX_TEXT_CHARS = max(200, int(os.getenv("CLIPBOARD_MAX_TEXT_CHARS", "40000")))
+CLIPBOARD_MAX_IMAGES_PER_ITEM = max(1, int(os.getenv("CLIPBOARD_MAX_IMAGES_PER_ITEM", "12")))
+CLIPBOARD_MAX_UPLOAD_IMAGES = max(1, int(os.getenv("CLIPBOARD_MAX_UPLOAD_IMAGES", "6")))
+CLIPBOARD_MAX_IMAGE_BYTES = max(1, int(os.getenv("CLIPBOARD_MAX_IMAGE_BYTES", str(12 * 1024 * 1024))))
 MINDMAP_STATUS_META = {
     "pending": {"label": "排队中", "tone": "pending"},
     "running": {"label": "生成中", "tone": "info"},
@@ -236,6 +279,49 @@ MINDMAP_STUDIO_TEMPLATE_META = {
         "label": "访谈复盘",
         "description": "适合专家会和内部会议复盘。",
     },
+}
+MINDMAP_STUDIO_SCHEMA_VERSION = "20260406-studio-v2"
+MINDMAP_STUDIO_HISTORY_LIMIT = max(6, int(os.getenv("MINDMAP_STUDIO_HISTORY_LIMIT", "24")))
+MINDMAP_STUDIO_IMPORT_MAX_BYTES = max(32_768, int(os.getenv("MINDMAP_STUDIO_IMPORT_MAX_BYTES", str(2 * 1024 * 1024))))
+AI_NATIVE_INDEX_SCHEMA_VERSION = "20260406-ai-native-index-v1"
+AI_NATIVE_SEARCH_DEFAULT_LIMIT = max(1, int(os.getenv("AI_NATIVE_SEARCH_DEFAULT_LIMIT", "12")))
+AI_NATIVE_SEARCH_TEXT_LIMIT = max(2_000, int(os.getenv("AI_NATIVE_SEARCH_TEXT_LIMIT", "50000")))
+AI_NATIVE_FILE_SEARCH_EXTRACT_MAX_BYTES = max(
+    1_024_000,
+    int(os.getenv("AI_NATIVE_FILE_SEARCH_EXTRACT_MAX_BYTES", str(10 * 1024 * 1024))),
+)
+AI_NATIVE_FILE_TEXT_CACHE_LIMIT = max(2_000, int(os.getenv("AI_NATIVE_FILE_TEXT_CACHE_LIMIT", "60000")))
+AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT = max(1, int(os.getenv("AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT", "12")))
+AI_NATIVE_DATA_SEARCH_MAX_LIMIT = max(
+    AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT,
+    int(os.getenv("AI_NATIVE_DATA_SEARCH_MAX_LIMIT", "50")),
+)
+AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT = max(1, int(os.getenv("AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT", "6")))
+AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT = max(1, int(os.getenv("AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT", "12")))
+AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT = max(1, int(os.getenv("AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT", "3")))
+AI_AGENT_OPS_HISTORY_LIMIT = max(12, int(os.getenv("AI_AGENT_OPS_HISTORY_LIMIT", "80")))
+AI_ARTIFACT_HISTORY_LIMIT = max(12, int(os.getenv("AI_ARTIFACT_HISTORY_LIMIT", "120")))
+AI_JOB_HISTORY_LIMIT = max(12, int(os.getenv("AI_JOB_HISTORY_LIMIT", "120")))
+AI_JOB_STALE_SECONDS = max(60, int(os.getenv("AI_JOB_STALE_SECONDS", "300")))
+AI_JOB_POLL_INTERVAL_SECONDS = max(2, int(os.getenv("AI_JOB_POLL_INTERVAL_SECONDS", "4")))
+AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT = max(1, int(os.getenv("AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT", "24")))
+AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT = max(1, int(os.getenv("AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT", "6")))
+AI_ANALYSIS_TOP_TAG_LIMIT = max(1, int(os.getenv("AI_ANALYSIS_TOP_TAG_LIMIT", "6")))
+AI_ANALYSIS_DATE_BUCKET_LIMIT = max(1, int(os.getenv("AI_ANALYSIS_DATE_BUCKET_LIMIT", "12")))
+AI_ARTIFACT_KIND_META = {
+    "timeline_analysis": {"label": "时间线分析", "job_kind": "artifact_timeline"},
+    "compare_analysis": {"label": "对比分析", "job_kind": "artifact_compare"},
+}
+AI_JOB_KIND_META = {
+    "artifact_timeline": {"label": "生成时间线产物", "artifact_kind": "timeline_analysis"},
+    "artifact_compare": {"label": "生成对比产物", "artifact_kind": "compare_analysis"},
+}
+AI_JOB_STATUS_META = {
+    "queued": {"label": "排队中", "tone": "pending"},
+    "running": {"label": "生成中", "tone": "info"},
+    "completed": {"label": "已完成", "tone": "success"},
+    "failed": {"label": "失败", "tone": "danger"},
+    "cancelled": {"label": "已取消", "tone": "pending"},
 }
 TRASH_KIND_META = {
     "note": {"label": "研究笔记", "description": "可恢复到原股票页"},
@@ -524,6 +610,17 @@ def load_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def write_json_atomic(path: Path, payload: Any) -> None:
+    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 FALLBACK_REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR = resolve_app_path(
     "REPORTS_DIR",
@@ -535,8 +632,18 @@ STOCK_UPLOADS_DIR = resolve_app_path("STOCKS_UPLOADS_DIR", BASE_DIR / "uploads" 
 TRANSCRIPT_UPLOADS_DIR = resolve_app_path("TRANSCRIPT_UPLOADS_DIR", BASE_DIR / "uploads" / "transcripts")
 AI_CHAT_STORE_PATH = resolve_app_path("AI_CHAT_DATA_PATH", BASE_DIR / "data" / "ai_chats.json")
 AI_CONTEXT_DIR = resolve_app_path("AI_CONTEXT_DIR", BASE_DIR / "data" / "ai_context")
+AI_NATIVE_DATA_DIR = resolve_app_path("AI_NATIVE_DATA_DIR", BASE_DIR / "data" / "ai_native")
+AI_NATIVE_DOCS_DIR = AI_NATIVE_DATA_DIR / "documents"
+AI_NATIVE_INDEX_DB_PATH = AI_NATIVE_DATA_DIR / "search-index.sqlite3"
+AI_AGENT_OPS_PATH = resolve_app_path("AI_AGENT_OPS_DATA_PATH", AI_NATIVE_DATA_DIR / "agent_ops.json")
+AI_ARTIFACT_STORE_PATH = resolve_app_path("AI_ARTIFACT_STORE_PATH", AI_NATIVE_DATA_DIR / "artifacts.json")
+AI_JOB_STORE_PATH = resolve_app_path("AI_JOB_STORE_PATH", AI_NATIVE_DATA_DIR / "jobs.json")
+AI_NATIVE_README_TEMPLATE_PATH = BASE_DIR / "docs" / "AI_NATIVE_README.md"
+CLIPBOARD_STORE_PATH = resolve_app_path("CLIPBOARD_DATA_PATH", BASE_DIR / "data" / "clipboard.json")
+CLIPBOARD_UPLOADS_DIR = resolve_app_path("CLIPBOARD_UPLOADS_DIR", BASE_DIR / "uploads" / "clipboard")
 MINDMAP_STORE_PATH = resolve_app_path("MINDMAP_DATA_PATH", BASE_DIR / "data" / "mindmaps.json")
 MINDMAP_CONTEXT_DIR = resolve_app_path("MINDMAP_CONTEXT_DIR", BASE_DIR / "data" / "mindmap_context")
+MINDMAP_BRIEF_UPLOADS_DIR = resolve_app_path("MINDMAP_BRIEF_UPLOADS_DIR", BASE_DIR / "uploads" / "mindmap_briefs")
 MINDMAP_STUDIO_STORE_PATH = resolve_app_path("MINDMAP_STUDIO_DATA_PATH", BASE_DIR / "data" / "mindmap_studio.json")
 CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_MODELS_CACHE_PATH = CODEX_CONFIG_DIR / "models_cache.json"
@@ -544,7 +651,10 @@ AI_CODEX_TIMEOUT_SECONDS = int(os.getenv("AI_CODEX_TIMEOUT_SECONDS", "900"))
 AI_POLL_INTERVAL_SECONDS = int(os.getenv("AI_POLL_INTERVAL_SECONDS", "5"))
 MINDMAP_POLL_INTERVAL_SECONDS = int(os.getenv("MINDMAP_POLL_INTERVAL_SECONDS", "5"))
 MINDMAP_STALE_JOB_SECONDS = int(os.getenv("MINDMAP_STALE_JOB_SECONDS", "120"))
-TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS", "12"))
+TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS", "20"))
+TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT = str(
+    os.getenv("TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT", "0")
+).strip().lower() in {"1", "true", "on", "yes"}
 AI_PROMPT_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("AI_PROMPT_KNOWLEDGE_CHAR_LIMIT", "40000"))
 MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT", "22000"))
 MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT", "32000"))
@@ -554,8 +664,14 @@ MINDMAP_PIPELINE_VERSION = "20260331-research-v4"
 MINDMAP_PROMPT_VERSION = "20260331-compare-verify-v3"
 MINDMAP_SCHEMA_VERSION = "20260331-schema-v3"
 MINDMAP_SCOPE_DRAFT_SESSION_KEY = "mindmap_scope_draft"
+MINDMAP_GENERATION_PROMPT_DRAFT_SESSION_KEY = "mindmap_generation_prompt_draft"
 MINDMAP_MAX_CURATED_SOURCES = 28
 MINDMAP_RECENT_WINDOW_DAYS = 45
+MINDMAP_MAX_NODE_DEPTH = max(5, int(os.getenv("MINDMAP_MAX_NODE_DEPTH", "6")))
+MINDMAP_BRIEF_ALLOWED_SUFFIXES = {".pdf", ".docx"}
+MINDMAP_BRIEF_MAX_BYTES = max(1, int(os.getenv("MINDMAP_BRIEF_MAX_BYTES", str(12 * 1024 * 1024))))
+MINDMAP_BRIEF_TEXT_CHAR_LIMIT = max(2000, int(os.getenv("MINDMAP_BRIEF_TEXT_CHAR_LIMIT", "12000")))
+MINDMAP_BRIEF_PROMPT_CHAR_LIMIT = max(1200, int(os.getenv("MINDMAP_BRIEF_PROMPT_CHAR_LIMIT", "6000")))
 AI_SESSION_LOCK = threading.RLock()
 AI_PROCESS_LOCK = threading.RLock()
 AI_RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
@@ -566,12 +682,27 @@ MINDMAP_RUNNING_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 MINDMAP_ACTIVE_TASKS: set[str] = set()
 MINDMAP_STOP_REQUESTS: set[str] = set()
 MINDMAP_STUDIO_LOCK = threading.RLock()
+AI_AGENT_OPS_LOCK = threading.RLock()
+AI_ARTIFACT_LOCK = threading.RLock()
+AI_JOB_LOCK = threading.RLock()
+AI_JOB_RUNTIME_LOCK = threading.RLock()
+AI_ACTIVE_JOB_IDS: set[str] = set()
+AI_NATIVE_INDEX_LOCK = threading.RLock()
 STOCK_STORE_LOCK = threading.RLock()
 STOCK_STORE_CACHE_LOCK = threading.RLock()
 STOCK_STORE_CACHE: dict[str, Any] = {"signature": None, "data": None}
 STABLECOIN_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
 STABLECOIN_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
 STABLECOIN_MONITOR_SCHEDULER_STARTED = False
+CDN_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
+CDN_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
+CDN_MONITOR_SCHEDULER_STARTED = False
+GPU_PRICE_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
+GPU_PRICE_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
+GPU_PRICE_MONITOR_SCHEDULER_STARTED = False
+APPLOVIN_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
+APPLOVIN_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
+APPLOVIN_MONITOR_SCHEDULER_STARTED = False
 COINGECKO_REQUEST_LOCK = threading.Lock()
 COINGECKO_LAST_REQUEST_AT = 0.0
 MINDMAP_KIND_PRIORITY = {
@@ -720,6 +851,94 @@ def get_task_info(task_id: str) -> dict[str, Any]:
 
 def submit_offline_task(transcript: dict[str, Any], *, file_url: str) -> dict[str, Any]:
     return get_tingwu_client_api()["submit_offline_task"](transcript, file_url=file_url)
+
+
+TRANSCRIPT_PAGE_TINGWU_REQUIRED_ENV_VARS = [
+    "ALIBABA_CLOUD_ACCESS_KEY_ID",
+    "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+    "ALIYUN_TINGWU_APP_KEY",
+]
+TRANSCRIPT_PAGE_TINGWU_ENDPOINT = "tingwu.cn-beijing.aliyuncs.com"
+TRANSCRIPT_PAGE_TINGWU_REGION_ID = "cn-beijing"
+TRANSCRIPT_PAGE_TINGWU_API_VERSION = "2023-09-30"
+TRANSCRIPT_PAGE_OSS_REQUIRED_ENV_VARS = [
+    "ALIBABA_CLOUD_ACCESS_KEY_ID",
+    "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+]
+TRANSCRIPT_PAGE_OSS_REGION_ID = "cn-beijing"
+TRANSCRIPT_PAGE_OSS_ENDPOINT_TEMPLATE = "https://oss-{region_id}.aliyuncs.com"
+TRANSCRIPT_PAGE_OSS_BUCKET_PREFIX = "stock-daily-analysis"
+
+
+def build_transcript_page_tingwu_status() -> dict[str, Any]:
+    access_key_id = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "").strip()
+    access_key_secret = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "").strip()
+    app_key = os.getenv("ALIYUN_TINGWU_APP_KEY", "").strip()
+    endpoint = str(os.getenv("ALIYUN_TINGWU_ENDPOINT", TRANSCRIPT_PAGE_TINGWU_ENDPOINT) or "").strip()
+    region_id = str(os.getenv("ALIYUN_TINGWU_REGION_ID", TRANSCRIPT_PAGE_TINGWU_REGION_ID) or "").strip()
+    api_version = str(os.getenv("ALIYUN_TINGWU_API_VERSION", TRANSCRIPT_PAGE_TINGWU_API_VERSION) or "").strip()
+
+    env_values = {
+        "ALIBABA_CLOUD_ACCESS_KEY_ID": access_key_id,
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET": access_key_secret,
+        "ALIYUN_TINGWU_APP_KEY": app_key,
+    }
+    missing = [name for name in TRANSCRIPT_PAGE_TINGWU_REQUIRED_ENV_VARS if not env_values.get(name)]
+
+    return {
+        "is_ready": bool(access_key_id and access_key_secret and app_key),
+        "missing_variables": missing,
+        "endpoint": endpoint or TRANSCRIPT_PAGE_TINGWU_ENDPOINT,
+        "region_id": region_id or TRANSCRIPT_PAGE_TINGWU_REGION_ID,
+        "api_version": api_version or TRANSCRIPT_PAGE_TINGWU_API_VERSION,
+        "required_variables": list(TRANSCRIPT_PAGE_TINGWU_REQUIRED_ENV_VARS),
+        "submission_mode": "本地直传 + 主动轮询",
+    }
+
+
+def build_transcript_page_oss_status() -> dict[str, Any]:
+    access_key_id = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "").strip()
+    access_key_secret = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "").strip()
+    region_id = (
+        os.getenv("ALIYUN_OSS_REGION_ID", "").strip()
+        or os.getenv("ALIYUN_TINGWU_REGION_ID", TRANSCRIPT_PAGE_OSS_REGION_ID).strip()
+        or TRANSCRIPT_PAGE_OSS_REGION_ID
+    )
+    endpoint = (
+        os.getenv("ALIYUN_OSS_ENDPOINT", "").strip()
+        or TRANSCRIPT_PAGE_OSS_ENDPOINT_TEMPLATE.format(region_id=region_id)
+    )
+    bucket_name = os.getenv("ALIYUN_OSS_BUCKET", "").strip().lower()
+    bucket_prefix = os.getenv("ALIYUN_OSS_BUCKET_PREFIX", TRANSCRIPT_PAGE_OSS_BUCKET_PREFIX).strip().lower()
+    bucket_prefix = re.sub(r"[^a-z0-9-]+", "-", bucket_prefix).strip("-")
+    bucket_prefix = re.sub(r"-{2,}", "-", bucket_prefix)[:48].rstrip("-") or TRANSCRIPT_PAGE_OSS_BUCKET_PREFIX
+    app_key = os.getenv("ALIYUN_TINGWU_APP_KEY", "").strip()
+    seed = app_key or access_key_id or region_id
+    derived_bucket_name = (
+        bucket_name
+        or f"{bucket_prefix}-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:14]}"
+    )
+    env_values = {
+        "ALIBABA_CLOUD_ACCESS_KEY_ID": access_key_id,
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET": access_key_secret,
+    }
+    missing = [name for name in TRANSCRIPT_PAGE_OSS_REQUIRED_ENV_VARS if not env_values.get(name)]
+    is_ready = bool(access_key_id and access_key_secret)
+
+    return {
+        "is_ready": is_ready,
+        "bridge_ready": is_ready,
+        "bridge_checked": False,
+        "missing_variables": missing,
+        "required_variables": list(TRANSCRIPT_PAGE_OSS_REQUIRED_ENV_VARS),
+        "region_id": region_id,
+        "endpoint": endpoint,
+        "bucket_name": derived_bucket_name,
+        "bucket_source": "env" if bucket_name else "auto",
+        "signed_url_expires": 7 * 24 * 60 * 60,
+        "bucket_created": False,
+        "error_message": "",
+    }
 MONITOR_LOGS_DIR = BASE_DIR / "logs" / "monitor"
 MONITOR_PROMPTS_DIR = MONITOR_DATA_DIR / "prompts"
 MONITOR_TRASH_DIR = MONITOR_DATA_DIR / "trash_reports"
@@ -779,22 +998,335 @@ STABLECOIN_MONITOR_ASSETS = [
     {"id": "first-digital-usd", "llama_id": "119", "symbol": "FDUSD", "label": "First Digital USD", "color": "var(--stablecoin-series-5)"},
     {"id": "paypal-usd", "llama_id": "120", "symbol": "PYUSD", "label": "PayPal USD", "color": "var(--stablecoin-series-6)"},
 ]
+CDN_MONITOR_CACHE_PATH = DATA_MONITOR_DATA_DIR / "cdn_tracker.json"
+CDN_MONITOR_RUNTIME_PATH = DATA_MONITOR_DATA_DIR / "cdn_tracker_runtime.json"
+CDN_MONITOR_LOCK = threading.RLock()
+CDN_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
+CDN_MONITOR_REFRESH_INTERVAL_HOURS = int(os.getenv("CDN_MONITOR_REFRESH_INTERVAL_HOURS", "168"))
+CDN_MONITOR_SCHEDULER_SLEEP_SECONDS = int(os.getenv("CDN_MONITOR_SCHEDULER_SLEEP_SECONDS", "1800"))
+CDN_MONITOR_HISTORY_LIMIT = max(6, int(os.getenv("CDN_MONITOR_HISTORY_LIMIT", "30")))
+CDN_MONITOR_MAX_ASSET_HOSTS = max(1, int(os.getenv("CDN_MONITOR_MAX_ASSET_HOSTS", "3")))
+CDN_MONITOR_REQUEST_TIMEOUT_SECONDS = max(
+    4.0,
+    float(os.getenv("CDN_MONITOR_REQUEST_TIMEOUT_SECONDS", "8")),
+)
+CDN_MONITOR_DNS_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("CDN_MONITOR_DNS_TIMEOUT_SECONDS", "2.5")),
+)
+CDN_MONITOR_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+}
+CDN_PROVIDER_META = {
+    "Cloudflare": {"color": "#4f8df7", "tone": "info"},
+    "CloudFront": {"color": "#f39c43", "tone": "pending"},
+    "Fastly": {"color": "#ef6b57", "tone": "danger"},
+    "Akamai": {"color": "#5f6be8", "tone": "info"},
+    "Google Cloud CDN": {"color": "#67b97a", "tone": "success"},
+    "Azure Front Door": {"color": "#3ab6b8", "tone": "success"},
+    "Vercel": {"color": "#101828", "tone": "pending"},
+    "Imperva": {"color": "#8d67d8", "tone": "pending"},
+    "Bunny": {"color": "#ec8f24", "tone": "pending"},
+    "Unknown": {"color": "#9aa8bd", "tone": "pending"},
+}
+CDN_PROVIDER_RULES = [
+    {
+        "provider": "Cloudflare",
+        "patterns": [
+            "header server: cloudflare",
+            "header cf-ray:",
+            "header cf-cache-status:",
+            ".cdn.cloudflare.net",
+            ".cloudflare.net",
+        ],
+    },
+    {
+        "provider": "CloudFront",
+        "patterns": [
+            "header x-amz-cf-id:",
+            "header x-amz-cf-pop:",
+            "cloudfront",
+        ],
+    },
+    {
+        "provider": "Fastly",
+        "patterns": [
+            "header x-served-by:",
+            "header x-fastly-request-id:",
+            ".fastly.net",
+            ".map.fastly.net",
+        ],
+    },
+    {
+        "provider": "Akamai",
+        "patterns": [
+            "header akamai-grn:",
+            "header x-akamai-",
+            ".akamaiedge.net",
+            ".edgekey.net",
+            ".edgesuite.net",
+            ".akamai.net",
+        ],
+    },
+    {
+        "provider": "Google Cloud CDN",
+        "patterns": [
+            "header via: 1.1 google",
+            "header server: gse",
+            ".googlehosted.com",
+            ".googleusercontent.com",
+        ],
+    },
+    {
+        "provider": "Azure Front Door",
+        "patterns": [
+            "header x-azure-ref:",
+            ".azurefd.net",
+            ".azureedge.net",
+        ],
+    },
+    {
+        "provider": "Vercel",
+        "patterns": [
+            "header x-vercel-id:",
+            "header server: vercel",
+            ".vercel-dns.com",
+            ".vercel.app",
+        ],
+    },
+    {
+        "provider": "Imperva",
+        "patterns": [
+            "incapsula",
+            "imperva",
+            ".incapdns.net",
+            ".impervadns.net",
+        ],
+    },
+    {
+        "provider": "Bunny",
+        "patterns": [
+            "header server: bunnycdn",
+            ".b-cdn.net",
+        ],
+    },
+]
+CDN_MONITOR_TARGETS_CACHE_PATH = DATA_MONITOR_DATA_DIR / "cdn_targets.json"
+CDN_MONITOR_TARGET_SOURCE_URL = str(os.getenv("CDN_MONITOR_TARGET_SOURCE_URL", "https://tranco-list.eu/top-1m.csv.zip")).strip()
+CDN_MONITOR_TARGET_COUNT = max(50, int(os.getenv("CDN_MONITOR_TARGET_COUNT", "2000")))
+CDN_MONITOR_BUCKET_SIZE = max(25, int(os.getenv("CDN_MONITOR_BUCKET_SIZE", "50")))
+CDN_MONITOR_TARGET_SOURCE_REFRESH_HOURS = int(os.getenv("CDN_MONITOR_TARGET_SOURCE_REFRESH_HOURS", "168"))
+CDN_MONITOR_MAX_WORKERS = max(6, int(os.getenv("CDN_MONITOR_MAX_WORKERS", "48")))
+CDN_MONITOR_MAX_ASSET_HOSTS = max(1, int(os.getenv("CDN_MONITOR_MAX_ASSET_HOSTS", "3")))
+CDN_MONITOR_TOP_PROVIDERS_LIMIT = max(4, int(os.getenv("CDN_MONITOR_TOP_PROVIDERS_LIMIT", "10")))
+CDN_MONITOR_HISTORY_PROVIDER_LIMIT = max(3, int(os.getenv("CDN_MONITOR_HISTORY_PROVIDER_LIMIT", "6")))
+GPU_PRICE_MONITOR_CACHE_PATH = DATA_MONITOR_DATA_DIR / "gpu_price_tracker.json"
+GPU_PRICE_MONITOR_RUNTIME_PATH = DATA_MONITOR_DATA_DIR / "gpu_price_tracker_runtime.json"
+GPU_PRICE_MONITOR_LOCK = threading.RLock()
+GPU_PRICE_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
+GPU_PRICE_MONITOR_REFRESH_INTERVAL_HOURS = int(os.getenv("GPU_PRICE_MONITOR_REFRESH_INTERVAL_HOURS", "24"))
+GPU_PRICE_MONITOR_SCHEDULER_SLEEP_SECONDS = int(os.getenv("GPU_PRICE_MONITOR_SCHEDULER_SLEEP_SECONDS", "1800"))
+GPU_PRICE_MONITOR_FAMILIES = [
+    item.strip().upper()
+    for item in str(os.getenv("GPU_PRICE_MONITOR_FAMILIES", "H100,H200,B200,B100")).split(",")
+    if item.strip().upper() in GPU_FAMILY_CONFIGS
+]
+if not GPU_PRICE_MONITOR_FAMILIES:
+    GPU_PRICE_MONITOR_FAMILIES = ["H100"]
+GPU_PRICE_CHART_VISIBLE_POINT_LIMIT = 15
+GPU_PRICE_FAMILY_COLORS = {
+    "H100": "#2752b8",
+    "H200": "#12805c",
+    "B100": "#9a5f00",
+    "B200": "#c54e2c",
+    "GB200": "#7c3aed",
+}
+APPLOVIN_MONITOR_CACHE_PATH = DATA_MONITOR_DATA_DIR / "applovin_sdk_tracker.json"
+APPLOVIN_MONITOR_RUNTIME_PATH = DATA_MONITOR_DATA_DIR / "applovin_sdk_tracker_runtime.json"
+APPLOVIN_MONITOR_LOCK = threading.RLock()
+APPLOVIN_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
+APPLOVIN_MONITOR_REFRESH_INTERVAL_HOURS = int(os.getenv("APPLOVIN_MONITOR_REFRESH_INTERVAL_HOURS", "24"))
+APPLOVIN_MONITOR_SCHEDULER_SLEEP_SECONDS = int(os.getenv("APPLOVIN_MONITOR_SCHEDULER_SLEEP_SECONDS", "1800"))
+APPLOVIN_MONITOR_HISTORY_LIMIT = max(10, int(os.getenv("APPLOVIN_MONITOR_HISTORY_LIMIT", "90")))
+APPLOVIN_MONITOR_MAX_WORKERS = max(2, int(os.getenv("APPLOVIN_MONITOR_MAX_WORKERS", "6")))
+APPLOVIN_MONITOR_REQUEST_TIMEOUT_SECONDS = max(
+    6.0,
+    float(os.getenv("APPLOVIN_MONITOR_REQUEST_TIMEOUT_SECONDS", "18")),
+)
+APPLOVIN_MONITOR_BASE_URL = "https://42matters.com"
+APPLOVIN_MONITOR_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+}
+APPLOVIN_MONITOR_PLATFORMS = [
+    {
+        "id": "gplay",
+        "title": "Google Play",
+        "title_long": "Google Play",
+        "path_prefix": "/sdk-analysis",
+        "store_label": "Android",
+    },
+    {
+        "id": "ios",
+        "title": "App Store",
+        "title_long": "Apple App Store",
+        "path_prefix": "/sdk-analysis/app-store",
+        "store_label": "iOS",
+    },
+]
+APPLOVIN_MONITOR_CATEGORIES = [
+    {
+        "id": "top-ad-mediation-sdks",
+        "title": "Ad Mediation",
+        "reason": "AppLovin MAX's strongest distribution signal.",
+    },
+    {
+        "id": "top-ad-networks-sdks",
+        "title": "Ad Networks",
+        "reason": "Shows AppLovin's direct ad demand footprint.",
+    },
+    {
+        "id": "top-attribution-sdks",
+        "title": "Attribution",
+        "reason": "Tracks AppLovin's extension into performance growth tooling.",
+    },
+]
+APPLOVIN_MONITOR_PRIMARY_NAME_PRIORITY = {
+    "top-ad-mediation-sdks": ["AppLovin Mediation Adapters", "AppLovin MAX"],
+    "top-ad-networks-sdks": ["AppLovin MAX", "AppLovin Mediation Adapters"],
+    "top-attribution-sdks": ["AppLovin", "AppLovin MAX"],
+}
+APPLOVIN_MONITOR_METRIC_COLORS = {
+    "app_share": "#4f8df7",
+    "download_share": "#ef6b57",
+    "apps": "#2f855a",
+    "games": "#f39c43",
+    "app_downloads": "#5f6be8",
+    "game_downloads": "#e76f51",
+    "rest": "#cbd5e1",
+}
+CDN_MONITOR_FALLBACK_DOMAINS = [
+    "google.com",
+    "youtube.com",
+    "facebook.com",
+    "instagram.com",
+    "wikipedia.org",
+    "x.com",
+    "whatsapp.com",
+    "reddit.com",
+    "amazon.com",
+    "yahoo.com",
+    "tiktok.com",
+    "netflix.com",
+    "microsoft.com",
+    "office.com",
+    "openai.com",
+    "github.com",
+    "cloudflare.com",
+    "fastly.com",
+    "akamai.com",
+    "aws.amazon.com",
+]
 BACKUP_DIR = BASE_DIR / "backups"
 BACKUP_KEEP_COUNT = int(os.getenv("BACKUP_KEEP_COUNT", "20"))
 BACKUP_EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", "backups"}
 BACKUP_EXCLUDED_FILE_NAMES = {".env", ".env.local"}
 BACKUP_EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 WEB_ACCESS_PASSWORD = str(os.getenv("WEB_ACCESS_PASSWORD", "4242wei")).strip()
+WEB_VISITOR_PASSWORD = str(os.getenv("WEB_VISITOR_PASSWORD", "visitor")).strip()
 WEB_ACCESS_SESSION_KEY = "web_access_signature"
+WEB_ACCESS_ROLE_SESSION_KEY = "web_access_role"
 WEB_ACCESS_REMEMBER_DAYS = 30
+WEB_ACCESS_ROLE_ADMIN = "admin"
+WEB_ACCESS_ROLE_VISITOR = "visitor"
 WEB_ACCESS_PASSWORD_SIGNATURE = (
     hashlib.sha256(WEB_ACCESS_PASSWORD.encode("utf-8")).hexdigest() if WEB_ACCESS_PASSWORD else ""
 )
+WEB_VISITOR_PASSWORD_SIGNATURE = (
+    hashlib.sha256(WEB_VISITOR_PASSWORD.encode("utf-8")).hexdigest() if WEB_VISITOR_PASSWORD else ""
+)
+VISITOR_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+AI_DIRECT_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+AI_DIRECT_READ_ONLY_PATH_PREFIXES = (
+    "/api/ai/",
+    "/api/analysis/",
+    "/api/agent/tools/",
+    "/api/artifacts/",
+    "/api/jobs/",
+)
+AI_DIRECT_READ_ONLY_EXACT_PATHS = {
+    "/api/ai",
+    "/api/agent/bootstrap.json",
+}
+VISITOR_BLOCKED_ENDPOINTS = {
+    "ai_workspace",
+    "ai_scope_preview",
+    "save_ai_scope",
+    "create_ai_session",
+    "rename_ai_session",
+    "delete_ai_session",
+    "export_ai_package",
+    "send_ai_message",
+    "stop_ai_message",
+    "ai_session_status",
+    "mindmap_workspace",
+    "mindmap_scope_preview",
+    "generate_mindmap",
+    "delete_mindmap",
+    "stop_mindmap",
+    "mindmap_status",
+    "mindmap_studio_workspace",
+    "mindmap_studio_bootstrap",
+    "create_mindmap_studio_document",
+    "import_mindmap_studio_document",
+    "duplicate_mindmap_studio_document",
+    "delete_mindmap_studio_document",
+    "mindmap_studio_document_history",
+    "save_mindmap_studio_document",
+    "diff_mindmap_studio_document",
+    "restore_mindmap_studio_document",
+    "export_mindmap_studio_document",
+    "analyze_mindmap_studio_document",
+    "export_mindmap_studio_document_markdown",
+    "export_mindmap_studio_document_mermaid",
+    "export_center_page",
+    "download_workspace_backup",
+    "trash_page",
+    "restore_trash_item",
+    "permanently_delete_trash_item",
+    "monitor_status",
+    "signal_monitor_status",
+    "stablecoin_monitor_status",
+    "cdn_monitor_status",
+    "gpu_price_monitor_status",
+}
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "stock-daily-analysis-local-secret")
 app.permanent_session_lifetime = timedelta(days=WEB_ACCESS_REMEMBER_DAYS)
 app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+
+STATIC_ASSET_VERSIONS = {
+    "style.css": "20260413-monitorupgrades2",
+    "flash-messages.js": "20260330-access-gate",
+    "calendar-modal.js": "20260316-modalfix1",
+    "confirm-modal.js": "20260315-confirmfix",
+    "masthead-stock-search.js": "20260331-stockjump1",
+    "theme-switcher.js": "20260325-seabreeze1",
+    "workspace-rail.js": "20260317-railfold",
+    "clipboard-modal.js": "20260401-clipboard1",
+}
 
 
 def now_iso() -> str:
@@ -1050,12 +1582,60 @@ def format_compact_currency(value: Any, *, decimals: int = 1) -> str:
     return f"{sign}${amount:,.0f}"
 
 
+def format_compact_number(value: Any, *, decimals: int = 1) -> str:
+    try:
+        numeric_value = float(value or 0.0)
+    except (TypeError, ValueError):
+        numeric_value = 0.0
+
+    sign = "-" if numeric_value < 0 else ""
+    amount = abs(numeric_value)
+    units = (
+        (1_000_000_000_000, "T", max(0, decimals)),
+        (1_000_000_000, "B", max(0, decimals)),
+        (1_000_000, "M", max(0, decimals)),
+        (1_000, "K", max(0, decimals)),
+    )
+    for threshold, suffix, digits in units:
+        if amount >= threshold:
+            return f"{sign}{amount / threshold:.{digits}f}{suffix}"
+
+    return f"{sign}{amount:,.0f}"
+
+
+def format_percent_label(value: Any, *, decimals: int = 2) -> str:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    label = f"{numeric_value:.{decimals}f}".rstrip("0").rstrip(".")
+    return f"{label}%"
+
+
 def format_signed_percent(value: Any, *, decimals: int = 1) -> str:
     try:
         numeric_value = float(value)
     except (TypeError, ValueError):
         return "n/a"
     return f"{numeric_value:+.{decimals}f}%"
+
+
+def format_signed_pp(value: Any, *, decimals: int = 2) -> str:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    label = f"{numeric_value:+.{decimals}f}".rstrip("0").rstrip(".")
+    return f"{label} pp"
+
+
+def format_monitor_date_label(value: str | None) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return "n/a"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_value):
+        return raw_value
+    return format_iso_timestamp(raw_value)
 
 
 def coerce_sort_timestamp(value: Any) -> float:
@@ -1333,12 +1913,17 @@ def stock_setup_path(symbol: str) -> Path:
     return STOCK_SETUPS_DIR / f"{normalized_symbol}.md"
 
 
-def build_stock_setup_view(symbol: str) -> dict[str, Any]:
+def build_stock_setup_view(store: dict[str, Any], symbol: str) -> dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
+    entry = ensure_stock_entry(store, normalized_symbol) if normalized_symbol else stock_entry_template("")
     title_fallback = f"{normalized_symbol} Set up"
     placeholder_copy = "这只股票的公开信息 set up 还没放进来。后面可以把 thesis、预期差、验证点和 kill criteria 都沉淀在这里。"
     template_id = f"stock-setup-reader-{normalized_symbol.lower() or 'default'}"
     path = stock_setup_path(normalized_symbol)
+    state_item = {
+        "reader_annotations": entry.get("setup_reader_annotations", []),
+        "reading_record": entry.get("setup_reading_record"),
+    }
 
     if not path.exists():
         return {
@@ -1346,6 +1931,7 @@ def build_stock_setup_view(symbol: str) -> dict[str, Any]:
             "title": title_fallback,
             "summary": placeholder_copy,
             "html": plain_text_to_html(placeholder_copy),
+            "content_text": "",
             "updated_at": "",
             "template_id": template_id,
         }
@@ -1357,6 +1943,7 @@ def build_stock_setup_view(symbol: str) -> dict[str, Any]:
             "title": title_fallback,
             "summary": placeholder_copy,
             "html": plain_text_to_html(placeholder_copy),
+            "content_text": "",
             "updated_at": "",
             "template_id": template_id,
         }
@@ -1380,8 +1967,22 @@ def build_stock_setup_view(symbol: str) -> dict[str, Any]:
         "title": extract_title(content, title_fallback),
         "summary": summary,
         "html": html,
+        "content_text": content,
         "updated_at": format_timestamp(stat_result.st_mtime) if stat_result else "",
         "template_id": template_id,
+        **build_reader_content_fields(
+            state_item,
+            content_text=content,
+            content_html=html,
+        ),
+        "reader_bootstrap": build_reader_bootstrap_payload(
+            state_item,
+            kind="stock_setup",
+            item_id=normalized_symbol,
+            save_url=url_for("persist_stock_setup_reader_state", symbol=normalized_symbol),
+            content_text=content,
+            content_html=html,
+        ),
     }
 
 
@@ -1439,6 +2040,252 @@ def sanitize_note_html(value: str) -> str:
 def note_html_to_text(value: str) -> str:
     text = bleach.clean(value, tags=[], strip=True)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def build_reader_content_signature(transcript_text: str, transcript_html: str = "") -> str:
+    normalized_text = trim_note_content(str(transcript_text or "").strip())
+    if not normalized_text and transcript_html:
+        normalized_text = trim_note_content(note_html_to_text(str(transcript_html or "")))
+    if not normalized_text:
+        return ""
+    return sha256_text(normalized_text)[:16]
+
+
+def normalize_reader_content(content_text: Any = "", content_html: Any = "") -> tuple[str, str]:
+    normalized_text = trim_note_content(str(content_text or "").strip())
+    normalized_html = str(content_html or "").strip()
+    if normalized_html and not normalized_text:
+        normalized_text = trim_note_content(note_html_to_text(normalized_html))
+    if normalized_text and not normalized_html:
+        normalized_html = plain_text_to_html(normalized_text)
+    return normalized_text, normalized_html
+
+
+def normalize_reader_activity(raw_record: Any) -> dict[str, Any]:
+    source = raw_record if isinstance(raw_record, dict) else {}
+    try:
+        open_count = max(0, int(source.get("open_count") or 0))
+    except (TypeError, ValueError):
+        open_count = 0
+    try:
+        last_scroll_ratio = float(source.get("last_scroll_ratio") or 0.0)
+    except (TypeError, ValueError):
+        last_scroll_ratio = 0.0
+    last_scroll_ratio = min(max(last_scroll_ratio, 0.0), 1.0)
+
+    return {
+        "open_count": open_count,
+        "last_opened_at": str(source.get("last_opened_at") or "").strip()[:40],
+        "last_read_at": str(source.get("last_read_at") or "").strip()[:40],
+        "last_scroll_ratio": last_scroll_ratio,
+    }
+
+
+def normalize_reader_annotation(
+    raw_annotation: Any,
+    *,
+    content_signature: str = "",
+) -> dict[str, Any] | None:
+    if not isinstance(raw_annotation, dict):
+        return None
+
+    kind = str(raw_annotation.get("kind") or "").strip().lower()
+    if kind not in READER_ANNOTATION_KIND_META:
+        return None
+
+    try:
+        start_offset = max(0, int(raw_annotation.get("start_offset") or 0))
+        end_offset = max(0, int(raw_annotation.get("end_offset") or 0))
+    except (TypeError, ValueError):
+        return None
+    if end_offset <= start_offset or end_offset - start_offset > MAX_READER_SELECTION_CHARS:
+        return None
+
+    stored_signature = str(raw_annotation.get("content_signature") or "").strip()[:40]
+    if content_signature and stored_signature and stored_signature != content_signature:
+        return None
+
+    quote_text = trim_note_content(
+        str(raw_annotation.get("quote_text") or "").strip(),
+        limit=MAX_READER_SELECTION_CHARS,
+    )
+    note_text = trim_note_content(
+        str(raw_annotation.get("note_text") or "").strip(),
+        limit=MAX_READER_NOTE_CHARS,
+    )
+    if not quote_text:
+        return None
+    if kind == "note" and not note_text:
+        return None
+
+    return {
+        "id": str(raw_annotation.get("id") or uuid.uuid4().hex[:10]).strip()[:40],
+        "kind": kind,
+        "start_offset": start_offset,
+        "end_offset": end_offset,
+        "quote_text": quote_text,
+        "note_text": note_text,
+        "content_signature": stored_signature or content_signature,
+        "created_at": str(raw_annotation.get("created_at") or now_iso()).strip()[:40],
+        "updated_at": str(raw_annotation.get("updated_at") or raw_annotation.get("created_at") or now_iso()).strip()[:40],
+    }
+
+
+def normalize_reader_annotation_list(
+    raw_annotations: Any,
+    *,
+    content_signature: str = "",
+) -> list[dict[str, Any]]:
+    source = raw_annotations if isinstance(raw_annotations, list) else []
+    annotations = [
+        annotation
+        for raw_annotation in source
+        if (annotation := normalize_reader_annotation(raw_annotation, content_signature=content_signature)) is not None
+    ]
+    annotations.sort(
+        key=lambda item: (
+            int(item["start_offset"]),
+            int(item["end_offset"]),
+            {"highlight": 0, "underline": 1, "note": 2}.get(str(item.get("kind") or ""), 9),
+            str(item.get("created_at") or ""),
+            str(item.get("id") or ""),
+        )
+    )
+
+    normalized: list[dict[str, Any]] = []
+    seen_exact_keys: set[tuple[int, int, str]] = set()
+    for annotation in annotations:
+        exact_key = (
+            int(annotation["start_offset"]),
+            int(annotation["end_offset"]),
+            str(annotation.get("kind") or ""),
+        )
+        if exact_key in seen_exact_keys:
+            continue
+        has_same_kind_overlap = any(
+            max(int(existing.get("start_offset") or 0), int(annotation["start_offset"]))
+            < min(int(existing.get("end_offset") or 0), int(annotation["end_offset"]))
+            and str(existing.get("kind") or "") == str(annotation.get("kind") or "")
+            for existing in normalized
+        )
+        if has_same_kind_overlap:
+            continue
+        seen_exact_keys.add(exact_key)
+        normalized.append(annotation)
+        if len(normalized) >= MAX_READER_ANNOTATIONS_PER_ITEM:
+            break
+    return normalized
+
+
+def build_reader_annotation_views(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    views: list[dict[str, Any]] = []
+    for annotation in annotations:
+        meta = READER_ANNOTATION_KIND_META.get(annotation.get("kind"), {})
+        quote_text = str(annotation.get("quote_text") or "").strip()
+        views.append(
+            {
+                **annotation,
+                "kind_label": meta.get("label", annotation.get("kind") or "标注"),
+                "quote_excerpt": quote_text[:120],
+                "display_created_at": format_iso_timestamp(annotation.get("created_at")),
+                "display_updated_at": format_iso_timestamp(annotation.get("updated_at")),
+            }
+        )
+    return views
+
+
+def build_reader_activity_view(raw_record: Any, annotations: list[dict[str, Any]]) -> dict[str, Any]:
+    activity = normalize_reader_activity(raw_record)
+    progress_percent = int(round(float(activity.get("last_scroll_ratio") or 0.0) * 100))
+    return {
+        **activity,
+        "annotation_count": len(annotations),
+        "progress_percent": progress_percent,
+        "has_progress": progress_percent > 0,
+        "display_last_opened_at": (
+            format_iso_timestamp(activity["last_opened_at"]) if activity.get("last_opened_at") else "还没有阅读记录"
+        ),
+        "display_last_read_at": (
+            format_iso_timestamp(activity["last_read_at"]) if activity.get("last_read_at") else "还没有阅读记录"
+        ),
+    }
+
+
+def build_reader_content_fields(
+    item: dict[str, Any],
+    *,
+    content_text: Any = "",
+    content_html: Any = "",
+) -> dict[str, Any]:
+    source_text = content_text
+    source_html = content_html
+    if not str(source_text or "").strip() and not str(source_html or "").strip():
+        source_text = item.get("transcript_text") or item.get("content_text") or ""
+        source_html = item.get("transcript_html") or item.get("content_html") or ""
+    reader_text, reader_html = normalize_reader_content(source_text, source_html)
+    content_signature = build_reader_content_signature(reader_text, reader_html)
+    annotations = build_reader_annotation_views(
+        normalize_reader_annotation_list(
+            item.get("reader_annotations", []),
+            content_signature=content_signature,
+        )
+        if content_signature
+        else []
+    )
+    return {
+        "reader_content_text": reader_text,
+        "reader_content_html": reader_html,
+        "reader_content_signature": content_signature,
+        "reader_annotations": annotations,
+        "reader_activity": build_reader_activity_view(item.get("reading_record"), annotations),
+        "reader_has_content": bool(content_signature),
+    }
+
+
+def build_reader_bootstrap_payload(
+    item: dict[str, Any],
+    *,
+    kind: str,
+    item_id: str,
+    save_url: str,
+    content_text: Any = "",
+    content_html: Any = "",
+) -> dict[str, Any]:
+    fields = build_reader_content_fields(
+        item,
+        content_text=content_text,
+        content_html=content_html,
+    )
+    return {
+        "kind": kind,
+        "item_id": item_id,
+        "save_url": save_url,
+        "content_signature": fields["reader_content_signature"],
+        "annotations": fields["reader_annotations"],
+        "activity": fields["reader_activity"],
+    }
+
+
+def reader_annotations_overlap(
+    annotations: list[dict[str, Any]],
+    start_offset: int,
+    end_offset: int,
+    *,
+    kind: str = "",
+    exclude_id: str = "",
+) -> bool:
+    for annotation in annotations:
+        annotation_id = str(annotation.get("id") or "").strip()
+        if exclude_id and annotation_id == exclude_id:
+            continue
+        existing_start = int(annotation.get("start_offset") or 0)
+        existing_end = int(annotation.get("end_offset") or 0)
+        if max(existing_start, start_offset) >= min(existing_end, end_offset):
+            continue
+        if kind and str(annotation.get("kind") or "").strip() != kind:
+            continue
+        return True
+    return False
 
 
 def note_html_has_image(value: str) -> bool:
@@ -1510,6 +2357,88 @@ def try_extract_file_text(path: Path, original_name: str) -> tuple[str | None, b
         return None, False
 
     return (text or None), bool(text)
+
+
+def mindmap_brief_upload_dir(record_id: str) -> Path:
+    safe_record_id = secure_filename(str(record_id or "").strip())[:24] or uuid.uuid4().hex[:12]
+    return MINDMAP_BRIEF_UPLOADS_DIR / safe_record_id
+
+
+def mindmap_brief_content_length(uploaded: Any) -> int:
+    if getattr(uploaded, "content_length", None):
+        try:
+            return max(0, int(uploaded.content_length))
+        except (TypeError, ValueError):
+            return 0
+
+    stream = getattr(uploaded, "stream", None)
+    if stream is None or not hasattr(stream, "tell") or not hasattr(stream, "seek"):
+        return 0
+
+    current = stream.tell()
+    stream.seek(0, os.SEEK_END)
+    length = max(0, int(stream.tell() or 0))
+    stream.seek(current, os.SEEK_SET)
+    return length
+
+
+def store_mindmap_generation_brief(uploaded: Any, *, record_id: str) -> dict[str, str]:
+    original_name = str(getattr(uploaded, "filename", "") or "").strip()
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in MINDMAP_BRIEF_ALLOWED_SUFFIXES:
+        raise ValueError("摘要文件暂只支持 PDF 或 Word(.docx)。")
+
+    content_length = mindmap_brief_content_length(uploaded)
+    if content_length > MINDMAP_BRIEF_MAX_BYTES:
+        raise ValueError(f"摘要文件不能超过 {MINDMAP_BRIEF_MAX_BYTES // (1024 * 1024)}MB。")
+
+    safe_name = secure_filename(original_name) or f"mindmap-brief{suffix or '.pdf'}"
+    stored_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{safe_name}"
+    target_dir = mindmap_brief_upload_dir(record_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / stored_name
+    uploaded.save(target_path)
+
+    extracted_text, extracted_success = try_extract_file_text(target_path, original_name)
+    if not extracted_success or not extracted_text:
+        try:
+            target_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ValueError("这份摘要文件暂时没能成功抽取文字，请换一个可读的 PDF 或 Word(.docx)。")
+
+    normalized_text = normalize_mindmap_generation_brief_text(extracted_text)
+    if not normalized_text:
+        try:
+            target_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ValueError("摘要文件里没有抽取到可用正文。")
+
+    return normalize_mindmap_generation_brief(
+        {
+            "original_name": original_name,
+            "stored_name": stored_name,
+            "uploaded_at": now_iso(),
+            "summary": summarize_text_block(normalized_text, limit=140),
+            "text": normalized_text,
+        }
+    )
+
+
+def delete_mindmap_generation_brief(brief_payload: Any, *, record_id: str) -> None:
+    brief = normalize_mindmap_generation_brief(brief_payload)
+    target_dir = mindmap_brief_upload_dir(record_id)
+    stored_name = brief.get("stored_name") or ""
+    if stored_name:
+        try:
+            (target_dir / stored_name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        target_dir.rmdir()
+    except OSError:
+        pass
 
 
 def build_file_note_content(comment: str, extracted_text: str | None, original_name: str) -> str:
@@ -1956,6 +2885,10 @@ def normalize_schedule_item(raw_item: Any) -> dict[str, Any] | None:
     elif start_time and end_time and end_time <= start_time:
         end_time = ""
 
+    note_text = trim_note_content(str(raw_item.get("note") or "").strip(), limit=1800)
+    reader_text = note_text or title[:160]
+    content_signature = build_reader_content_signature(reader_text, plain_text_to_html(reader_text))
+
     return {
         "id": str(raw_item.get("id") or uuid.uuid4().hex[:10]),
         "title": title[:160],
@@ -1970,10 +2903,15 @@ def normalize_schedule_item(raw_item: Any) -> dict[str, Any] | None:
         "end_time": end_time,
         "all_day": all_day,
         "location": str(raw_item.get("location") or "").strip()[:180],
-        "note": trim_note_content(str(raw_item.get("note") or "").strip(), limit=1800),
+        "note": note_text,
         "tags": normalize_tag_list(raw_item.get("tags", [])),
         "created_at": str(raw_item.get("created_at") or now_iso()),
         "updated_at": str(raw_item.get("updated_at") or now_iso()),
+        "reader_annotations": normalize_reader_annotation_list(
+            raw_item.get("reader_annotations", []),
+            content_signature=content_signature,
+        ),
+        "reading_record": normalize_reader_activity(raw_item.get("reading_record")),
     }
 
 
@@ -2206,7 +3144,12 @@ def build_transcript_category_payload(value: str | None) -> dict[str, str]:
     }
 
 
-def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
+def build_transcript_card(
+    entry: dict[str, Any],
+    *,
+    include_reader_body: bool = True,
+    include_reader_state: bool = True,
+) -> dict[str, Any]:
     status_meta = TRANSCRIPT_STATUS_META.get(entry["status"], TRANSCRIPT_STATUS_META["pending_api"])
     transcript_html = entry.get("transcript_html", "")
     transcript_text = entry.get("transcript_text", "")
@@ -2218,6 +3161,20 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
     linked_symbols = transcript_linked_symbols(entry)
     linked_symbol = linked_symbols[0] if linked_symbols else ""
     linked_search_symbol = linked_symbol if len(linked_symbols) == 1 else ""
+    reader_annotations = (
+        build_reader_annotation_views(list(entry.get("reader_annotations", []))) if include_reader_state else []
+    )
+    reader_activity = (
+        build_reader_activity_view(entry.get("reading_record"), reader_annotations) if include_reader_state else {}
+    )
+    reader_content_signature = (
+        build_reader_content_signature(
+            str(transcript_text or ""),
+            str(transcript_html or ""),
+        )
+        if include_reader_state
+        else ""
+    )
 
     return {
         **entry,
@@ -2245,7 +3202,11 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
         "summary_excerpt": summarize_text_block(transcript_text) if transcript_text else TRANSCRIPT_PLACEHOLDER_COPY,
         "feature_chips": build_transcript_feature_chips(entry),
         "has_transcript_content": has_transcript_content,
-        "reader_content_html": transcript_html or plain_text_to_html(TRANSCRIPT_PLACEHOLDER_COPY),
+        "reader_content_html": (
+            transcript_html or plain_text_to_html(TRANSCRIPT_PLACEHOLDER_COPY)
+            if include_reader_body
+            else ""
+        ),
         "can_submit": not has_remote_task,
         "can_sync": has_remote_task and entry["status"] in {"queued", "processing", "completed"},
         "has_file_url_hint": has_file_url,
@@ -2256,6 +3217,9 @@ def build_transcript_card(entry: dict[str, Any]) -> dict[str, Any]:
         "source_mode": source_meta["mode"],
         "source_status_label": source_meta["label"],
         "source_status_detail": source_meta["detail"],
+        "reader_annotations": reader_annotations,
+        "reader_activity": reader_activity,
+        "reader_content_signature": reader_content_signature,
     }
 
 
@@ -2263,9 +3227,15 @@ def build_transcript_cards(
     store: dict[str, Any],
     *,
     symbol_filter: str | None = None,
+    include_reader_body: bool = True,
+    include_reader_state: bool = True,
 ) -> list[dict[str, Any]]:
     cards = [
-        build_transcript_card(entry)
+        build_transcript_card(
+            entry,
+            include_reader_body=include_reader_body,
+            include_reader_state=include_reader_state,
+        )
         for entry in store.get("transcripts", [])
         if not symbol_filter or transcript_matches_symbol(entry, symbol_filter)
     ]
@@ -2316,7 +3286,12 @@ def build_transcript_page_context(
     stock_options = build_stock_selector_options(store)
     available_symbols = {item["symbol"] for item in stock_options}
     preferred_symbol = requested_symbol if requested_symbol in available_symbols else ""
-    transcript_cards = build_transcript_cards(store, symbol_filter=preferred_symbol or None)
+    transcript_cards = build_transcript_cards(
+        store,
+        symbol_filter=preferred_symbol or None,
+        include_reader_body=False,
+        include_reader_state=False,
+    )
     transcript_stats = build_transcript_stats_payload(transcript_cards)
 
     return {
@@ -2694,6 +3669,59 @@ def sync_transcript_job_from_tingwu(transcript: dict[str, Any]) -> dict[str, Any
     return task_info
 
 
+TRANSCRIPT_CLOUD_MUTATION_FIELDS = (
+    "status",
+    "provider_task_id",
+    "provider_task_status",
+    "provider_request_id",
+    "submitted_at",
+    "last_synced_at",
+    "last_error",
+    "provider_result_urls",
+    "file_url_hint",
+    "source_bucket_name",
+    "source_object_key",
+    "source_endpoint",
+    "source_region_id",
+    "source_url_expires_at",
+    "transcript_html",
+    "transcript_text",
+    "updated_at",
+)
+
+
+def copy_transcript_cloud_mutation_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for field in TRANSCRIPT_CLOUD_MUTATION_FIELDS:
+        target[field] = deepcopy(source.get(field))
+
+
+def load_transcript_entry_snapshot(transcript_id: str) -> dict[str, Any]:
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        return deepcopy(transcript)
+
+
+def persist_transcript_cloud_snapshot(transcript_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        copy_transcript_cloud_mutation_fields(transcript, snapshot)
+        touch_transcript_stocks(store, transcript)
+        save_stock_store(store)
+        return deepcopy(transcript)
+
+
+def persist_transcript_cloud_error(transcript_id: str, error_message: str) -> dict[str, Any]:
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        transcript["last_error"] = str(error_message or "").strip()[:2000]
+        transcript["updated_at"] = now_iso()
+        save_stock_store(store)
+        return deepcopy(transcript)
+
+
 def build_file_type_breakdown(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     counts = Counter(
         str(item.get("file_type") or detect_file_type_label(str(item.get("title") or "")))
@@ -2992,7 +4020,10 @@ def load_report(filename: str) -> dict[str, Any]:
     report_entry = reports_by_filename.get(filename)
     if report_entry is None:
         abort(404)
-    return serialize_report_entry(report_entry, include_html=True)
+    return {
+        **serialize_report_entry(report_entry, include_html=True),
+        "content": str(report_entry.get("content") or ""),
+    }
 
 
 def iter_report_paths_in(directory: Path) -> list[Path]:
@@ -3329,10 +4360,7 @@ def load_monitor_config() -> dict[str, Any]:
 
 def save_monitor_config(config: dict[str, Any]) -> None:
     normalized = normalize_monitor_config(config)
-    MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = MONITOR_CONFIG_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(MONITOR_CONFIG_PATH)
+    write_json_atomic(MONITOR_CONFIG_PATH, normalized)
 
 
 def normalize_monitor_runtime(raw: Any) -> dict[str, Any]:
@@ -3366,10 +4394,7 @@ def load_monitor_runtime() -> dict[str, Any]:
 
 def save_monitor_runtime(runtime: dict[str, Any]) -> None:
     normalized = normalize_monitor_runtime(runtime)
-    MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = MONITOR_RUNTIME_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(MONITOR_RUNTIME_PATH)
+    write_json_atomic(MONITOR_RUNTIME_PATH, normalized)
 
 
 def monitor_runtime_status_label(status: str) -> str:
@@ -3923,10 +4948,7 @@ def load_signal_monitor_config() -> dict[str, Any]:
 
 def save_signal_monitor_config(config: dict[str, Any]) -> None:
     normalized = normalize_signal_monitor_config(config)
-    SIGNAL_MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = SIGNAL_MONITOR_CONFIG_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(SIGNAL_MONITOR_CONFIG_PATH)
+    write_json_atomic(SIGNAL_MONITOR_CONFIG_PATH, normalized)
 
 
 def normalize_signal_state_entry(raw_state: Any) -> dict[str, Any] | None:
@@ -3990,10 +5012,7 @@ def load_signal_monitor_state() -> dict[str, Any]:
 
 def save_signal_monitor_state(state: dict[str, Any]) -> None:
     normalized = normalize_signal_monitor_state(state)
-    SIGNAL_MONITOR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = SIGNAL_MONITOR_STATE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(SIGNAL_MONITOR_STATE_PATH)
+    write_json_atomic(SIGNAL_MONITOR_STATE_PATH, normalized)
 
 
 def normalize_signal_monitor_runtime(raw: Any) -> dict[str, Any]:
@@ -4029,10 +5048,7 @@ def load_signal_monitor_runtime() -> dict[str, Any]:
 
 def save_signal_monitor_runtime(runtime: dict[str, Any]) -> None:
     normalized = normalize_signal_monitor_runtime(runtime)
-    SIGNAL_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = SIGNAL_MONITOR_RUNTIME_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(SIGNAL_MONITOR_RUNTIME_PATH)
+    write_json_atomic(SIGNAL_MONITOR_RUNTIME_PATH, normalized)
 
 
 def parse_signal_monitor_datetime(value: Any) -> datetime | None:
@@ -4623,10 +5639,7 @@ def load_stablecoin_market_cache() -> dict[str, Any]:
 
 def save_stablecoin_market_cache(cache: dict[str, Any]) -> None:
     normalized = normalize_stablecoin_market_cache(cache)
-    STABLECOIN_MONITOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = STABLECOIN_MONITOR_CACHE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(STABLECOIN_MONITOR_CACHE_PATH)
+    write_json_atomic(STABLECOIN_MONITOR_CACHE_PATH, normalized)
 
 
 def normalize_stablecoin_monitor_runtime(raw: Any) -> dict[str, Any]:
@@ -4661,10 +5674,7 @@ def load_stablecoin_monitor_runtime() -> dict[str, Any]:
 
 def save_stablecoin_monitor_runtime(runtime: dict[str, Any]) -> None:
     normalized = normalize_stablecoin_monitor_runtime(runtime)
-    STABLECOIN_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = STABLECOIN_MONITOR_RUNTIME_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(STABLECOIN_MONITOR_RUNTIME_PATH)
+    write_json_atomic(STABLECOIN_MONITOR_RUNTIME_PATH, normalized)
 
 
 def stablecoin_market_cache_is_stale(cache: dict[str, Any]) -> bool:
@@ -5484,6 +6494,3715 @@ def build_stablecoin_data_monitor_context() -> dict[str, Any]:
     }
 
 
+def normalize_gpu_price_monitor_runtime(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "status": str(source.get("status") or "idle").strip() or "idle",
+        "started_at": str(source.get("started_at") or "").strip(),
+        "finished_at": str(source.get("finished_at") or "").strip(),
+        "reason": str(source.get("reason") or "").strip(),
+        "message": str(source.get("message") or "").strip(),
+        "error": str(source.get("error") or "").strip(),
+    }
+
+
+def load_gpu_price_tracker_cache() -> dict[str, Any]:
+    GPU_PRICE_MONITOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not GPU_PRICE_MONITOR_CACHE_PATH.exists():
+        cache = default_gpu_price_cache(GPU_PRICE_MONITOR_FAMILIES)
+        save_gpu_price_tracker_cache(cache)
+        return cache
+    return normalize_gpu_price_cache(load_json(GPU_PRICE_MONITOR_CACHE_PATH), GPU_PRICE_MONITOR_FAMILIES)
+
+
+def save_gpu_price_tracker_cache(cache: dict[str, Any]) -> None:
+    write_json_atomic(GPU_PRICE_MONITOR_CACHE_PATH, normalize_gpu_price_cache(cache, GPU_PRICE_MONITOR_FAMILIES))
+
+
+def load_gpu_price_monitor_runtime() -> dict[str, Any]:
+    GPU_PRICE_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not GPU_PRICE_MONITOR_RUNTIME_PATH.exists():
+        runtime = normalize_gpu_price_monitor_runtime({})
+        save_gpu_price_monitor_runtime(runtime)
+        return runtime
+    return normalize_gpu_price_monitor_runtime(load_json(GPU_PRICE_MONITOR_RUNTIME_PATH))
+
+
+def save_gpu_price_monitor_runtime(runtime: dict[str, Any]) -> None:
+    write_json_atomic(GPU_PRICE_MONITOR_RUNTIME_PATH, normalize_gpu_price_monitor_runtime(runtime))
+
+
+def gpu_price_tracker_cache_is_stale(cache: dict[str, Any]) -> bool:
+    updated_at = parse_signal_monitor_datetime(cache.get("updated_at"))
+    if updated_at is None:
+        return True
+    return datetime.now() - updated_at >= timedelta(hours=GPU_PRICE_MONITOR_REFRESH_INTERVAL_HOURS)
+
+
+def run_gpu_price_tracker_refresh(reason: str, started_at: str | None = None) -> None:
+    global GPU_PRICE_MONITOR_ACTIVE_THREAD
+
+    runtime = {
+        "status": "running",
+        "started_at": started_at or now_iso(),
+        "finished_at": "",
+        "reason": reason,
+        "message": "Refreshing GPU price pages.",
+        "error": "",
+    }
+    save_gpu_price_monitor_runtime(runtime)
+    try:
+        previous_cache = load_gpu_price_tracker_cache()
+        dataset = build_gpu_price_dataset(
+            families=GPU_PRICE_MONITOR_FAMILIES,
+            previous_cache=previous_cache,
+            fetch_ts=now_iso(),
+        )
+        save_gpu_price_tracker_cache(dataset)
+        runtime = {
+            "status": "completed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "GPU price tracker refreshed.",
+            "error": "",
+        }
+    except Exception as exc:
+        runtime = {
+            "status": "failed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "",
+            "error": str(exc),
+        }
+    finally:
+        save_gpu_price_monitor_runtime(runtime)
+        with GPU_PRICE_MONITOR_LOCK:
+            GPU_PRICE_MONITOR_ACTIVE_THREAD = None
+
+
+def sync_gpu_price_monitor_runtime() -> dict[str, Any]:
+    runtime = load_gpu_price_monitor_runtime()
+    if runtime["status"] != "running":
+        return runtime
+    worker = GPU_PRICE_MONITOR_ACTIVE_THREAD
+    if worker is not None and worker.is_alive():
+        return runtime
+    runtime["status"] = "failed"
+    runtime["finished_at"] = runtime["finished_at"] or now_iso()
+    runtime["error"] = runtime["error"] or "GPU price refresh thread ended without a completed runtime."
+    save_gpu_price_monitor_runtime(runtime)
+    return runtime
+
+
+def start_gpu_price_tracker_refresh(reason: str) -> dict[str, Any]:
+    global GPU_PRICE_MONITOR_ACTIVE_THREAD
+
+    with GPU_PRICE_MONITOR_LOCK:
+        runtime = sync_gpu_price_monitor_runtime()
+        if runtime["status"] == "running":
+            return runtime
+
+        started_at = now_iso()
+        runtime = {
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": "",
+            "reason": reason,
+            "message": "Refreshing GPU price pages.",
+            "error": "",
+        }
+        save_gpu_price_monitor_runtime(runtime)
+        worker = threading.Thread(
+            target=run_gpu_price_tracker_refresh,
+            args=(reason, started_at),
+            daemon=True,
+            name="gpu-price-monitor-refresh",
+        )
+        GPU_PRICE_MONITOR_ACTIVE_THREAD = worker
+        worker.start()
+        return runtime
+
+
+def maybe_start_gpu_price_monitor_scheduler() -> None:
+    global GPU_PRICE_MONITOR_SCHEDULER_STARTED, GPU_PRICE_MONITOR_SCHEDULER_THREAD
+
+    with GPU_PRICE_MONITOR_LOCK:
+        if GPU_PRICE_MONITOR_SCHEDULER_STARTED:
+            return
+
+        def scheduler_loop() -> None:
+            while True:
+                try:
+                    cache = load_gpu_price_tracker_cache()
+                    runtime = sync_gpu_price_monitor_runtime()
+                    if runtime["status"] != "running" and gpu_price_tracker_cache_is_stale(cache):
+                        start_gpu_price_tracker_refresh("scheduler")
+                except Exception:
+                    pass
+                time.sleep(max(180, GPU_PRICE_MONITOR_SCHEDULER_SLEEP_SECONDS))
+
+        worker = threading.Thread(
+            target=scheduler_loop,
+            daemon=True,
+            name="gpu-price-monitor-scheduler",
+        )
+        GPU_PRICE_MONITOR_SCHEDULER_THREAD = worker
+        GPU_PRICE_MONITOR_SCHEDULER_STARTED = True
+        worker.start()
+
+
+def ensure_gpu_price_tracker_cache_ready() -> tuple[dict[str, Any], dict[str, Any]]:
+    maybe_start_gpu_price_monitor_scheduler()
+    cache = load_gpu_price_tracker_cache()
+    runtime = sync_gpu_price_monitor_runtime()
+    if not cache.get("updated_at") and runtime["status"] != "running":
+        run_gpu_price_tracker_refresh("bootstrap")
+        cache = load_gpu_price_tracker_cache()
+        runtime = sync_gpu_price_monitor_runtime()
+    elif gpu_price_tracker_cache_is_stale(cache) and runtime["status"] != "running":
+        runtime = start_gpu_price_tracker_refresh("stale_auto")
+    return cache, runtime
+
+
+def format_gpu_hour_price(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"${number:.2f}/GPU/h"
+
+
+def numeric_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_gpu_price_auto_refresh_label(hours: int) -> str:
+    normalized_hours = max(1, int(hours or 0))
+    if normalized_hours == 24:
+        return "daily"
+    if normalized_hours % 24 == 0:
+        return f"every {normalized_hours // 24} days"
+    return f"every {normalized_hours} hours"
+
+
+def gpu_price_family_color(family: str, index: int = 0) -> str:
+    palette = ["#2752b8", "#12805c", "#c54e2c", "#9a5f00", "#7c3aed", "#4f657a"]
+    normalized = str(family or "").upper()
+    return GPU_PRICE_FAMILY_COLORS.get(normalized) or palette[index % len(palette)]
+
+
+def gpu_price_date_label(value: Any) -> str:
+    raw_value = str(value or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_value):
+        return raw_value[5:]
+    return raw_value or "n/a"
+
+
+def gpu_price_cache_updated_today(cache: dict[str, Any]) -> bool:
+    updated_at = str(cache.get("updated_at") or "")
+    return bool(updated_at) and updated_at[:10] == today_date_iso()
+
+
+def build_gpu_price_line_chart_payload(cache: dict[str, Any], *, billing_type: str = "on_demand") -> dict[str, Any]:
+    normalized_billing = str(billing_type or "on_demand").strip().lower() or "on_demand"
+    families = [str(item or "").upper() for item in cache.get("families", []) if str(item or "").strip()]
+    daily_index = cache.get("daily_index") if isinstance(cache.get("daily_index"), list) else []
+    available_rows = [
+        item
+        for item in daily_index
+        if isinstance(item, dict)
+        and str(item.get("availability_mode") or "") == "available"
+        and str(item.get("billing_type") or "") == normalized_billing
+        and item.get("price_standardized") is not None
+    ]
+    discovered_families = [
+        str(item.get("gpu_family") or "").upper()
+        for item in available_rows
+        if str(item.get("gpu_family") or "").strip()
+    ]
+    ordered_families = []
+    for family in [*families, *discovered_families]:
+        if family and family not in ordered_families:
+            ordered_families.append(family)
+    if normalized_billing == "spot":
+        ordered_families = [family for family in ordered_families if family in {"H100", "H200", "B200"}]
+    if not ordered_families:
+        ordered_families = ["H100", "H200", "B200"] if normalized_billing == "spot" else ["H100", "H200", "B200"]
+
+    family_order = {family: index for index, family in enumerate(ordered_families)}
+    row_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in available_rows:
+        family = str(item.get("gpu_family") or "").upper()
+        date_value = str(item.get("date") or "")
+        if not family or not date_value:
+            continue
+        row_lookup[(date_value, family)] = item
+
+    points = []
+    for date_value in sorted({date for date, _family in row_lookup}):
+        series = []
+        for family in ordered_families:
+            row = row_lookup.get((date_value, family))
+            if not row:
+                continue
+            try:
+                value = float(row.get("price_standardized"))
+            except (TypeError, ValueError):
+                continue
+            sample_size = int(row.get("sample_size") or 0)
+            provider_count = int(row.get("provider_count") or 0)
+            series.append(
+                {
+                    "symbol": family,
+                    "label": family,
+                    "color": gpu_price_family_color(family, family_order.get(family, 0)),
+                    "value": value,
+                    "value_label": format_gpu_hour_price(value),
+                    "secondary_label": f"{sample_size} samples / {provider_count} providers",
+                    "sample_size": sample_size,
+                    "provider_count": provider_count,
+                }
+            )
+        if series:
+            points.append(
+                {
+                    "date": date_value,
+                    "label": gpu_price_date_label(date_value),
+                    "point_label": date_value,
+                    "series": series,
+                }
+            )
+
+    return {
+        "title": "GPU Spot Price Index" if normalized_billing == "spot" else "GPU Price Index",
+        "subtitle": (
+            "Available one-GPU spot/preemptible median, USD per GPU hour. Populates when spot rows are parsed."
+            if normalized_billing == "spot"
+            else "Available one-GPU on-demand quality-window median, USD per GPU hour."
+        ),
+        "empty_title": "No parsed spot index yet" if normalized_billing == "spot" else "No price index yet",
+        "empty_subtitle": (
+            "Current GPUs.io rows are on-demand. AWS Price List omits EC2 Spot, while Azure/GCP spot need dedicated official-source parsers."
+            if normalized_billing == "spot"
+            else "The chart will populate after daily rows are stored."
+        ),
+        "chart_key": f"gpu-price-{normalized_billing}-index",
+        "billing_type": normalized_billing,
+        "metric_kind": "gpu_price_usd_hour",
+        "visible_point_limit": GPU_PRICE_CHART_VISIBLE_POINT_LIMIT,
+        "series": [
+            {
+                "symbol": family,
+                "label": family,
+                "color": gpu_price_family_color(family, index),
+            }
+            for index, family in enumerate(ordered_families)
+        ],
+        "points": points,
+    }
+
+
+def azure_csp_gpu_price_color(family: str, billing_type: str) -> str:
+    palette = {
+        ("H100", "on_demand"): "#2752b8",
+        ("H100", "spot"): "#6d9df2",
+        ("H200", "on_demand"): "#12805c",
+        ("H200", "spot"): "#66b58d",
+        ("B200", "on_demand"): "#c54e2c",
+        ("B200", "spot"): "#e29a4a",
+    }
+    return palette.get((str(family or "").upper(), str(billing_type or "")), "#4f657a")
+
+
+def build_gpu_price_csp_line_chart_payload(cache: dict[str, Any]) -> dict[str, Any]:
+    csp_daily_index = cache.get("csp_daily_index") if isinstance(cache.get("csp_daily_index"), list) else []
+    available_rows = [
+        item
+        for item in csp_daily_index
+        if isinstance(item, dict)
+        and str(item.get("availability_mode") or "") == "available"
+        and str(item.get("gpu_family") or "").upper() in {"H100", "H200", "B200"}
+        and str(item.get("billing_type") or "") in {"on_demand", "spot"}
+        and item.get("price_standardized") is not None
+    ]
+    row_lookup: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in available_rows:
+        date_value = str(item.get("date") or "")
+        family = str(item.get("gpu_family") or "").upper()
+        billing_type = str(item.get("billing_type") or "")
+        if date_value and family and billing_type:
+            row_lookup[(date_value, family, billing_type)] = item
+
+    series_order = [
+        ("H100", "on_demand"),
+        ("H100", "spot"),
+        ("H200", "on_demand"),
+        ("H200", "spot"),
+        ("B200", "on_demand"),
+        ("B200", "spot"),
+    ]
+    discovered = {
+        (str(item.get("gpu_family") or "").upper(), str(item.get("billing_type") or ""))
+        for item in available_rows
+    }
+    ordered_series = [pair for pair in series_order if pair in discovered] or series_order
+
+    points = []
+    for date_value in sorted({date for date, _family, _billing_type in row_lookup}):
+        series = []
+        for family, billing_type in ordered_series:
+            row = row_lookup.get((date_value, family, billing_type))
+            if not row:
+                continue
+            try:
+                value = float(row.get("price_standardized"))
+            except (TypeError, ValueError):
+                continue
+            sample_size = int(row.get("sample_size") or 0)
+            provider_count = int(row.get("provider_count") or 0)
+            billing_label = "Spot" if billing_type == "spot" else "On-demand"
+            symbol = f"AZURE_{family}_{billing_type.upper()}"
+            series.append(
+                {
+                    "symbol": symbol,
+                    "label": f"{family} {billing_label}",
+                    "color": azure_csp_gpu_price_color(family, billing_type),
+                    "value": value,
+                    "value_label": format_gpu_hour_price(value),
+                    "secondary_label": f"Azure / {sample_size} SKUs / {provider_count} provider",
+                    "sample_size": sample_size,
+                    "provider_count": provider_count,
+                }
+            )
+        if series:
+            points.append(
+                {
+                    "date": date_value,
+                    "label": gpu_price_date_label(date_value),
+                    "point_label": date_value,
+                    "series": series,
+                }
+            )
+
+    return {
+        "title": "Azure CSP Price Reference",
+        "subtitle": "Official Azure Retail Prices, shown separately from the core GPU market/NCP index; median USD per GPU hour by family and billing type.",
+        "empty_title": "No Azure CSP index yet",
+        "empty_subtitle": "Azure rows are stored after the Retail Prices API returns Linux Consumption SKUs with inferable GPU counts.",
+        "chart_key": "gpu-price-azure-csp-index",
+        "billing_type": "csp",
+        "metric_kind": "gpu_price_usd_hour",
+        "visible_point_limit": GPU_PRICE_CHART_VISIBLE_POINT_LIMIT,
+        "filterable": False,
+        "filter_note": "Azure CSP is charted independently so official cloud prices can be compared against NCP and market-provider curves.",
+        "series": [
+            {
+                "symbol": f"AZURE_{family}_{billing_type.upper()}",
+                "label": f"{family} {'Spot' if billing_type == 'spot' else 'On-demand'}",
+                "color": azure_csp_gpu_price_color(family, billing_type),
+            }
+            for family, billing_type in ordered_series
+        ],
+        "points": points,
+    }
+
+
+def format_gpu_percent(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{number * 100:.1f}%"
+
+
+def build_gpu_price_latest_index_lookup(daily_index: list[dict[str, Any]], updated_at: str) -> dict[tuple[str, str], dict[str, Any]]:
+    today = str(updated_at or "")[:10]
+    return {
+        (str(item.get("gpu_family") or "").upper(), str(item.get("billing_type") or "")): item
+        for item in daily_index
+        if isinstance(item, dict)
+        and str(item.get("date") or "") == today
+        and str(item.get("availability_mode") or "") == "available"
+    }
+
+
+def build_gpu_index_method_labels(index_row: dict[str, Any], fallback_sample_size: int = 0, fallback_provider_count: int = 0) -> dict[str, str]:
+    billing_type = str(index_row.get("billing_type") or "on_demand")
+    sample_size = int(index_row.get("sample_size") or fallback_sample_size or 0)
+    provider_count = int(index_row.get("provider_count") or fallback_provider_count or 0)
+    if billing_type == "spot":
+        scope_label = "spot/preemptible/interruptible, 1 GPU, H100/H200/B200 families, available rows when source exposes availability"
+    else:
+        scope_label = "available on-demand, 1 GPU, 16-32 vCPU/GPU, 120-256 GB RAM/GPU, 0-1500 GB storage/GPU"
+    return {
+        "index_method_label": str(index_row.get("index_method") or "trimmed_median").replace("_", " "),
+        "index_scope_label": scope_label,
+        "index_formula_label": f"median(price_per_gpu_hour_usd) across {sample_size} index rows from {provider_count} providers",
+        "index_dispersion_label": f"P25 {format_gpu_hour_price(index_row.get('dispersion_p25'))} / P75 {format_gpu_hour_price(index_row.get('dispersion_p75'))}",
+        "index_storage_label": "same-day rows use date + series_key replacement, so repeated refreshes keep the newest result",
+    }
+
+
+def build_gpu_price_spot_cards(cache: dict[str, Any], latest: list[dict[str, Any]], daily_index: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    lookup = build_gpu_price_latest_index_lookup(daily_index, str(cache.get("updated_at") or ""))
+    latest_by_family = {str(item.get("gpu_family") or "").upper(): item for item in latest if isinstance(item, dict)}
+    families = [family for family in ["H100", "H200", "B200"] if family in GPU_FAMILY_CONFIGS]
+    cards = []
+    for family in families:
+        spot_row = lookup.get((family, "spot")) or {}
+        latest_item = latest_by_family.get(family) or {}
+        spot_price = spot_row.get("price_standardized") or latest_item.get("spot_standardized_price")
+        has_index = spot_price is not None
+        method_labels = build_gpu_index_method_labels(
+            {**spot_row, "billing_type": "spot"},
+            int(latest_item.get("spot_sample_size") or 0),
+            int(latest_item.get("spot_provider_count") or 0),
+        )
+        cards.append(
+            {
+                "gpu_family": family,
+                "variant": str(GPU_FAMILY_CONFIGS.get(family, {}).get("variant") or ""),
+                "has_index": has_index,
+                "spot_standardized_price": spot_price,
+                "spot_standardized_price_label": format_gpu_hour_price(spot_price),
+                "spot_sample_size": int(spot_row.get("sample_size") or latest_item.get("spot_sample_size") or 0),
+                "spot_provider_count": int(spot_row.get("provider_count") or latest_item.get("spot_provider_count") or 0),
+                "spot_discount_label": format_gpu_percent(latest_item.get("spot_discount")),
+                **method_labels,
+            }
+        )
+    return cards
+
+
+def build_gpu_price_csp_cards(cache: dict[str, Any]) -> list[dict[str, Any]]:
+    csp_daily_index = cache.get("csp_daily_index") if isinstance(cache.get("csp_daily_index"), list) else []
+    lookup = build_gpu_price_latest_index_lookup(csp_daily_index, str(cache.get("updated_at") or ""))
+    cards = []
+    for family in ["H100", "H200", "B200"]:
+        on_demand_row = lookup.get((family, "on_demand")) or {}
+        spot_row = lookup.get((family, "spot")) or {}
+        on_demand_price = numeric_or_none(on_demand_row.get("price_standardized"))
+        spot_price = numeric_or_none(spot_row.get("price_standardized"))
+        discount = (
+            1 - (spot_price / on_demand_price)
+            if spot_price is not None and on_demand_price is not None and on_demand_price > 0
+            else None
+        )
+        cards.append(
+            {
+                "gpu_family": family,
+                "variant": str(GPU_FAMILY_CONFIGS.get(family, {}).get("variant") or ""),
+                "has_index": on_demand_price is not None or spot_price is not None,
+                "on_demand_price_label": format_gpu_hour_price(on_demand_price),
+                "spot_price_label": format_gpu_hour_price(spot_price),
+                "on_demand_sample_size": int(on_demand_row.get("sample_size") or 0),
+                "spot_sample_size": int(spot_row.get("sample_size") or 0),
+                "provider_count": max(int(on_demand_row.get("provider_count") or 0), int(spot_row.get("provider_count") or 0)),
+                "spot_discount_label": format_gpu_percent(discount),
+                "on_demand_dispersion_label": (
+                    f"P25 {format_gpu_hour_price(on_demand_row.get('dispersion_p25'))} / "
+                    f"P75 {format_gpu_hour_price(on_demand_row.get('dispersion_p75'))}"
+                ),
+                "spot_dispersion_label": (
+                    f"P25 {format_gpu_hour_price(spot_row.get('dispersion_p25'))} / "
+                    f"P75 {format_gpu_hour_price(spot_row.get('dispersion_p75'))}"
+                ),
+                "index_formula_label": (
+                    "median(price_per_gpu_hour_usd) from Azure Retail Prices Linux Consumption rows, "
+                    "grouped by GPU family and billing type"
+                ),
+                "index_storage_label": "same-day Azure rows use date + azure series_key replacement",
+            }
+        )
+    return cards
+
+
+def build_gpu_price_b_series_cards(cache: dict[str, Any], latest: list[dict[str, Any]], offers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest_by_family = {str(item.get("gpu_family") or "").upper(): item for item in latest if isinstance(item, dict)}
+    offers_by_family = Counter(str(item.get("gpu_family") or "").upper() for item in offers if isinstance(item, dict))
+    cards = []
+    for family in ["B200", "B100"]:
+        config = GPU_FAMILY_CONFIGS.get(family, {})
+        latest_item = latest_by_family.get(family) or {}
+        price = latest_item.get("available_standardized_price")
+        vram = numeric_or_none(config.get("vram_gb"))
+        mem_bw = numeric_or_none(config.get("mem_bw_gbps"))
+        fp16 = numeric_or_none(config.get("fp16_tflops"))
+        price_number = numeric_or_none(price)
+        cards.append(
+            {
+                "gpu_family": family,
+                "variant": str(config.get("variant") or ""),
+                "price_index_enabled": bool(config.get("price_index_enabled", True)),
+                "offer_count": int(offers_by_family.get(family, 0)),
+                "available_standardized_price_label": format_gpu_hour_price(price),
+                "vram_label": f"{vram:.0f} GB" if vram is not None else "n/a",
+                "mem_bw_label": f"{mem_bw / 1000:.1f} TB/s" if mem_bw is not None else "n/a",
+                "fp16_label": f"{fp16 / 1000:.2f} PF16" if fp16 is not None else "n/a",
+                "usd_per_80gb_vram_label": format_gpu_hour_price((price_number * 80 / vram) if price_number is not None and vram else None),
+                "usd_per_tbps_label": format_gpu_hour_price((price_number / (mem_bw / 1000)) if price_number is not None and mem_bw else None),
+                "usd_per_pf16_label": format_gpu_hour_price((price_number / (fp16 / 1000)) if price_number is not None and fp16 else None),
+                "note": str(config.get("coverage_note") or "B-series price curve is kept separate from H-series because the architecture and memory profile differ."),
+            }
+        )
+    return cards
+
+
+def build_gpu_price_data_monitor_context() -> dict[str, Any]:
+    cache, runtime = ensure_gpu_price_tracker_cache_ready()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    latest = cache.get("latest") if isinstance(cache.get("latest"), list) else []
+    offers = cache.get("normalized_offers") if isinstance(cache.get("normalized_offers"), list) else []
+    source_health = cache.get("source_health") if isinstance(cache.get("source_health"), list) else []
+    daily_index = cache.get("daily_index") if isinstance(cache.get("daily_index"), list) else []
+    csp_daily_index = cache.get("csp_daily_index") if isinstance(cache.get("csp_daily_index"), list) else []
+    line_chart = build_gpu_price_line_chart_payload(cache, billing_type="on_demand")
+    spot_line_chart = build_gpu_price_line_chart_payload(cache, billing_type="spot")
+    csp_line_chart = build_gpu_price_csp_line_chart_payload(cache)
+    has_fresh_today = gpu_price_cache_updated_today(cache)
+    last_updated_label = format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "never"
+    refresh_confirm_message = (
+        f"GPU price index already has today's latest stored result ({last_updated_label}). "
+        "Refreshing now will overwrite today's index/history row and keep only the newest result. Continue?"
+        if has_fresh_today
+        else ""
+    )
+
+    latest_cards = []
+    latest_index_rows = build_gpu_price_latest_index_lookup(daily_index, str(cache.get("updated_at") or ""))
+    for item in latest:
+        if not isinstance(item, dict):
+            continue
+        family = str(item.get("gpu_family") or "").upper()
+        index_row = latest_index_rows.get((family, "on_demand")) or {}
+        sample_size = int(index_row.get("sample_size") or item.get("available_sample_size") or 0)
+        provider_count = int(index_row.get("provider_count") or item.get("available_provider_count") or 0)
+        method_labels = build_gpu_index_method_labels(index_row, sample_size, provider_count)
+        latest_cards.append(
+            {
+                **item,
+                "available_standardized_price_label": format_gpu_hour_price(item.get("available_standardized_price")),
+                "cheapest_price_label": format_gpu_hour_price(item.get("cheapest_price")),
+                "cheapest_region_label": ", ".join(item.get("cheapest_regions", [])) if isinstance(item.get("cheapest_regions"), list) and item.get("cheapest_regions") else "all/unknown",
+                **method_labels,
+            }
+        )
+
+    spot_cards = build_gpu_price_spot_cards(cache, latest, daily_index)
+    csp_cards = build_gpu_price_csp_cards(cache)
+    b_series_cards = build_gpu_price_b_series_cards(cache, latest, offers)
+    display_families = []
+    for family in [
+        *(cache.get("families", []) if isinstance(cache.get("families"), list) else []),
+        *GPU_PRICE_MONITOR_FAMILIES,
+    ]:
+        normalized_family = str(family or "").upper()
+        if normalized_family and normalized_family not in display_families:
+            display_families.append(normalized_family)
+
+    sorted_offers = sorted(
+        [item for item in offers if isinstance(item, dict)],
+        key=lambda item: (
+            str(item.get("gpu_family") or ""),
+            float(item.get("price_per_gpu_hour_usd") or 999999.0),
+            str(item.get("provider_name") or ""),
+        ),
+    )
+    offer_rows = []
+    for offer in sorted_offers[:36]:
+        offer_rows.append(
+            {
+                **offer,
+                "price_label": format_gpu_hour_price(offer.get("price_per_gpu_hour_usd")),
+                "total_price_label": format_gpu_hour_price(offer.get("price_total_hour_usd")).replace("/GPU/h", "/h"),
+                "region_label": ", ".join(offer.get("region_codes", [])) if isinstance(offer.get("region_codes"), list) and offer.get("region_codes") else "all/unknown",
+                "bundle_label": f"{offer.get('gpu_count') or '-'} GPU / {offer.get('vcpu_total') or '-'} vCPU / {offer.get('ram_total_gb') or '-'} GB RAM",
+            }
+        )
+
+    health_rows = []
+    for item in source_health:
+        if not isinstance(item, dict):
+            continue
+        health_rows.append(
+            {
+                **item,
+                "status_label": "ok" if item.get("fetch_ok") else "blocked/error",
+                "updated_label": str(item.get("date") or ""),
+            }
+        )
+
+    index_rows = []
+    for item in daily_index[-24:]:
+        if not isinstance(item, dict):
+            continue
+        index_rows.append(
+            {
+                **item,
+                "price_standardized_label": format_gpu_hour_price(item.get("price_standardized")),
+                "p25_label": format_gpu_hour_price(item.get("dispersion_p25")),
+                "p75_label": format_gpu_hour_price(item.get("dispersion_p75")),
+            }
+        )
+
+    return {
+        "gpu_price_cache": cache,
+        "gpu_price_runtime": {
+            **runtime,
+            "status_label": monitor_runtime_status_label(runtime["status"]),
+            "status_tone": monitor_runtime_status_tone(runtime["status"]),
+            "is_running": runtime["status"] == "running",
+            "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "never",
+            "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "never",
+        },
+        "gpu_price_status_poll_seconds": GPU_PRICE_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
+        "gpu_price_is_stale": gpu_price_tracker_cache_is_stale(cache),
+        "gpu_price_has_fresh_today": has_fresh_today,
+        "gpu_price_refresh_confirm_message": refresh_confirm_message,
+        "gpu_price_last_updated_label": last_updated_label,
+        "gpu_price_family_label": ", ".join(display_families),
+        "gpu_price_offer_count": int(summary.get("offer_count") or len(offers)),
+        "gpu_price_provider_count": int(summary.get("provider_count") or 0),
+        "gpu_price_index_count": int(summary.get("daily_index_count") or len(daily_index)),
+        "gpu_price_csp_index_count": int(summary.get("csp_daily_index_count") or len(csp_daily_index)),
+        "gpu_price_source_health_count": int(summary.get("source_health_count") or len(source_health)),
+        "gpu_price_latest_cards": latest_cards,
+        "gpu_price_spot_cards": spot_cards,
+        "gpu_price_csp_cards": csp_cards,
+        "gpu_price_b_series_cards": b_series_cards,
+        "gpu_price_offer_rows": offer_rows,
+        "gpu_price_health_rows": health_rows,
+        "gpu_price_index_rows": index_rows,
+        "gpu_price_line_chart": line_chart,
+        "gpu_price_spot_line_chart": spot_line_chart,
+        "gpu_price_csp_line_chart": csp_line_chart,
+        "gpu_price_source_name": str(cache.get("source", {}).get("name") or "GPUs.io + GetDeploying + Azure Retail Prices"),
+        "gpu_price_source_url": str(cache.get("source", {}).get("url") or "https://gpus.io/en/gpus/h100"),
+        "gpu_price_source_endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        "gpu_price_notes": str(cache.get("notes") or ""),
+        "gpu_price_auto_refresh_label": build_gpu_price_auto_refresh_label(GPU_PRICE_MONITOR_REFRESH_INTERVAL_HOURS),
+    }
+
+
+class CDNAssetHostParser(HTMLParser):
+    def __init__(self, *, base_url: str, limit: int) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.limit = max(1, limit)
+        self.hosts: list[str] = []
+        self._seen: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if len(self.hosts) >= self.limit:
+            return
+        for key, value in attrs:
+            attr_name = str(key or "").strip().lower()
+            if attr_name in {"src", "href", "poster", "data-src"}:
+                self._ingest_value(value or "")
+            elif attr_name == "srcset":
+                for item in str(value or "").split(","):
+                    candidate = item.strip().split(" ", 1)[0].strip()
+                    self._ingest_value(candidate)
+            if len(self.hosts) >= self.limit:
+                return
+
+    def _ingest_value(self, value: str) -> None:
+        raw = str(value or "").strip()
+        if not raw or raw.startswith(("#", "data:", "mailto:", "javascript:")):
+            return
+        try:
+            resolved = urljoin(self.base_url, raw)
+        except Exception:
+            return
+        parsed = urlparse(resolved)
+        if parsed.scheme not in {"http", "https"}:
+            return
+        host = str(parsed.hostname or "").strip().lower().rstrip(".")
+        if not host or host in self._seen:
+            return
+        self._seen.add(host)
+        self.hosts.append(host)
+
+
+def default_cdn_tracker_cache() -> dict[str, Any]:
+    return {
+        "updated_at": "",
+        "source": {
+            "name": "Local HTTP + DNS Probe",
+            "url": "",
+            "endpoint": "requests.get(url) + homepage asset host scan + nslookup(host)",
+        },
+        "notes": (
+            "This tracker is the locally reproducible subset of the Piper-style workflow: "
+            "unweighted website probes, response-header fingerprinting, and homepage asset host discovery. "
+            "It does not estimate real traffic weights or use proprietary app download / internal network telemetry."
+        ),
+        "summary": {
+            "tracked_count": 0,
+            "reachable_count": 0,
+            "detected_count": 0,
+            "provider_count": 0,
+            "multi_provider_count": 0,
+            "changed_count": 0,
+        },
+        "tracked_sites": [],
+        "provider_rows": [],
+        "category_rows": [],
+        "recent_changes": [],
+        "history": [],
+        "target_catalog": {},
+    }
+
+
+def normalize_cdn_tracker_cache(raw: Any) -> dict[str, Any]:
+    baseline = default_cdn_tracker_cache()
+    source = raw if isinstance(raw, dict) else {}
+    source_info = source.get("source") if isinstance(source.get("source"), dict) else {}
+    summary = source.get("summary") if isinstance(source.get("summary"), dict) else {}
+    return {
+        **baseline,
+        "updated_at": str(source.get("updated_at") or "").strip(),
+        "source": {
+            "name": str(source_info.get("name") or baseline["source"]["name"]).strip(),
+            "url": str(source_info.get("url") or baseline["source"]["url"]).strip(),
+            "endpoint": str(source_info.get("endpoint") or baseline["source"]["endpoint"]).strip(),
+        },
+        "notes": str(source.get("notes") or baseline["notes"]).strip(),
+        "summary": {
+            "tracked_count": int(summary.get("tracked_count") or 0),
+            "reachable_count": int(summary.get("reachable_count") or 0),
+            "detected_count": int(summary.get("detected_count") or 0),
+            "provider_count": int(summary.get("provider_count") or 0),
+            "multi_provider_count": int(summary.get("multi_provider_count") or 0),
+            "changed_count": int(summary.get("changed_count") or 0),
+        },
+        "tracked_sites": source.get("tracked_sites") if isinstance(source.get("tracked_sites"), list) else [],
+        "provider_rows": source.get("provider_rows") if isinstance(source.get("provider_rows"), list) else [],
+        "category_rows": source.get("category_rows") if isinstance(source.get("category_rows"), list) else [],
+        "recent_changes": source.get("recent_changes") if isinstance(source.get("recent_changes"), list) else [],
+        "history": source.get("history") if isinstance(source.get("history"), list) else [],
+        "target_catalog": (
+            source.get("target_catalog")
+            if isinstance(source.get("target_catalog"), dict)
+            else {}
+        ),
+    }
+
+
+def load_cdn_tracker_cache() -> dict[str, Any]:
+    CDN_MONITOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not CDN_MONITOR_CACHE_PATH.exists():
+        cache = default_cdn_tracker_cache()
+        save_cdn_tracker_cache(cache)
+        return cache
+    return normalize_cdn_tracker_cache(load_json(CDN_MONITOR_CACHE_PATH))
+
+
+def save_cdn_tracker_cache(cache: dict[str, Any]) -> None:
+    write_json_atomic(CDN_MONITOR_CACHE_PATH, normalize_cdn_tracker_cache(cache))
+
+
+def normalize_cdn_monitor_runtime(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+
+    def normalize_runtime_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if re.fullmatch(r"[?锛焅uFFFD\s]+", text):
+            return ""
+        return text
+
+    return {
+        "status": str(source.get("status") or "idle").strip() or "idle",
+        "started_at": str(source.get("started_at") or "").strip(),
+        "finished_at": str(source.get("finished_at") or "").strip(),
+        "reason": str(source.get("reason") or "").strip(),
+        "message": normalize_runtime_text(source.get("message")),
+        "error": normalize_runtime_text(source.get("error")),
+    }
+
+
+def load_cdn_monitor_runtime() -> dict[str, Any]:
+    CDN_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not CDN_MONITOR_RUNTIME_PATH.exists():
+        runtime = normalize_cdn_monitor_runtime({})
+        save_cdn_monitor_runtime(runtime)
+        return runtime
+    return normalize_cdn_monitor_runtime(load_json(CDN_MONITOR_RUNTIME_PATH))
+
+
+def save_cdn_monitor_runtime(runtime: dict[str, Any]) -> None:
+    write_json_atomic(CDN_MONITOR_RUNTIME_PATH, normalize_cdn_monitor_runtime(runtime))
+
+
+def cdn_tracker_cache_is_stale(cache: dict[str, Any]) -> bool:
+    updated_at = parse_signal_monitor_datetime(cache.get("updated_at"))
+    if updated_at is None:
+        return True
+    return datetime.now() - updated_at >= timedelta(hours=CDN_MONITOR_REFRESH_INTERVAL_HOURS)
+
+
+def cdn_tracker_cache_tracked_count(cache: dict[str, Any]) -> int:
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    tracked_sites = cache.get("tracked_sites") if isinstance(cache.get("tracked_sites"), list) else []
+    return max(int(summary.get("tracked_count") or 0), len(tracked_sites))
+
+
+def cdn_tracker_cache_needs_resample(cache: dict[str, Any]) -> bool:
+    return cdn_tracker_cache_tracked_count(cache) < CDN_MONITOR_TARGET_COUNT
+
+
+def build_cdn_refresh_interval_label(hours: int) -> str:
+    normalized_hours = max(1, int(hours or 0))
+    if normalized_hours % (24 * 7) == 0:
+        weeks = normalized_hours // (24 * 7)
+        return "应用运行时每周自动刷新一次" if weeks == 1 else f"应用运行时每 {weeks} 周自动刷新一次"
+    if normalized_hours % 24 == 0:
+        days = normalized_hours // 24
+        return "应用运行时每天自动刷新一次" if days == 1 else f"应用运行时每 {days} 天自动刷新一次"
+    return f"应用运行时每 {normalized_hours} 小时自动刷新一次"
+
+
+def default_cdn_target_catalog() -> dict[str, Any]:
+    items = []
+    for index, domain in enumerate(CDN_MONITOR_FALLBACK_DOMAINS, start=1):
+        items.append(
+            {
+                "id": f"fallback-{index:03d}",
+                "label": domain,
+                "domain": domain,
+                "rank": index,
+                "bucket": build_cdn_rank_bucket_label(index),
+                "probe_urls": build_cdn_probe_url_candidates(domain),
+            }
+        )
+    return {
+        "updated_at": "",
+        "source_name": "Fallback Domain Seed",
+        "source_url": "",
+        "target_count": len(items),
+        "items": items,
+    }
+
+
+def normalize_cdn_target_catalog(raw: Any) -> dict[str, Any]:
+    baseline = default_cdn_target_catalog()
+    source = raw if isinstance(raw, dict) else {}
+    items: list[dict[str, Any]] = []
+    for item in source.get("items", []) if isinstance(source.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or item.get("label") or "").strip().lower()
+        if not domain:
+            continue
+        try:
+            rank = int(item.get("rank") or len(items) + 1)
+        except (TypeError, ValueError):
+            rank = len(items) + 1
+        items.append(
+            {
+                "id": str(item.get("id") or f"target-{rank:03d}").strip() or f"target-{rank:03d}",
+                "label": str(item.get("label") or domain).strip() or domain,
+                "domain": domain,
+                "rank": rank,
+                "bucket": str(item.get("bucket") or build_cdn_rank_bucket_label(rank)).strip(),
+                "probe_urls": [
+                    str(url or "").strip()
+                    for url in item.get("probe_urls", [])
+                    if str(url or "").strip()
+                ]
+                or build_cdn_probe_url_candidates(domain),
+            }
+        )
+
+    return {
+        "updated_at": str(source.get("updated_at") or "").strip(),
+        "source_name": str(source.get("source_name") or baseline["source_name"]).strip(),
+        "source_url": str(source.get("source_url") or baseline["source_url"]).strip(),
+        "target_count": int(source.get("target_count") or len(items) or baseline["target_count"]),
+        "items": items or baseline["items"],
+    }
+
+
+def load_cdn_target_catalog() -> dict[str, Any]:
+    CDN_MONITOR_TARGETS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not CDN_MONITOR_TARGETS_CACHE_PATH.exists():
+        catalog = default_cdn_target_catalog()
+        write_json_atomic(CDN_MONITOR_TARGETS_CACHE_PATH, catalog)
+        return catalog
+    return normalize_cdn_target_catalog(load_json(CDN_MONITOR_TARGETS_CACHE_PATH))
+
+
+def save_cdn_target_catalog(catalog: dict[str, Any]) -> None:
+    write_json_atomic(CDN_MONITOR_TARGETS_CACHE_PATH, normalize_cdn_target_catalog(catalog))
+
+
+def cdn_target_catalog_is_stale(catalog: dict[str, Any]) -> bool:
+    updated_at = parse_signal_monitor_datetime(catalog.get("updated_at"))
+    if updated_at is None:
+        return True
+    return datetime.now() - updated_at >= timedelta(hours=CDN_MONITOR_TARGET_SOURCE_REFRESH_HOURS)
+
+
+def build_cdn_rank_bucket_label(rank: int) -> str:
+    bucket_start = ((max(rank, 1) - 1) // CDN_MONITOR_BUCKET_SIZE) * CDN_MONITOR_BUCKET_SIZE + 1
+    bucket_end = bucket_start + CDN_MONITOR_BUCKET_SIZE - 1
+    return f"Rank {bucket_start}-{bucket_end}"
+
+
+def build_cdn_probe_url_candidates(domain: str) -> list[str]:
+    normalized = str(domain or "").strip().lower()
+    if not normalized:
+        return []
+    candidates = [f"https://{normalized}/"]
+    if "." in normalized and not normalized.startswith("www."):
+        candidates.append(f"https://www.{normalized}/")
+    return candidates
+
+
+def fetch_tranco_top_targets(limit: int = CDN_MONITOR_TARGET_COUNT) -> dict[str, Any]:
+    response = requests.get(
+        CDN_MONITOR_TARGET_SOURCE_URL,
+        headers=CDN_MONITOR_REQUEST_HEADERS,
+        timeout=40,
+    )
+    response.raise_for_status()
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    csv_name = next(
+        (name for name in archive.namelist() if name.lower().endswith(".csv")),
+        "",
+    )
+    if not csv_name:
+        raise RuntimeError("Tranco top list zip did not contain a CSV file.")
+
+    items: list[dict[str, Any]] = []
+    with archive.open(csv_name, "r") as handle:
+        text_stream = io.TextIOWrapper(handle, encoding="utf-8", errors="ignore", newline="")
+        reader = csv.reader(text_stream)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            try:
+                rank = int(str(row[0]).strip())
+            except (TypeError, ValueError):
+                continue
+            domain = str(row[1] or "").strip().lower()
+            if not domain:
+                continue
+            items.append(
+                {
+                    "id": f"tranco-{rank:04d}",
+                    "label": domain,
+                    "domain": domain,
+                    "rank": rank,
+                    "bucket": build_cdn_rank_bucket_label(rank),
+                    "probe_urls": build_cdn_probe_url_candidates(domain),
+                }
+            )
+            if len(items) >= limit:
+                break
+
+    if len(items) < min(20, limit):
+        raise RuntimeError("Too few domains were parsed from the Tranco list.")
+
+    catalog = {
+        "updated_at": now_iso(),
+        "source_name": "Tranco Top Sites",
+        "source_url": CDN_MONITOR_TARGET_SOURCE_URL,
+        "target_count": len(items),
+        "items": items,
+    }
+    save_cdn_target_catalog(catalog)
+    return catalog
+
+
+def load_cdn_monitor_targets() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    catalog = load_cdn_target_catalog()
+    if (
+        len(catalog.get("items", [])) < CDN_MONITOR_TARGET_COUNT
+        or cdn_target_catalog_is_stale(catalog)
+    ):
+        try:
+            catalog = fetch_tranco_top_targets(CDN_MONITOR_TARGET_COUNT)
+        except Exception:
+            catalog = catalog if catalog.get("items") else default_cdn_target_catalog()
+    items = catalog.get("items", []) if isinstance(catalog.get("items"), list) else []
+    return items[:CDN_MONITOR_TARGET_COUNT], catalog
+
+
+def collect_cdn_asset_hosts(html_text: str, *, base_url: str, limit: int = CDN_MONITOR_MAX_ASSET_HOSTS) -> list[str]:
+    if not html_text:
+        return []
+    parser = CDNAssetHostParser(base_url=base_url, limit=limit)
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:
+        return parser.hosts[:limit]
+    return parser.hosts[:limit]
+
+
+def lookup_cdn_dns_aliases(host: str, dns_cache: dict[str, list[str]]) -> list[str]:
+    normalized_host = str(host or "").strip().lower().rstrip(".")
+    if not normalized_host:
+        return []
+    if normalized_host in dns_cache:
+        return dns_cache[normalized_host]
+
+    aliases: list[str] = []
+    try:
+        result = subprocess.run(
+            ["nslookup", normalized_host],
+            capture_output=True,
+            text=True,
+            timeout=CDN_MONITOR_DNS_TIMEOUT_SECONDS,
+            check=False,
+            errors="ignore",
+        )
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+    except Exception:
+        output = ""
+
+    alias_block = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        lower_line = line.lower()
+        if not line:
+            alias_block = False
+            continue
+        if "canonical name =" in lower_line:
+            candidate = line.split("=", 1)[1].strip().rstrip(".")
+            if candidate:
+                aliases.append(candidate)
+            alias_block = False
+            continue
+        if lower_line.startswith("name:"):
+            candidate = line.split(":", 1)[1].strip().rstrip(".")
+            if candidate and candidate.lower() != normalized_host:
+                aliases.append(candidate)
+            alias_block = False
+            continue
+        if lower_line.startswith("aliases:"):
+            alias_block = True
+            candidate = line.split(":", 1)[1].strip().rstrip(".")
+            if candidate:
+                aliases.append(candidate)
+            continue
+        if alias_block and raw_line[:1] in {" ", "\t"}:
+            aliases.append(line.rstrip("."))
+            continue
+        alias_block = False
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in aliases:
+        candidate = str(item or "").strip().lower().rstrip(".")
+        if not candidate or candidate == normalized_host or candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+
+    dns_cache[normalized_host] = deduped[:4]
+    return dns_cache[normalized_host]
+
+
+def collect_cdn_provider_matches(signals: list[str]) -> list[dict[str, Any]]:
+    prepared = [
+        (str(signal or "").strip(), str(signal or "").strip().lower())
+        for signal in signals
+        if str(signal or "").strip()
+    ]
+    matches: list[dict[str, Any]] = []
+    for rule in CDN_PROVIDER_RULES:
+        evidence: list[str] = []
+        seen_evidence: set[str] = set()
+        for original, lowered in prepared:
+            if any(pattern in lowered for pattern in rule["patterns"]):
+                if original not in seen_evidence:
+                    seen_evidence.add(original)
+                    evidence.append(original)
+        if evidence:
+            matches.append({"provider": rule["provider"], "evidence": evidence[:4]})
+    return matches
+
+
+def build_cdn_probe_signals(
+    *,
+    requested_host: str,
+    final_host: str,
+    dns_aliases: list[str],
+    headers: dict[str, str],
+) -> list[str]:
+    signals: list[str] = []
+    if requested_host:
+        signals.append(f"Requested host: {requested_host}")
+    if final_host and final_host != requested_host:
+        signals.append(f"Final host: {final_host}")
+    for alias in dns_aliases:
+        signals.append(f"DNS alias: {alias}")
+    for key, value in headers.items():
+        if value:
+            signals.append(f"Header {key}: {value}")
+    return signals
+
+
+def provider_meta(provider: str) -> dict[str, str]:
+    return CDN_PROVIDER_META.get(provider, CDN_PROVIDER_META["Unknown"])
+
+
+def normalize_cdn_provider_counts(snapshot: dict[str, Any]) -> dict[str, int]:
+    provider_counts = snapshot.get("provider_counts") if isinstance(snapshot.get("provider_counts"), dict) else {}
+    normalized: dict[str, int] = {}
+    for provider_name, count in provider_counts.items():
+        label = str(provider_name or "").strip() or "Unknown"
+        try:
+            normalized[label] = int(count or 0)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def build_cdn_snapshot_short_label(value: Any) -> str:
+    timestamp = parse_signal_monitor_datetime(value)
+    if timestamp is None:
+        return "n/a"
+    return timestamp.strftime("%m-%d")
+
+
+def normalize_cdn_history_snapshot_scope(
+    snapshot: dict[str, Any],
+    *,
+    default_source_name: str = "Top Sites Seed",
+) -> dict[str, Any]:
+    source_name = str(
+        snapshot.get("target_source_name")
+        or snapshot.get("source_name")
+        or default_source_name
+        or "Top Sites Seed"
+    ).strip() or "Top Sites Seed"
+    try:
+        sample_target_count = int(
+            snapshot.get("sample_target_count")
+            or snapshot.get("target_count")
+            or snapshot.get("tracked_count")
+            or 0
+        )
+    except (TypeError, ValueError):
+        sample_target_count = 0
+    return {
+        "source_name": source_name,
+        "sample_target_count": max(0, sample_target_count),
+    }
+
+
+def build_cdn_history_scope_key(
+    snapshot: dict[str, Any],
+    *,
+    default_source_name: str = "Top Sites Seed",
+) -> str:
+    scope = normalize_cdn_history_snapshot_scope(snapshot, default_source_name=default_source_name)
+    return f"{scope['source_name']}::{scope['sample_target_count']}"
+
+
+def filter_cdn_comparable_history(
+    history: list[dict[str, Any]],
+    *,
+    reference_snapshot: dict[str, Any],
+    default_source_name: str = "Top Sites Seed",
+) -> tuple[list[dict[str, Any]], int]:
+    ordered_history = [
+        item
+        for item in sorted(
+            history,
+            key=lambda entry: str(entry.get("updated_at") or ""),
+        )
+        if isinstance(item, dict) and str(item.get("updated_at") or "").strip()
+    ]
+    reference_key = build_cdn_history_scope_key(reference_snapshot, default_source_name=default_source_name)
+    if not reference_key.strip(":"):
+        return ordered_history, 0
+    comparable_history = [
+        item
+        for item in ordered_history
+        if build_cdn_history_scope_key(item, default_source_name=default_source_name) == reference_key
+    ]
+    hidden_count = max(0, len(ordered_history) - len(comparable_history))
+    return comparable_history, hidden_count
+
+
+def collapse_cdn_history_to_daily_latest(
+    history: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    return collapse_monitor_history_to_daily_latest(history, timestamp_keys=("updated_at",))
+
+
+def collapse_monitor_history_to_daily_latest(
+    items: list[dict[str, Any]],
+    *,
+    timestamp_keys: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], int]:
+    ordered_items = [
+        item
+        for item in sorted(
+            items,
+            key=lambda entry: coerce_sort_timestamp(
+                next(
+                    (
+                        entry.get(key)
+                        for key in timestamp_keys
+                        if isinstance(entry, dict) and str(entry.get(key) or "").strip()
+                    ),
+                    "",
+                )
+            ),
+        )
+        if isinstance(item, dict)
+        and any(str(item.get(key) or "").strip() for key in timestamp_keys)
+    ]
+    latest_by_day: dict[str, dict[str, Any]] = {}
+    for item in ordered_items:
+        raw_timestamp = next((str(item.get(key) or "").strip() for key in timestamp_keys if str(item.get(key) or "").strip()), "")
+        timestamp = parse_signal_monitor_datetime(raw_timestamp)
+        day_key = timestamp.date().isoformat() if timestamp is not None else raw_timestamp[:10]
+        latest_by_day[day_key or raw_timestamp] = item
+    collapsed_items = sorted(
+        latest_by_day.values(),
+        key=lambda entry: coerce_sort_timestamp(
+            next((entry.get(key) for key in timestamp_keys if str(entry.get(key) or "").strip()), "")
+        ),
+    )
+    collapsed_count = max(0, len(ordered_items) - len(collapsed_items))
+    return collapsed_items, collapsed_count
+
+
+def build_monitor_confidence_item(
+    label: str,
+    value: str,
+    *,
+    detail: str = "",
+    tone: str = "neutral",
+) -> dict[str, str]:
+    return {
+        "label": str(label or "").strip(),
+        "value": str(value or "").strip() or "n/a",
+        "detail": str(detail or "").strip(),
+        "tone": str(tone or "neutral").strip() or "neutral",
+    }
+
+
+def build_monitor_signal_item(
+    title: str,
+    summary: str,
+    *,
+    tone: str = "neutral",
+    value: str = "",
+    timestamp_label: str = "",
+) -> dict[str, str]:
+    return {
+        "title": str(title or "").strip() or "Signal",
+        "summary": str(summary or "").strip(),
+        "tone": str(tone or "neutral").strip() or "neutral",
+        "value": str(value or "").strip(),
+        "timestamp_label": str(timestamp_label or "").strip(),
+    }
+
+
+def summarize_cdn_history_row(snapshot: dict[str, Any]) -> dict[str, Any]:
+    provider_counts = normalize_cdn_provider_counts(snapshot)
+    leader_provider = "Unknown"
+    leader_count = 0
+    for provider_name, count in provider_counts.items():
+        normalized_count = int(count or 0)
+        if normalized_count > leader_count:
+            leader_provider = str(provider_name or "Unknown")
+            leader_count = normalized_count
+    return {
+        "updated_at_label": format_iso_timestamp(snapshot.get("updated_at")) if snapshot.get("updated_at") else "尚未抓取",
+        "tracked_count": int(snapshot.get("tracked_count") or 0),
+        "reachable_count": int(snapshot.get("reachable_count") or 0),
+        "multi_provider_count": int(snapshot.get("multi_provider_count") or 0),
+        "leader_label": f"{leader_provider} {leader_count}" if leader_count > 0 else "暂无主导 provider",
+    }
+
+
+def select_cdn_trend_providers(
+    provider_rows: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def append_provider(provider_name: str, *, color: str = "", count: int = 0, share_pct: float = 0.0) -> None:
+        normalized_provider = str(provider_name or "").strip()
+        if not normalized_provider or normalized_provider in seen:
+            return
+        seen.add(normalized_provider)
+        provider_color = color or provider_meta(normalized_provider)["color"]
+        selected.append(
+            {
+                "provider": normalized_provider,
+                "color": provider_color,
+                "count": int(count),
+                "count_label": f"{int(count)} 个",
+                "share_pct": round(float(share_pct), 1),
+                "share_label": f"{float(share_pct):.1f}%",
+            }
+        )
+
+    for row in provider_rows:
+        if not isinstance(row, dict):
+            continue
+        provider_name = str(row.get("provider") or "").strip()
+        if not provider_name or provider_name == "Unknown":
+            continue
+        append_provider(
+            provider_name,
+            color=str(row.get("color") or ""),
+            count=int(row.get("count") or 0),
+            share_pct=float(row.get("share_pct") or 0.0),
+        )
+        if len(selected) >= CDN_MONITOR_HISTORY_PROVIDER_LIMIT:
+            return selected
+
+    history_peak_counts: dict[str, int] = {}
+    latest_history_counts: dict[str, int] = {}
+    latest_tracked_count = 0
+    for snapshot in history:
+        if not isinstance(snapshot, dict):
+            continue
+        latest_tracked_count = max(latest_tracked_count, int(snapshot.get("tracked_count") or 0))
+        for provider_name, count in normalize_cdn_provider_counts(snapshot).items():
+            if provider_name == "Unknown":
+                continue
+            history_peak_counts[provider_name] = max(history_peak_counts.get(provider_name, 0), int(count))
+            latest_history_counts[provider_name] = int(count)
+
+    for provider_name, peak_count in sorted(
+        history_peak_counts.items(),
+        key=lambda item: (-int(item[1]), str(item[0])),
+    ):
+        current_count = int(latest_history_counts.get(provider_name, 0))
+        share_pct = ((current_count / latest_tracked_count) * 100.0) if latest_tracked_count else 0.0
+        append_provider(provider_name, count=current_count, share_pct=share_pct)
+        if len(selected) >= CDN_MONITOR_HISTORY_PROVIDER_LIMIT:
+            return selected
+
+    if selected:
+        return selected
+
+    for row in provider_rows:
+        if not isinstance(row, dict):
+            continue
+        append_provider(
+            str(row.get("provider") or "Unknown"),
+            color=str(row.get("color") or ""),
+            count=int(row.get("count") or 0),
+            share_pct=float(row.get("share_pct") or 0.0),
+        )
+        if len(selected) >= CDN_MONITOR_HISTORY_PROVIDER_LIMIT:
+            break
+    return selected
+
+
+def build_cdn_history_chart_payload(
+    history: list[dict[str, Any]],
+    trend_providers: list[dict[str, Any]],
+    *,
+    chart_key: str,
+    title: str,
+    subtitle: str,
+    metric_kind: str,
+) -> dict[str, Any]:
+    ordered_history = [
+        item
+        for item in sorted(
+            history,
+            key=lambda entry: str(entry.get("updated_at") or ""),
+        )
+        if isinstance(item, dict) and str(item.get("updated_at") or "").strip()
+    ]
+
+    points: list[dict[str, Any]] = []
+    for snapshot in ordered_history:
+        tracked_count = int(snapshot.get("tracked_count") or 0)
+        provider_counts = normalize_cdn_provider_counts(snapshot)
+        series: list[dict[str, Any]] = []
+        for provider in trend_providers:
+            provider_name = str(provider.get("provider") or "Unknown")
+            count = int(provider_counts.get(provider_name, 0))
+            share_pct = ((count / tracked_count) * 100.0) if tracked_count else 0.0
+            if metric_kind == "share_pct":
+                value = round(share_pct, 2)
+                value_label = f"{share_pct:.1f}%"
+                secondary_label = f"{count} 个站点"
+            else:
+                value = float(count)
+                value_label = f"{count} 个"
+                secondary_label = f"{share_pct:.1f}%"
+            series.append(
+                {
+                    "symbol": provider_name,
+                    "label": provider_name,
+                    "color": str(provider.get("color") or provider_meta(provider_name)["color"]),
+                    "value": value,
+                    "value_label": value_label,
+                    "secondary_label": secondary_label,
+                }
+            )
+        points.append(
+            {
+                "label": build_cdn_snapshot_short_label(snapshot.get("updated_at")),
+                "point_label": format_iso_timestamp(snapshot.get("updated_at")) if snapshot.get("updated_at") else "尚未抓取",
+                "point_at": str(snapshot.get("updated_at") or "").strip(),
+                "tracked_count": tracked_count,
+                "reachable_count": int(snapshot.get("reachable_count") or 0),
+                "multi_provider_count": int(snapshot.get("multi_provider_count") or 0),
+                "series": series,
+            }
+        )
+
+    return {
+        "chart_key": chart_key,
+        "title": title,
+        "subtitle": subtitle,
+        "metric_kind": metric_kind,
+        "points": points,
+        "visible_point_limit": 18,
+    }
+
+
+def probe_cdn_target(
+    target: dict[str, Any],
+    *,
+    dns_cache: dict[str, list[str]],
+) -> dict[str, Any]:
+    probe_urls = [
+        str(url or "").strip()
+        for url in target.get("probe_urls", [])
+        if str(url or "").strip()
+    ]
+    if not probe_urls:
+        probe_urls = build_cdn_probe_url_candidates(str(target.get("domain") or "").strip())
+    requested_url = probe_urls[0] if probe_urls else str(target.get("url") or "").strip()
+    requested_host = str(urlparse(requested_url).hostname or "").strip().lower()
+    dns_aliases: list[str] = []
+    response_headers: dict[str, str] = {}
+    final_url = requested_url
+    final_host = requested_host
+    status_code: int | None = None
+    error_message = ""
+    asset_hosts: list[str] = []
+
+    for candidate_url in probe_urls or [requested_url]:
+        candidate_host = str(urlparse(candidate_url).hostname or "").strip().lower()
+        if candidate_host:
+            requested_url = candidate_url
+            requested_host = candidate_host
+            dns_aliases = lookup_cdn_dns_aliases(requested_host, dns_cache)
+        try:
+            response = requests.get(
+                requested_url,
+                headers=CDN_MONITOR_REQUEST_HEADERS,
+                timeout=CDN_MONITOR_REQUEST_TIMEOUT_SECONDS,
+                allow_redirects=True,
+            )
+            final_url = str(response.url or requested_url)
+            final_host = str(urlparse(final_url).hostname or requested_host).strip().lower()
+            status_code = int(response.status_code)
+            response_headers = {
+                key.lower(): str(value).strip()
+                for key, value in response.headers.items()
+                if key.lower()
+                in {
+                    "server",
+                    "via",
+                    "x-cache",
+                    "cf-ray",
+                    "cf-cache-status",
+                    "x-served-by",
+                    "x-fastly-request-id",
+                    "x-amz-cf-id",
+                    "x-amz-cf-pop",
+                    "akamai-grn",
+                    "x-akamai-transformed",
+                    "x-azure-ref",
+                    "x-vercel-id",
+                }
+            }
+            if final_host and final_host != requested_host:
+                dns_aliases = dns_aliases + [
+                    alias
+                    for alias in lookup_cdn_dns_aliases(final_host, dns_cache)
+                    if alias not in dns_aliases
+                ]
+            asset_hosts = collect_cdn_asset_hosts(
+                response.text or "",
+                base_url=final_url,
+                limit=CDN_MONITOR_MAX_ASSET_HOSTS,
+            )
+            error_message = ""
+            break
+        except Exception as exc:
+            error_message = str(exc)
+
+    primary_signals = build_cdn_probe_signals(
+        requested_host=requested_host,
+        final_host=final_host,
+        dns_aliases=dns_aliases,
+        headers=response_headers,
+    )
+    primary_matches = collect_cdn_provider_matches(primary_signals)
+    primary_provider = primary_matches[0]["provider"] if primary_matches else "Unknown"
+    primary_evidence = primary_matches[0]["evidence"] if primary_matches else []
+
+    asset_rows: list[dict[str, Any]] = []
+    observed_providers: list[str] = [primary_provider] if primary_provider != "Unknown" else []
+    for asset_host in asset_hosts[:CDN_MONITOR_MAX_ASSET_HOSTS]:
+        asset_aliases = lookup_cdn_dns_aliases(asset_host, dns_cache)
+        asset_signals = [f"Asset host: {asset_host}", *[f"DNS alias: {alias}" for alias in asset_aliases]]
+        asset_matches = collect_cdn_provider_matches(asset_signals)
+        asset_provider = asset_matches[0]["provider"] if asset_matches else "Unknown"
+        if asset_provider != "Unknown" and asset_provider not in observed_providers:
+            observed_providers.append(asset_provider)
+        asset_rows.append(
+            {
+                "host": asset_host,
+                "provider": asset_provider,
+                "provider_color": provider_meta(asset_provider)["color"],
+                "evidence": asset_matches[0]["evidence"][:2] if asset_matches else [],
+            }
+        )
+
+    known_observed_providers = [item for item in observed_providers if item != "Unknown"]
+    if primary_provider == "Unknown" and len(known_observed_providers) == 1:
+        primary_provider = known_observed_providers[0]
+        confidence = "asset-fallback"
+        primary_evidence = primary_evidence or ["Fallback from homepage asset hosts"]
+    else:
+        confidence = "low"
+        if len(primary_evidence) >= 2:
+            confidence = "high"
+        elif primary_evidence:
+            confidence = "medium"
+
+    ordered_observed = observed_providers[:] if observed_providers else ["Unknown"]
+    if primary_provider != "Unknown" and primary_provider not in ordered_observed:
+        ordered_observed = [primary_provider, *ordered_observed]
+
+    return {
+        "id": str(target.get("id") or "").strip(),
+        "label": str(target.get("label") or "").strip(),
+        "category": str(target.get("category") or target.get("bucket") or "").strip(),
+        "domain": str(target.get("domain") or requested_host).strip(),
+        "rank": int(target.get("rank") or 0),
+        "rank_label": f"#{int(target.get('rank') or 0)}" if int(target.get("rank") or 0) > 0 else "",
+        "url": requested_url,
+        "requested_host": requested_host,
+        "final_url": final_url,
+        "final_host": final_host,
+        "status_code": status_code,
+        "status_label": f"HTTP {status_code}" if status_code else "请求失败",
+        "is_reachable": status_code is not None,
+        "provider": primary_provider,
+        "provider_color": provider_meta(primary_provider)["color"],
+        "provider_tone": provider_meta(primary_provider)["tone"],
+        "provider_confidence": confidence,
+        "provider_evidence": primary_evidence[:3],
+        "observed_providers": ordered_observed,
+        "is_multi_provider": len([item for item in ordered_observed if item != "Unknown"]) > 1,
+        "asset_hosts": asset_rows,
+        "asset_host_count": len(asset_rows),
+        "error": error_message,
+        "checked_at": now_iso(),
+    }
+
+
+def build_cdn_tracker_dataset() -> dict[str, Any]:
+    previous_cache = load_cdn_tracker_cache()
+    previous_sites = {
+        str(site.get("id") or "").strip(): site
+        for site in previous_cache.get("tracked_sites", [])
+        if isinstance(site, dict) and str(site.get("id") or "").strip()
+    }
+    targets, target_catalog = load_cdn_monitor_targets()
+    dns_cache: dict[str, list[str]] = {}
+    tracked_sites: list[dict[str, Any]] = []
+    max_workers = min(CDN_MONITOR_MAX_WORKERS, max(4, len(targets)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(probe_cdn_target, target, dns_cache=dns_cache) for target in targets]
+        for future in as_completed(futures):
+            tracked_sites.append(future.result())
+    tracked_sites.sort(
+        key=lambda item: (
+            int(item.get("rank") or 0) <= 0,
+            int(item.get("rank") or 0),
+            str(item.get("label") or "").lower(),
+        )
+    )
+
+    tracked_count = len(tracked_sites)
+    reachable_count = sum(1 for site in tracked_sites if bool(site.get("is_reachable")))
+    detected_count = sum(1 for site in tracked_sites if str(site.get("provider") or "Unknown") != "Unknown")
+    multi_provider_count = sum(1 for site in tracked_sites if bool(site.get("is_multi_provider")))
+
+    provider_counter = Counter(str(site.get("provider") or "Unknown") for site in tracked_sites)
+    provider_rows: list[dict[str, Any]] = []
+    for provider_name, count in sorted(
+        provider_counter.items(),
+        key=lambda item: (item[0] == "Unknown", -int(item[1]), str(item[0])),
+    ):
+        share_pct = ((int(count) / tracked_count) * 100.0) if tracked_count else 0.0
+        provider_rows.append(
+            {
+                "provider": provider_name,
+                "count": int(count),
+                "share_pct": round(share_pct, 1),
+                "share_label": f"{share_pct:.1f}%",
+                "color": provider_meta(provider_name)["color"],
+                "site_labels": [site["label"] for site in tracked_sites if site.get("provider") == provider_name][:5],
+            }
+        )
+
+    category_rows: list[dict[str, Any]] = []
+    categories = sorted(
+        {str(site.get("category") or "") for site in tracked_sites},
+        key=lambda item: int(re.search(r"(\d+)", item).group(1)) if re.search(r"(\d+)", item) else 9999,
+    )
+    for category in categories:
+        category_sites = [site for site in tracked_sites if str(site.get("category") or "") == category]
+        category_counter = Counter(str(site.get("provider") or "Unknown") for site in category_sites)
+        top_providers: list[dict[str, Any]] = []
+        provider_breakdown: list[dict[str, Any]] = []
+        sorted_provider_items = sorted(
+            category_counter.items(),
+            key=lambda item: (item[0] == "Unknown", -int(item[1]), str(item[0])),
+        )
+        for provider_name, count in sorted_provider_items:
+            share_pct = ((int(count) / len(category_sites)) * 100.0) if category_sites else 0.0
+            payload = {
+                "provider": provider_name,
+                "count": int(count),
+                "share_label": f"{share_pct:.0f}%",
+                "color": provider_meta(provider_name)["color"],
+            }
+            provider_breakdown.append(payload)
+            if len(top_providers) < 3:
+                top_providers.append(payload)
+        category_rows.append(
+            {
+                "category": category,
+                "tracked_count": len(category_sites),
+                "reachable_count": sum(1 for site in category_sites if bool(site.get("is_reachable"))),
+                "multi_provider_count": sum(1 for site in category_sites if bool(site.get("is_multi_provider"))),
+                "top_providers": top_providers,
+                "providers": provider_breakdown,
+            }
+        )
+
+    recent_changes: list[dict[str, Any]] = []
+    for site in tracked_sites:
+        previous = previous_sites.get(str(site.get("id") or ""))
+        if not previous:
+            continue
+        previous_provider = str(previous.get("provider") or "Unknown")
+        current_provider = str(site.get("provider") or "Unknown")
+        previous_observed = list(previous.get("observed_providers") or [])
+        current_observed = list(site.get("observed_providers") or [])
+        if previous_provider != current_provider:
+            recent_changes.append(
+                {
+                    "label": site["label"],
+                    "category": site["category"],
+                    "summary": f"{previous_provider} -> {current_provider}",
+                }
+            )
+        elif previous_observed != current_observed:
+            recent_changes.append(
+                {
+                    "label": site["label"],
+                    "category": site["category"],
+                    "summary": (
+                        "Observed providers: "
+                        f"{', '.join(previous_observed or ['Unknown'])} -> {', '.join(current_observed or ['Unknown'])}"
+                    ),
+                }
+            )
+        elif bool(previous.get("is_reachable")) != bool(site.get("is_reachable")):
+            recent_changes.append(
+                {
+                    "label": site["label"],
+                    "category": site["category"],
+                    "summary": "Reachability changed",
+                }
+            )
+
+    summary_snapshot = {
+        "updated_at": now_iso(),
+        "tracked_count": tracked_count,
+        "sample_target_count": int(target_catalog.get("target_count") or tracked_count),
+        "target_source_name": str(target_catalog.get("source_name") or "Top Sites Seed"),
+        "reachable_count": reachable_count,
+        "multi_provider_count": multi_provider_count,
+        "provider_counts": dict(provider_counter),
+    }
+    history = [
+        item
+        for item in previous_cache.get("history", [])
+        if isinstance(item, dict) and str(item.get("updated_at") or "").strip()
+    ]
+    history.append(summary_snapshot)
+    deduped_history: list[dict[str, Any]] = []
+    seen_history_keys: set[str] = set()
+    for item in sorted(history, key=lambda entry: str(entry.get("updated_at") or "")):
+        key = str(item.get("updated_at") or "")
+        if not key or key in seen_history_keys:
+            continue
+        seen_history_keys.add(key)
+        deduped_history.append(item)
+
+    return {
+        "updated_at": summary_snapshot["updated_at"],
+        "source": {
+            "name": "Local HTTP + DNS Probe",
+            "url": str(target_catalog.get("source_url") or ""),
+            "endpoint": "top sites seed + requests.get(url) + homepage asset host scan + nslookup(host)",
+        },
+        "notes": (
+            "Current MVP mirrors the reproducible part of the Piper workflow: "
+            "current top-site seed, primary website probe, provider fingerprinting from headers / DNS aliases, "
+            "and homepage asset host discovery to surface multi-provider hints."
+        ),
+        "summary": {
+            "tracked_count": tracked_count,
+            "reachable_count": reachable_count,
+            "detected_count": detected_count,
+            "provider_count": len([row for row in provider_rows if row["provider"] != "Unknown"]),
+            "multi_provider_count": multi_provider_count,
+            "changed_count": len(recent_changes),
+        },
+        "tracked_sites": tracked_sites,
+        "provider_rows": provider_rows,
+        "category_rows": category_rows,
+        "recent_changes": recent_changes[:10],
+        "history": deduped_history[-CDN_MONITOR_HISTORY_LIMIT:],
+        "target_catalog": {
+            "source_name": str(target_catalog.get("source_name") or ""),
+            "source_url": str(target_catalog.get("source_url") or ""),
+            "updated_at": str(target_catalog.get("updated_at") or ""),
+            "target_count": int(target_catalog.get("target_count") or tracked_count),
+        },
+    }
+
+
+def run_cdn_tracker_refresh(reason: str, started_at: str | None = None) -> None:
+    global CDN_MONITOR_ACTIVE_THREAD
+
+    runtime = {
+        "status": "running",
+        "started_at": started_at or now_iso(),
+        "finished_at": "",
+        "reason": reason,
+        "message": "正在抓取公开网站样本并识别其边缘 / CDN provider。",
+        "error": "",
+    }
+    save_cdn_monitor_runtime(runtime)
+    try:
+        dataset = build_cdn_tracker_dataset()
+        save_cdn_tracker_cache(dataset)
+        runtime = {
+            "status": "completed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "CDN 追踪已刷新，站点探测和 provider 分布已同步更新。",
+            "error": "",
+        }
+    except Exception as exc:
+        runtime = {
+            "status": "failed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "",
+            "error": str(exc),
+        }
+    finally:
+        save_cdn_monitor_runtime(runtime)
+        with CDN_MONITOR_LOCK:
+            CDN_MONITOR_ACTIVE_THREAD = None
+
+
+def sync_cdn_monitor_runtime() -> dict[str, Any]:
+    runtime = load_cdn_monitor_runtime()
+    if runtime["status"] != "running":
+        return runtime
+
+    active_thread = CDN_MONITOR_ACTIVE_THREAD
+    if active_thread is not None and active_thread.is_alive():
+        return runtime
+
+    runtime["status"] = "failed"
+    runtime["finished_at"] = runtime["finished_at"] or now_iso()
+    runtime["error"] = runtime["error"] or "CDN 刷新线程已经结束，但没有留下完整结果。"
+    save_cdn_monitor_runtime(runtime)
+    return runtime
+
+
+def start_cdn_tracker_refresh(reason: str) -> dict[str, Any]:
+    global CDN_MONITOR_ACTIVE_THREAD
+
+    with CDN_MONITOR_LOCK:
+        runtime = sync_cdn_monitor_runtime()
+        if runtime["status"] == "running":
+            return runtime
+
+        started_at = now_iso()
+        runtime = {
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": "",
+            "reason": reason,
+            "message": "正在抓取公开网站样本并识别其边缘 / CDN provider。",
+            "error": "",
+        }
+        save_cdn_monitor_runtime(runtime)
+
+        worker = threading.Thread(
+            target=run_cdn_tracker_refresh,
+            args=(reason, started_at),
+            daemon=True,
+            name="cdn-monitor-refresh",
+        )
+        CDN_MONITOR_ACTIVE_THREAD = worker
+        worker.start()
+        return runtime
+
+
+def maybe_start_cdn_monitor_scheduler() -> None:
+    global CDN_MONITOR_SCHEDULER_STARTED, CDN_MONITOR_SCHEDULER_THREAD
+
+    with CDN_MONITOR_LOCK:
+        if CDN_MONITOR_SCHEDULER_STARTED:
+            return
+
+        def scheduler_loop() -> None:
+            while True:
+                try:
+                    cache = load_cdn_tracker_cache()
+                    runtime = sync_cdn_monitor_runtime()
+                    if runtime["status"] != "running" and cdn_tracker_cache_is_stale(cache):
+                        start_cdn_tracker_refresh("scheduler")
+                except Exception:
+                    pass
+                time.sleep(max(180, CDN_MONITOR_SCHEDULER_SLEEP_SECONDS))
+
+        worker = threading.Thread(
+            target=scheduler_loop,
+            daemon=True,
+            name="cdn-monitor-scheduler",
+        )
+        CDN_MONITOR_SCHEDULER_THREAD = worker
+        CDN_MONITOR_SCHEDULER_STARTED = True
+        worker.start()
+
+
+def ensure_cdn_tracker_cache_ready() -> tuple[dict[str, Any], dict[str, Any]]:
+    maybe_start_cdn_monitor_scheduler()
+    cache = load_cdn_tracker_cache()
+    runtime = sync_cdn_monitor_runtime()
+    if not cache.get("updated_at") and runtime["status"] != "running":
+        run_cdn_tracker_refresh("bootstrap")
+        cache = load_cdn_tracker_cache()
+        runtime = sync_cdn_monitor_runtime()
+    elif runtime["status"] != "running":
+        if cdn_tracker_cache_needs_resample(cache):
+            runtime = start_cdn_tracker_refresh("resample_auto")
+        elif cdn_tracker_cache_is_stale(cache):
+            runtime = start_cdn_tracker_refresh("stale_auto")
+    return cache, runtime
+
+
+def build_cdn_site_view_rows(tracked_sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sites: list[dict[str, Any]] = []
+    for site in tracked_sites:
+        if not isinstance(site, dict):
+            continue
+        observed = [str(item or "").strip() for item in site.get("observed_providers", []) if str(item or "").strip()]
+        observed = observed or ["Unknown"]
+        observed_provider_badges = [
+            {
+                "label": provider_name,
+                "color": provider_meta(provider_name)["color"],
+            }
+            for provider_name in observed
+        ]
+        raw_asset_hosts = site.get("asset_hosts") if isinstance(site.get("asset_hosts"), list) else []
+        asset_hosts_preview = [
+            {
+                **asset,
+                "provider_color": provider_meta(str(asset.get("provider") or "Unknown"))["color"],
+            }
+            for asset in raw_asset_hosts[:4]
+            if isinstance(asset, dict)
+        ]
+        asset_host_count = int(site.get("asset_host_count") or len(raw_asset_hosts) or len(asset_hosts_preview))
+        asset_host_names = [
+            str(asset.get("host") or "").strip()
+            for asset in asset_hosts_preview[:2]
+            if str(asset.get("host") or "").strip()
+        ]
+        provider_evidence = [
+            str(item or "").strip()
+            for item in (site.get("provider_evidence") if isinstance(site.get("provider_evidence"), list) else [])
+            if str(item or "").strip()
+        ]
+        provider_evidence_preview = summarize_text_block(" 路 ".join(provider_evidence), limit=96) if provider_evidence else ""
+        error_label = str(site.get("error") or "").strip()
+
+        compact_summary = ""
+        if error_label:
+            compact_summary = summarize_text_block(error_label, limit=110)
+        elif asset_host_count > 0:
+            compact_summary = f"资源域名 {asset_host_count} 个"
+            if asset_host_names:
+                compact_summary = f"{compact_summary} 路 {' 路 '.join(asset_host_names)}"
+            compact_summary = summarize_text_block(compact_summary, limit=110)
+        elif bool(site.get("is_multi_provider")):
+            compact_summary = "检测到 multi-provider 线索"
+        elif provider_evidence_preview:
+            compact_summary = provider_evidence_preview
+
+        row_meta_badges = [str(site.get("status_label") or "").strip()]
+        category_label = str(site.get("category") or "").strip()
+        if category_label:
+            row_meta_badges.append(category_label)
+        if bool(site.get("is_multi_provider")):
+            row_meta_badges.append("multi")
+
+        sites.append(
+            {
+                **site,
+                "provider_color": provider_meta(str(site.get("provider") or "Unknown"))["color"],
+                "rank_label": str(site.get("rank_label") or "").strip(),
+                "observed_provider_badges": observed_provider_badges,
+                "observed_provider_badges_compact": observed_provider_badges[:2],
+                "observed_provider_extra_count": max(0, len(observed_provider_badges) - 2),
+                "asset_hosts_preview": asset_hosts_preview,
+                "asset_host_names_compact": asset_host_names,
+                "asset_host_count_label": f"{asset_host_count} 个资源域名" if asset_host_count > 0 else "",
+                "provider_evidence_preview": provider_evidence_preview,
+                "row_meta_badges": [item for item in row_meta_badges if item],
+                "entry_host_label": str(site.get("final_host") or site.get("requested_host") or "").strip(),
+                "compact_summary": compact_summary,
+                "error_label": error_label,
+            }
+        )
+    return sites
+
+
+def build_cdn_monitor_analysis(
+    *,
+    summary: dict[str, Any],
+    tracked_sites: list[dict[str, Any]],
+    provider_rows: list[dict[str, Any]],
+    category_rows: list[dict[str, Any]],
+    recent_changes: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    target_catalog: dict[str, Any],
+    cache_updated_at: Any,
+) -> dict[str, Any]:
+    current_sample_target_count = int(target_catalog.get("target_count") or summary.get("tracked_count") or len(tracked_sites) or 0)
+    current_history_reference = {
+        "target_source_name": str(target_catalog.get("source_name") or "Top Sites Seed"),
+        "sample_target_count": current_sample_target_count,
+        "tracked_count": int(summary.get("tracked_count") or len(tracked_sites) or 0),
+    }
+    comparable_history, hidden_history_snapshot_count = filter_cdn_comparable_history(
+        history,
+        reference_snapshot=current_history_reference,
+        default_source_name=str(target_catalog.get("source_name") or "Top Sites Seed"),
+    )
+    daily_comparable_history, collapsed_same_day_snapshot_count = collapse_cdn_history_to_daily_latest(comparable_history)
+    trend_providers = select_cdn_trend_providers(provider_rows, daily_comparable_history)
+    history_snapshot_count = len(
+        [
+            item
+            for item in history
+            if isinstance(item, dict) and str(item.get("updated_at") or "").strip()
+        ]
+    )
+    share_trend_chart = build_cdn_history_chart_payload(
+        daily_comparable_history,
+        trend_providers,
+        chart_key="provider-share",
+        title="Provider Share Through Time",
+        subtitle=(
+            "Selected leaders across comparable snapshots only. "
+            "This remains a website-level tracker rather than traffic-weighted share."
+        ),
+        metric_kind="share_pct",
+    )
+    count_trend_chart = build_cdn_history_chart_payload(
+        daily_comparable_history,
+        trend_providers,
+        chart_key="provider-count",
+        title="Provider Count Through Time",
+        subtitle="Absolute site counts across equal-scope snapshots so sample-size expansions do not fake momentum.",
+        metric_kind="count",
+    )
+
+    latest_snapshot = daily_comparable_history[-1] if daily_comparable_history else {}
+    previous_snapshot = daily_comparable_history[-2] if len(daily_comparable_history) > 1 else {}
+    history_span_label = ""
+    if daily_comparable_history:
+        history_span_label = (
+            f"{format_monitor_date_label(daily_comparable_history[0].get('updated_at'))} to "
+            f"{format_monitor_date_label(daily_comparable_history[-1].get('updated_at'))}"
+        )
+
+    highlight_cards: list[dict[str, str]] = []
+    signal_items: list[dict[str, str]] = []
+
+    leading_provider_row = provider_rows[0] if provider_rows and isinstance(provider_rows[0], dict) else {}
+    leading_provider_name = str(leading_provider_row.get("provider") or "Unknown").strip() or "Unknown"
+    leading_provider_share = str(leading_provider_row.get("share_label") or "").strip() or "n/a"
+    highlight_cards.append(
+        build_monitor_signal_item(
+            "Lead Provider",
+            f"{leading_provider_name} currently leads the tracked site sample.",
+            value=f"{leading_provider_name} {leading_provider_share}",
+            tone="neutral",
+        )
+    )
+
+    if previous_snapshot and latest_snapshot:
+        provider_candidates = {
+            *normalize_cdn_provider_counts(previous_snapshot).keys(),
+            *normalize_cdn_provider_counts(latest_snapshot).keys(),
+        }
+        biggest_provider = ""
+        biggest_diff = 0.0
+        latest_tracked_total = max(1, int(latest_snapshot.get("tracked_count") or 0))
+        previous_tracked_total = max(1, int(previous_snapshot.get("tracked_count") or 0))
+        for provider_name in provider_candidates:
+            if provider_name == "Unknown":
+                continue
+            latest_share = (int(normalize_cdn_provider_counts(latest_snapshot).get(provider_name, 0)) / latest_tracked_total) * 100.0
+            previous_share = (int(normalize_cdn_provider_counts(previous_snapshot).get(provider_name, 0)) / previous_tracked_total) * 100.0
+            diff = latest_share - previous_share
+            if abs(diff) > abs(biggest_diff):
+                biggest_diff = diff
+                biggest_provider = provider_name
+        if biggest_provider:
+            highlight_cards.append(
+                build_monitor_signal_item(
+                    "Biggest Share Move",
+                    f"{biggest_provider} had the largest comparable-share move versus the prior daily snapshot.",
+                    value=f"{biggest_provider} {format_signed_pp(biggest_diff)}",
+                    tone="warning" if abs(biggest_diff) >= 1.0 else "neutral",
+                )
+            )
+        multi_delta = int(latest_snapshot.get("multi_provider_count") or 0) - int(previous_snapshot.get("multi_provider_count") or 0)
+        highlight_cards.append(
+            build_monitor_signal_item(
+                "Mixed Front Doors",
+                "Sites showing multiple edge-provider hints versus the prior comparable day.",
+                value=f"{int(latest_snapshot.get('multi_provider_count') or 0)} ({multi_delta:+d})",
+                tone="warning" if multi_delta > 0 else "positive" if multi_delta < 0 else "neutral",
+            )
+        )
+
+        previous_lead = ""
+        previous_lead_count = -1
+        for provider_name, count in normalize_cdn_provider_counts(previous_snapshot).items():
+            if int(count) > previous_lead_count:
+                previous_lead = str(provider_name or "Unknown")
+                previous_lead_count = int(count)
+        if previous_lead and previous_lead != leading_provider_name:
+            signal_items.append(
+                build_monitor_signal_item(
+                    "Leader Changed",
+                    f"The visible lead shifted from {previous_lead} to {leading_provider_name}.",
+                    tone="warning",
+                    timestamp_label=format_monitor_date_label(latest_snapshot.get("updated_at")),
+                )
+            )
+        elif biggest_provider and abs(biggest_diff) >= 0.5:
+            signal_items.append(
+                build_monitor_signal_item(
+                    "Share Rotation",
+                    f"{biggest_provider} moved {format_signed_pp(biggest_diff)} versus the prior comparable day.",
+                    tone="warning" if abs(biggest_diff) >= 1.0 else "neutral",
+                    timestamp_label=format_monitor_date_label(latest_snapshot.get("updated_at")),
+                )
+            )
+
+    if not previous_snapshot:
+        highlight_cards.append(
+            build_monitor_signal_item(
+                "History Footing",
+                "Comparable daily history is still building out for this tracker.",
+                value=f"{len(daily_comparable_history)} daily points",
+                tone="neutral",
+            )
+        )
+
+    for change in recent_changes[:4]:
+        if not isinstance(change, dict):
+            continue
+        signal_items.append(
+            build_monitor_signal_item(
+                str(change.get("label") or "Recent Change"),
+                str(change.get("summary") or "").strip(),
+                tone="warning",
+            )
+        )
+
+    confidence_items = [
+        build_monitor_confidence_item(
+            "Daily comparable history",
+            str(len(daily_comparable_history)),
+            detail=history_span_label or "Daily snapshots appear after each successful crawl.",
+            tone="positive" if len(daily_comparable_history) >= 7 else "neutral",
+        ),
+        build_monitor_confidence_item(
+            "Sample scope",
+            f"{str(target_catalog.get('source_name') or 'Top Sites Seed')} / top {current_sample_target_count}",
+            detail="Trend charts only compare equal-scope snapshots.",
+            tone="neutral",
+        ),
+        build_monitor_confidence_item(
+            "Ignored sample jumps",
+            str(hidden_history_snapshot_count),
+            detail="Snapshots with different sample sizes are excluded from comparable trend views.",
+            tone="warning" if hidden_history_snapshot_count else "positive",
+        ),
+        build_monitor_confidence_item(
+            "Collapsed same-day points",
+            str(collapsed_same_day_snapshot_count),
+            detail="When a day has multiple crawls, the latest one is kept for the timeline.",
+            tone="neutral",
+        ),
+        build_monitor_confidence_item(
+            "Last successful crawl",
+            format_monitor_date_label(cache_updated_at),
+            detail="The page keeps the previous readable snapshot while background refreshes run.",
+            tone="positive",
+        ),
+    ]
+
+    return {
+        "current_sample_target_count": current_sample_target_count,
+        "comparable_history": comparable_history,
+        "daily_comparable_history": daily_comparable_history,
+        "hidden_history_snapshot_count": hidden_history_snapshot_count,
+        "collapsed_same_day_snapshot_count": collapsed_same_day_snapshot_count,
+        "trend_providers": trend_providers,
+        "history_snapshot_count": history_snapshot_count,
+        "share_trend_chart": share_trend_chart,
+        "count_trend_chart": count_trend_chart,
+        "confidence_items": confidence_items,
+        "highlight_cards": highlight_cards[:3],
+        "signal_items": signal_items[:6],
+        "history_span_label": history_span_label,
+    }
+
+
+def build_cdn_data_monitor_context() -> dict[str, Any]:
+    cache, runtime = ensure_cdn_tracker_cache_ready()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    tracked_sites = cache.get("tracked_sites") if isinstance(cache.get("tracked_sites"), list) else []
+    provider_rows = cache.get("provider_rows") if isinstance(cache.get("provider_rows"), list) else []
+    category_rows = cache.get("category_rows") if isinstance(cache.get("category_rows"), list) else []
+    recent_changes = cache.get("recent_changes") if isinstance(cache.get("recent_changes"), list) else []
+    history = cache.get("history") if isinstance(cache.get("history"), list) else []
+    target_catalog = cache.get("target_catalog") if isinstance(cache.get("target_catalog"), dict) else {}
+    analysis = build_cdn_monitor_analysis(
+        summary=summary,
+        tracked_sites=tracked_sites,
+        provider_rows=provider_rows,
+        category_rows=category_rows,
+        recent_changes=recent_changes,
+        history=history,
+        target_catalog=target_catalog,
+        cache_updated_at=cache.get("updated_at"),
+    )
+    daily_comparable_history = analysis["daily_comparable_history"]
+    hidden_history_snapshot_count = int(analysis["hidden_history_snapshot_count"] or 0)
+    collapsed_same_day_snapshot_count = int(analysis["collapsed_same_day_snapshot_count"] or 0)
+    cache_needs_resample = cdn_tracker_cache_needs_resample(cache)
+    cache_is_stale = cdn_tracker_cache_is_stale(cache)
+    cache_refresh_hint = ""
+    if cache_needs_resample:
+        cache_refresh_hint = (
+            f"当前缓存仍是 {cdn_tracker_cache_tracked_count(cache)} 个样本，"
+            f"系统会在后台补抓到 {CDN_MONITOR_TARGET_COUNT} 个。"
+        )
+    elif cache_is_stale:
+        cache_refresh_hint = "当前缓存已偏旧，系统会优先在后台拉新数据，但页面会先保留上一版可读结果。"
+
+    history_rows = [
+        summarize_cdn_history_row(item)
+        for item in history[-6:]
+        if isinstance(item, dict)
+    ]
+    history_rows.reverse()
+
+    distribution_rows = [row for row in provider_rows if isinstance(row, dict)][:CDN_MONITOR_TOP_PROVIDERS_LIMIT]
+    max_distribution_count = max([int(row.get("count") or 0) for row in distribution_rows] or [1])
+    cdn_distribution_bars = [
+        {
+            **row,
+            "height_pct": max(8.0, (float(row.get("count") or 0) / max_distribution_count) * 100.0),
+        }
+        for row in distribution_rows
+    ]
+
+    provider_color_map = {
+        str(row.get("provider") or "Unknown"): str(row.get("color") or provider_meta(str(row.get("provider") or "Unknown"))["color"])
+        for row in provider_rows
+        if isinstance(row, dict)
+    }
+    primary_provider_order = [str(row.get("provider") or "Unknown") for row in provider_rows if isinstance(row, dict)]
+    category_composition_rows: list[dict[str, Any]] = []
+    for row in category_rows:
+        if not isinstance(row, dict):
+            continue
+        bucket_total = max(1, int(row.get("tracked_count") or 0))
+        segments = []
+        for provider_name in primary_provider_order:
+            provider_count = 0
+            for provider_entry in row.get("providers", []) if isinstance(row.get("providers"), list) else []:
+                if str(provider_entry.get("provider") or "") == provider_name:
+                    provider_count = int(provider_entry.get("count") or 0)
+                    break
+            if provider_count <= 0:
+                continue
+            segments.append(
+                {
+                    "provider": provider_name,
+                    "count": provider_count,
+                    "share_label": f"{(provider_count / bucket_total) * 100.0:.0f}%",
+                    "width_pct": (provider_count / bucket_total) * 100.0,
+                    "color": provider_color_map.get(provider_name, provider_meta(provider_name)["color"]),
+                }
+            )
+        category_composition_rows.append(
+            {
+                **row,
+                "segments": segments,
+            }
+        )
+
+    trend_providers = select_cdn_trend_providers(provider_rows, daily_comparable_history)
+    history_snapshot_count = len(
+        [
+            item
+            for item in history
+            if isinstance(item, dict) and str(item.get("updated_at") or "").strip()
+        ]
+    )
+    share_trend_chart = build_cdn_history_chart_payload(
+        daily_comparable_history,
+        trend_providers,
+        chart_key="provider-share",
+        title="Provider Share Through Time",
+        subtitle=(
+            "选当前样本里份额靠前的几家 provider，按每次刷新快照观察网站份额如何移动。"
+            "当前只纳入与现有样本规模一致的可比快照，不做真实流量加权。"
+        ),
+        metric_kind="share_pct",
+    )
+    count_trend_chart = build_cdn_history_chart_payload(
+        daily_comparable_history,
+        trend_providers,
+        chart_key="provider-count",
+        title="Provider Count Through Time",
+        subtitle="只比较同一档样本规模下的绝对站点数，避免从 1000 扩到 2000 时折线被样本扩容直接抬高。",
+        metric_kind="count",
+    )
+
+    trend_providers = analysis["trend_providers"]
+    history_snapshot_count = int(analysis["history_snapshot_count"] or 0)
+    share_trend_chart = analysis["share_trend_chart"]
+    count_trend_chart = analysis["count_trend_chart"]
+
+    return {
+        "cdn_cache": cache,
+        "cdn_runtime": {
+            **runtime,
+            "status_label": monitor_runtime_status_label(runtime["status"]),
+            "status_tone": monitor_runtime_status_tone(runtime["status"]),
+            "is_running": runtime["status"] == "running",
+            "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+            "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+        },
+        "cdn_status_poll_seconds": CDN_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
+        "cdn_is_stale": bool(cache_refresh_hint),
+        "cdn_refresh_hint": cache_refresh_hint,
+        "cdn_last_updated_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "尚未抓取",
+        "cdn_target_count_goal": CDN_MONITOR_TARGET_COUNT,
+        "cdn_tracked_count": int(summary.get("tracked_count") or len(tracked_sites)),
+        "cdn_reachable_count": int(summary.get("reachable_count") or 0),
+        "cdn_detected_count": int(summary.get("detected_count") or 0),
+        "cdn_provider_count": int(summary.get("provider_count") or 0),
+        "cdn_multi_provider_count": int(summary.get("multi_provider_count") or 0),
+        "cdn_changed_count": int(summary.get("changed_count") or len(recent_changes)),
+        "cdn_provider_rows": provider_rows,
+        "cdn_category_rows": category_rows,
+        "cdn_distribution_bars": cdn_distribution_bars,
+        "cdn_category_composition_rows": category_composition_rows,
+        "cdn_recent_changes": recent_changes,
+        "cdn_history_rows": history_rows,
+        "cdn_history_snapshot_count": history_snapshot_count,
+        "cdn_trend_snapshot_count": len(daily_comparable_history),
+        "cdn_hidden_history_snapshot_count": hidden_history_snapshot_count,
+        "cdn_collapsed_same_day_snapshot_count": collapsed_same_day_snapshot_count,
+        "cdn_trend_providers": trend_providers,
+        "cdn_share_trend_chart": share_trend_chart,
+        "cdn_count_trend_chart": count_trend_chart,
+        "cdn_confidence_items": analysis["confidence_items"],
+        "cdn_highlight_cards": analysis["highlight_cards"],
+        "cdn_signal_items": analysis["signal_items"],
+        "cdn_history_span_label": analysis["history_span_label"],
+        "cdn_source_name": str(cache.get("source", {}).get("name") or "Local HTTP + DNS Probe"),
+        "cdn_source_url": str(cache.get("source", {}).get("url") or ""),
+        "cdn_source_endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        "cdn_notes": str(cache.get("notes") or ""),
+        "cdn_target_source_name": str(target_catalog.get("source_name") or "Top Sites Seed"),
+        "cdn_target_source_url": str(target_catalog.get("source_url") or ""),
+        "cdn_target_source_updated_label": (
+            format_iso_timestamp(target_catalog.get("updated_at"))
+            if target_catalog.get("updated_at")
+            else "尚未同步"
+        ),
+        "cdn_method_points": [
+            f"样本当前来自 {str(target_catalog.get('source_name') or 'Top Sites Seed')}，默认取前 {int(target_catalog.get('target_count') or summary.get('tracked_count') or 0)} 个网页。",
+            "主页 GET 请求 + 响应头指纹，识别 Cloudflare / CloudFront / Fastly / Akamai 等公开特征。",
+            "对主页静态资源域名做轻量扫描，补充观察是否存在 multi-provider 痕迹；当前口径仍是 unweighted website tracker。",
+        ],
+        "cdn_auto_refresh_label": build_cdn_refresh_interval_label(CDN_MONITOR_REFRESH_INTERVAL_HOURS),
+    }
+
+
+def applovin_platform_meta(platform_id: str) -> dict[str, Any]:
+    normalized = str(platform_id or "").strip().lower()
+    for item in APPLOVIN_MONITOR_PLATFORMS:
+        if str(item.get("id") or "").strip().lower() == normalized:
+            return dict(item)
+    return dict(APPLOVIN_MONITOR_PLATFORMS[0])
+
+
+def applovin_category_meta(category_id: str) -> dict[str, Any]:
+    normalized = str(category_id or "").strip().lower()
+    for item in APPLOVIN_MONITOR_CATEGORIES:
+        if str(item.get("id") or "").strip().lower() == normalized:
+            return dict(item)
+    return dict(APPLOVIN_MONITOR_CATEGORIES[0])
+
+
+def normalize_applovin_monitor_platform(raw_value: Any, *, fallback: str = "gplay") -> str:
+    candidate = str(raw_value or "").strip().lower()
+    for item in APPLOVIN_MONITOR_PLATFORMS:
+        item_id = str(item.get("id") or "").strip().lower()
+        item_title = str(item.get("title") or "").strip().lower()
+        item_long = str(item.get("title_long") or "").strip().lower()
+        store_label = str(item.get("store_label") or "").strip().lower()
+        if candidate in {item_id, item_title, item_long, store_label}:
+            return str(item.get("id") or fallback)
+    return fallback
+
+
+def normalize_applovin_monitor_category(raw_value: Any, *, fallback: str = "top-ad-mediation-sdks") -> str:
+    candidate = str(raw_value or "").strip().lower()
+    for item in APPLOVIN_MONITOR_CATEGORIES:
+        item_id = str(item.get("id") or "").strip().lower()
+        item_title = str(item.get("title") or "").strip().lower()
+        if candidate in {item_id, item_title, item_title.replace(" ", "-")}:
+            return str(item.get("id") or fallback)
+    return fallback
+
+
+def build_applovin_selection_key(platform_id: str, category_id: str) -> str:
+    return f"{normalize_applovin_monitor_platform(platform_id)}::{normalize_applovin_monitor_category(category_id)}"
+
+
+def build_applovin_monitor_url(platform_id: str, category_id: str) -> str:
+    platform = applovin_platform_meta(platform_id)
+    category = applovin_category_meta(category_id)
+    path_prefix = str(platform.get("path_prefix") or "/sdk-analysis").rstrip("/")
+    return f"{APPLOVIN_MONITOR_BASE_URL}{path_prefix}/{category.get('id')}"
+
+
+def extract_42matters_next_data_payload(html_text: str) -> dict[str, Any]:
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(?P<payload>.+?)</script>',
+        str(html_text or ""),
+        re.DOTALL,
+    )
+    if not match:
+        raise ValueError("42matters __NEXT_DATA__ payload was not found.")
+    return json.loads(match.group("payload"))
+
+
+def is_applovin_sdk_row(name: str, slug: str) -> bool:
+    normalized_name = str(name or "").casefold()
+    normalized_slug = str(slug or "").casefold()
+    return "applovin" in normalized_name or "applovin" in normalized_slug
+
+
+def choose_applovin_primary_row(rows: list[dict[str, Any]], category_id: str) -> dict[str, Any] | None:
+    applovin_rows = [row for row in rows if isinstance(row, dict) and bool(row.get("is_applovin"))]
+    if not applovin_rows:
+        return None
+
+    priorities = [item.casefold() for item in APPLOVIN_MONITOR_PRIMARY_NAME_PRIORITY.get(category_id, [])]
+    for priority_name in priorities:
+        for row in applovin_rows:
+            if str(row.get("name") or "").casefold() == priority_name:
+                return row
+
+    if category_id == "top-ad-mediation-sdks":
+        mediation_row = next(
+            (row for row in applovin_rows if "mediation" in str(row.get("name") or "").casefold()),
+            None,
+        )
+        if mediation_row is not None:
+            return mediation_row
+
+    return applovin_rows[0]
+
+
+def normalize_applovin_sdk_row(raw: Any, *, rank: int) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    name = str(raw.get("name") or "").strip()
+    slug = str(raw.get("slug") or "").strip()
+    if not name and not slug:
+        return None
+
+    total_apps = int(raw.get("and_num_apps_with_sdk") or 0)
+    total_downloads = int(raw.get("and_downloads") or 0)
+    app_share_pct = float(raw.get("and_apps_perc_within_sdk_type") or 0.0)
+    download_share_pct = float(raw.get("and_download_perc_within_sdk_type") or 0.0)
+    website = str(raw.get("website") or "").strip()
+    website_url = urljoin(APPLOVIN_MONITOR_BASE_URL, website) if website else ""
+    is_applovin = is_applovin_sdk_row(name, slug)
+
+    return {
+        "rank": max(1, int(rank or 0)),
+        "rank_label": f"#{max(1, int(rank or 0))}",
+        "slug": slug,
+        "name": name or slug,
+        "website": website,
+        "website_url": website_url,
+        "description": str(raw.get("desc") or "").strip(),
+        "app_share_pct": app_share_pct,
+        "app_share_label": format_percent_label(app_share_pct),
+        "total_apps": total_apps,
+        "total_apps_label": format_compact_number(total_apps),
+        "apps": int(raw.get("and_num_apps_with_sdk_in_applications") or 0),
+        "games": int(raw.get("and_num_apps_with_sdk_in_games") or 0),
+        "download_share_pct": download_share_pct,
+        "download_share_label": format_percent_label(download_share_pct),
+        "total_downloads": total_downloads,
+        "total_downloads_label": format_compact_number(total_downloads),
+        "app_downloads": int(raw.get("and_downloads_applications") or 0),
+        "game_downloads": int(raw.get("and_downloads_games") or 0),
+        "icon": str(raw.get("icon") or "").strip(),
+        "is_applovin": is_applovin,
+    }
+
+
+def summarize_applovin_page_for_history(page: dict[str, Any]) -> dict[str, Any]:
+    primary = page.get("primary_applovin") if isinstance(page.get("primary_applovin"), dict) else {}
+    return {
+        "selection_key": str(page.get("selection_key") or "").strip(),
+        "platform_id": str(page.get("platform_id") or "").strip(),
+        "platform_title": str(page.get("platform_title") or "").strip(),
+        "category_id": str(page.get("category_id") or "").strip(),
+        "category_title": str(page.get("category_title") or "").strip(),
+        "page_title": str(page.get("page_title") or "").strip(),
+        "crawled_at": str(page.get("crawled_at") or "").strip(),
+        "source_updated_at": str(page.get("source_updated_at") or "").strip(),
+        "sdk_count": int(page.get("sdk_count") or 0),
+        "top_sdk_name": str(page.get("top_sdk_name") or "").strip(),
+        "applovin_present": bool(primary),
+        "applovin_match_count": int(page.get("applovin_match_count") or 0),
+        "applovin_primary_name": str(primary.get("name") or "").strip(),
+        "applovin_rank": int(primary.get("rank") or 0),
+        "applovin_app_share_pct": float(primary.get("app_share_pct") or 0.0),
+        "applovin_total_apps": int(primary.get("total_apps") or 0),
+        "applovin_apps": int(primary.get("apps") or 0),
+        "applovin_games": int(primary.get("games") or 0),
+        "applovin_download_share_pct": float(primary.get("download_share_pct") or 0.0),
+        "applovin_total_downloads": int(primary.get("total_downloads") or 0),
+        "applovin_app_downloads": int(primary.get("app_downloads") or 0),
+        "applovin_game_downloads": int(primary.get("game_downloads") or 0),
+    }
+
+
+def build_applovin_change_items(current_page: dict[str, Any], previous_page: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not previous_page:
+        return [
+            {
+                "label": "First Snapshot",
+                "summary": "This selection now has its first stored 42matters snapshot.",
+            }
+        ]
+
+    changes: list[dict[str, Any]] = []
+    current_primary = current_page.get("primary_applovin") if isinstance(current_page.get("primary_applovin"), dict) else {}
+    previous_primary = (
+        previous_page.get("primary_applovin") if isinstance(previous_page.get("primary_applovin"), dict) else {}
+    )
+
+    if current_primary and not previous_primary:
+        changes.append(
+            {
+                "label": "AppLovin Appeared",
+                "summary": f"{current_primary.get('name') or 'AppLovin'} entered this top SDK snapshot.",
+            }
+        )
+    elif previous_primary and not current_primary:
+        changes.append(
+            {
+                "label": "AppLovin Missing",
+                "summary": f"{previous_primary.get('name') or 'AppLovin'} is no longer in the tracked top snapshot.",
+            }
+        )
+    elif current_primary and previous_primary:
+        current_name = str(current_primary.get("name") or "").strip()
+        previous_name = str(previous_primary.get("name") or "").strip()
+        if current_name and previous_name and current_name != previous_name:
+            changes.append(
+                {
+                    "label": "Tracked Entry Changed",
+                    "summary": f"{previous_name} switched to {current_name} as the lead AppLovin row for this category.",
+                }
+            )
+
+        current_rank = int(current_primary.get("rank") or 0)
+        previous_rank = int(previous_primary.get("rank") or 0)
+        if current_rank and previous_rank and current_rank != previous_rank:
+            changes.append(
+                {
+                    "label": "Rank Shift",
+                    "summary": f"{current_name or 'AppLovin'} moved from #{previous_rank} to #{current_rank}.",
+                }
+            )
+
+        app_share_diff = float(current_primary.get("app_share_pct") or 0.0) - float(
+            previous_primary.get("app_share_pct") or 0.0
+        )
+        if abs(app_share_diff) >= 0.05:
+            changes.append(
+                {
+                    "label": "App Share",
+                    "summary": f"App share changed {format_signed_pp(app_share_diff)} to {current_primary.get('app_share_label') or 'n/a'}.",
+                }
+            )
+
+        download_share_diff = float(current_primary.get("download_share_pct") or 0.0) - float(
+            previous_primary.get("download_share_pct") or 0.0
+        )
+        if abs(download_share_diff) >= 0.05:
+            changes.append(
+                {
+                    "label": "Download Share",
+                    "summary": (
+                        f"Download share changed {format_signed_pp(download_share_diff)} "
+                        f"to {current_primary.get('download_share_label') or 'n/a'}."
+                    ),
+                }
+            )
+
+    current_leader = str(current_page.get("top_sdk_name") or "").strip()
+    previous_leader = str(previous_page.get("top_sdk_name") or "").strip()
+    if current_leader and previous_leader and current_leader != previous_leader:
+        changes.append(
+            {
+                "label": "Page Leader",
+                "summary": f"The category leader changed from {previous_leader} to {current_leader}.",
+            }
+        )
+
+    return changes[:4]
+
+
+def trim_applovin_history_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        selection_key = str(item.get("selection_key") or "").strip()
+        if not selection_key:
+            continue
+        grouped[selection_key].append(item)
+
+    trimmed: list[dict[str, Any]] = []
+    for selection_key, group_items in grouped.items():
+        deduped: dict[str, dict[str, Any]] = {}
+        for item in group_items:
+            dedupe_key = f"{selection_key}|{str(item.get('crawled_at') or '').strip()}"
+            deduped[dedupe_key] = item
+        ordered = sorted(
+            deduped.values(),
+            key=lambda item: coerce_sort_timestamp(item.get("crawled_at") or item.get("source_updated_at")),
+        )
+        trimmed.extend(ordered[-APPLOVIN_MONITOR_HISTORY_LIMIT :])
+
+    return trimmed
+
+
+def default_applovin_tracker_cache() -> dict[str, Any]:
+    return {
+        "updated_at": "",
+        "source": {
+            "name": "42matters SDK Analysis",
+            "url": "https://42matters.com/sdk-analysis/top-ad-mediation-sdks",
+            "endpoint": "42matters ranking pages + __NEXT_DATA__ extraction",
+        },
+        "notes": (
+            "Curated 42matters pages for the three AppLovin-critical categories: "
+            "Ad Mediation, Ad Networks, and Attribution."
+        ),
+        "platforms": deepcopy(APPLOVIN_MONITOR_PLATFORMS),
+        "categories": deepcopy(APPLOVIN_MONITOR_CATEGORIES),
+        "summary": {
+            "tracked_page_count": len(APPLOVIN_MONITOR_PLATFORMS) * len(APPLOVIN_MONITOR_CATEGORIES),
+            "available_page_count": 0,
+            "fresh_page_count": 0,
+            "stale_page_count": 0,
+            "applovin_present_page_count": 0,
+            "page_error_count": 0,
+        },
+        "pages": {},
+        "recent_changes": {},
+        "history": [],
+        "page_errors": [],
+    }
+
+
+def normalize_applovin_tracker_cache(raw: Any) -> dict[str, Any]:
+    baseline = default_applovin_tracker_cache()
+    if not isinstance(raw, dict):
+        return baseline
+
+    pages: dict[str, Any] = {}
+    raw_pages = raw.get("pages") if isinstance(raw.get("pages"), dict) else {}
+    for key, value in raw_pages.items():
+        selection_key = str(key or "").strip()
+        if not selection_key or not isinstance(value, dict):
+            continue
+        pages[selection_key] = value
+
+    recent_changes: dict[str, Any] = {}
+    raw_recent_changes = raw.get("recent_changes") if isinstance(raw.get("recent_changes"), dict) else {}
+    for key, value in raw_recent_changes.items():
+        selection_key = str(key or "").strip()
+        if not selection_key or not isinstance(value, list):
+            continue
+        recent_changes[selection_key] = [item for item in value if isinstance(item, dict)]
+
+    history = [item for item in raw.get("history", []) if isinstance(item, dict)]
+    page_errors = [str(item or "").strip() for item in raw.get("page_errors", []) if str(item or "").strip()]
+    summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+
+    return {
+        **baseline,
+        "updated_at": str(raw.get("updated_at") or "").strip(),
+        "source": {
+            **baseline["source"],
+            **(raw.get("source") if isinstance(raw.get("source"), dict) else {}),
+        },
+        "notes": str(raw.get("notes") or baseline["notes"]).strip() or baseline["notes"],
+        "platforms": deepcopy(APPLOVIN_MONITOR_PLATFORMS),
+        "categories": deepcopy(APPLOVIN_MONITOR_CATEGORIES),
+        "summary": {
+            **baseline["summary"],
+            **summary,
+            "tracked_page_count": len(APPLOVIN_MONITOR_PLATFORMS) * len(APPLOVIN_MONITOR_CATEGORIES),
+            "available_page_count": int(summary.get("available_page_count") or len(pages)),
+            "fresh_page_count": int(summary.get("fresh_page_count") or 0),
+            "stale_page_count": int(summary.get("stale_page_count") or 0),
+            "applovin_present_page_count": int(
+                summary.get("applovin_present_page_count")
+                or len(
+                    [
+                        page
+                        for page in pages.values()
+                        if isinstance(page, dict) and int(page.get("applovin_match_count") or 0) > 0
+                    ]
+                )
+            ),
+            "page_error_count": int(summary.get("page_error_count") or len(page_errors)),
+        },
+        "pages": pages,
+        "recent_changes": recent_changes,
+        "history": trim_applovin_history_items(history),
+        "page_errors": page_errors[:20],
+    }
+
+
+def load_applovin_tracker_cache() -> dict[str, Any]:
+    with APPLOVIN_MONITOR_LOCK:
+        if not APPLOVIN_MONITOR_CACHE_PATH.exists():
+            cache = default_applovin_tracker_cache()
+            save_applovin_tracker_cache(cache)
+            return cache
+        return normalize_applovin_tracker_cache(load_json(APPLOVIN_MONITOR_CACHE_PATH))
+
+
+def save_applovin_tracker_cache(cache: dict[str, Any]) -> None:
+    with APPLOVIN_MONITOR_LOCK:
+        write_json_atomic(APPLOVIN_MONITOR_CACHE_PATH, normalize_applovin_tracker_cache(cache))
+
+
+def default_applovin_monitor_runtime() -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "started_at": "",
+        "finished_at": "",
+        "reason": "",
+        "message": "",
+        "error": "",
+    }
+
+
+def normalize_applovin_monitor_runtime(raw: Any) -> dict[str, Any]:
+    baseline = default_applovin_monitor_runtime()
+    if not isinstance(raw, dict):
+        return baseline
+    return {
+        **baseline,
+        "status": str(raw.get("status") or baseline["status"]).strip() or baseline["status"],
+        "started_at": str(raw.get("started_at") or "").strip(),
+        "finished_at": str(raw.get("finished_at") or "").strip(),
+        "reason": str(raw.get("reason") or "").strip(),
+        "message": str(raw.get("message") or "").strip(),
+        "error": str(raw.get("error") or "").strip(),
+    }
+
+
+def load_applovin_monitor_runtime() -> dict[str, Any]:
+    with APPLOVIN_MONITOR_LOCK:
+        if not APPLOVIN_MONITOR_RUNTIME_PATH.exists():
+            runtime = default_applovin_monitor_runtime()
+            save_applovin_monitor_runtime(runtime)
+            return runtime
+        return normalize_applovin_monitor_runtime(load_json(APPLOVIN_MONITOR_RUNTIME_PATH))
+
+
+def save_applovin_monitor_runtime(runtime: dict[str, Any]) -> None:
+    with APPLOVIN_MONITOR_LOCK:
+        write_json_atomic(APPLOVIN_MONITOR_RUNTIME_PATH, normalize_applovin_monitor_runtime(runtime))
+
+
+def applovin_tracker_cache_is_stale(cache: dict[str, Any]) -> bool:
+    updated_at = parse_signal_monitor_datetime(cache.get("updated_at"))
+    if updated_at is None:
+        return True
+    return datetime.now() - updated_at >= timedelta(hours=APPLOVIN_MONITOR_REFRESH_INTERVAL_HOURS)
+
+
+def fetch_applovin_sdk_analysis_page(platform_id: str, category_id: str) -> dict[str, Any]:
+    url = build_applovin_monitor_url(platform_id, category_id)
+    response = requests.get(
+        url,
+        headers=APPLOVIN_MONITOR_REQUEST_HEADERS,
+        timeout=APPLOVIN_MONITOR_REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = extract_42matters_next_data_payload(response.text)
+    page_props = payload.get("props", {}).get("pageProps", {})
+    data = page_props.get("data", {}) if isinstance(page_props, dict) else {}
+    if not isinstance(data, dict):
+        raise ValueError(f"42matters payload was missing data for {url}.")
+
+    platforms = data.get("platforms") if isinstance(data.get("platforms"), dict) else {}
+    active_platform = platforms.get("active") if isinstance(platforms.get("active"), dict) else {}
+    active_category = platforms.get("additionalActive") if isinstance(platforms.get("additionalActive"), dict) else {}
+    page_info = page_props.get("page", {}) if isinstance(page_props.get("page"), dict) else {}
+
+    rows: list[dict[str, Any]] = []
+    for index, sdk in enumerate(data.get("sdks", []) if isinstance(data.get("sdks"), list) else [], start=1):
+        row = normalize_applovin_sdk_row(sdk, rank=index)
+        if row is not None:
+            rows.append(row)
+
+    resolved_platform = applovin_platform_meta(active_platform.get("id") or platform_id)
+    resolved_category = applovin_category_meta(active_category.get("id") or category_id)
+    resolved_category_id = str(resolved_category.get("id") or category_id)
+    primary_applovin = choose_applovin_primary_row(rows, resolved_category_id)
+    applovin_rows = [row for row in rows if bool(row.get("is_applovin"))]
+    crawled_at = now_iso()
+    selection_key = build_applovin_selection_key(
+        str(resolved_platform.get("id") or platform_id),
+        resolved_category_id,
+    )
+
+    return {
+        "selection_key": selection_key,
+        "platform_id": str(resolved_platform.get("id") or platform_id),
+        "platform_title": str(active_platform.get("title") or resolved_platform.get("title") or platform_id),
+        "platform_long_title": str(
+            active_platform.get("titleLong")
+            or resolved_platform.get("title_long")
+            or resolved_platform.get("title")
+            or platform_id
+        ),
+        "category_id": resolved_category_id,
+        "category_title": str(active_category.get("title") or resolved_category.get("title") or category_id),
+        "category_reason": str(resolved_category.get("reason") or "").strip(),
+        "page_title": str(page_info.get("title") or active_category.get("pageTitle") or "").strip(),
+        "source_url": url,
+        "source_updated_at": str(data.get("update_time") or "").strip(),
+        "crawled_at": crawled_at,
+        "sdk_count": len(rows),
+        "top_sdk_name": str(rows[0].get("name") or "").strip() if rows else "",
+        "sdks": rows,
+        "applovin_match_count": len(applovin_rows),
+        "applovin_rows": applovin_rows,
+        "primary_applovin": primary_applovin or {},
+    }
+
+
+def build_applovin_sdk_dataset() -> dict[str, Any]:
+    previous_cache = load_applovin_tracker_cache()
+    previous_pages = previous_cache.get("pages") if isinstance(previous_cache.get("pages"), dict) else {}
+    pages = deepcopy(previous_pages)
+    history = [
+        item
+        for item in (previous_cache.get("history") if isinstance(previous_cache.get("history"), list) else [])
+        if isinstance(item, dict)
+    ]
+    recent_changes = deepcopy(
+        previous_cache.get("recent_changes") if isinstance(previous_cache.get("recent_changes"), dict) else {}
+    )
+    page_errors: list[str] = []
+    fresh_page_count = 0
+
+    tasks = [
+        (str(platform.get("id") or ""), str(category.get("id") or ""))
+        for platform in APPLOVIN_MONITOR_PLATFORMS
+        for category in APPLOVIN_MONITOR_CATEGORIES
+    ]
+
+    with ThreadPoolExecutor(max_workers=APPLOVIN_MONITOR_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_applovin_sdk_analysis_page, platform_id, category_id): (platform_id, category_id)
+            for platform_id, category_id in tasks
+        }
+        for future in as_completed(futures):
+            platform_id, category_id = futures[future]
+            selection_key = build_applovin_selection_key(platform_id, category_id)
+            try:
+                page = future.result()
+            except Exception as exc:
+                page_errors.append(f"{selection_key}: {exc}")
+                continue
+
+            fresh_page_count += 1
+            pages[selection_key] = page
+            previous_page = previous_pages.get(selection_key) if isinstance(previous_pages.get(selection_key), dict) else None
+            recent_changes[selection_key] = build_applovin_change_items(page, previous_page)
+            history.append(summarize_applovin_page_for_history(page))
+
+    if fresh_page_count <= 0:
+        raise RuntimeError("No 42matters AppLovin pages were refreshed.")
+
+    normalized_cache = normalize_applovin_tracker_cache(
+        {
+            **default_applovin_tracker_cache(),
+            "updated_at": now_iso(),
+            "source": {
+                "name": "42matters SDK Analysis",
+                "url": "https://42matters.com/sdk-analysis/top-ad-mediation-sdks",
+                "endpoint": "Curated 42matters ranking pages + __NEXT_DATA__ extraction",
+            },
+            "notes": (
+                "Daily AppLovin tracker across Google Play and the Apple App Store for the three "
+                "highest-signal categories: Ad Mediation, Ad Networks, and Attribution."
+            ),
+            "pages": pages,
+            "recent_changes": recent_changes,
+            "history": history,
+            "page_errors": page_errors,
+        }
+    )
+    page_values = list(normalized_cache.get("pages", {}).values())
+    available_page_count = len(page_values)
+    stale_page_count = max(0, available_page_count - fresh_page_count)
+    applovin_present_page_count = len(
+        [page for page in page_values if isinstance(page, dict) and int(page.get("applovin_match_count") or 0) > 0]
+    )
+    normalized_cache["summary"] = {
+        "tracked_page_count": len(tasks),
+        "available_page_count": available_page_count,
+        "fresh_page_count": fresh_page_count,
+        "stale_page_count": stale_page_count,
+        "applovin_present_page_count": applovin_present_page_count,
+        "page_error_count": len(page_errors),
+    }
+    return normalized_cache
+
+
+def run_applovin_sdk_refresh(reason: str, started_at: str | None = None) -> None:
+    global APPLOVIN_MONITOR_ACTIVE_THREAD
+
+    runtime = {
+        "status": "running",
+        "started_at": started_at or now_iso(),
+        "finished_at": "",
+        "reason": reason,
+        "message": "Refreshing 42matters AppLovin tracker pages.",
+        "error": "",
+    }
+    save_applovin_monitor_runtime(runtime)
+
+    try:
+        dataset = build_applovin_sdk_dataset()
+        save_applovin_tracker_cache(dataset)
+        summary = dataset.get("summary") if isinstance(dataset.get("summary"), dict) else {}
+        message = (
+            f"Refreshed {int(summary.get('fresh_page_count') or 0)} of "
+            f"{int(summary.get('tracked_page_count') or 0)} tracked 42matters pages."
+        )
+        if int(summary.get("stale_page_count") or 0) > 0:
+            message = f"{message} Reused {int(summary.get('stale_page_count') or 0)} cached page(s)."
+        if int(summary.get("page_error_count") or 0) > 0:
+            message = f"{message} {int(summary.get('page_error_count') or 0)} fetch error(s) were kept in the log."
+        runtime = {
+            "status": "completed",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": message,
+            "error": "",
+        }
+    except Exception as exc:
+        runtime = {
+            "status": "error",
+            "started_at": runtime["started_at"],
+            "finished_at": now_iso(),
+            "reason": reason,
+            "message": "42matters AppLovin refresh failed.",
+            "error": str(exc),
+        }
+    finally:
+        save_applovin_monitor_runtime(runtime)
+        with APPLOVIN_MONITOR_LOCK:
+            APPLOVIN_MONITOR_ACTIVE_THREAD = None
+
+
+def sync_applovin_monitor_runtime() -> dict[str, Any]:
+    runtime = load_applovin_monitor_runtime()
+    if runtime["status"] != "running":
+        return runtime
+
+    worker = APPLOVIN_MONITOR_ACTIVE_THREAD
+    if worker is not None and worker.is_alive():
+        return runtime
+
+    runtime["status"] = "completed" if not runtime.get("error") else "error"
+    runtime["finished_at"] = runtime.get("finished_at") or now_iso()
+    save_applovin_monitor_runtime(runtime)
+    return runtime
+
+
+def start_applovin_sdk_refresh(reason: str) -> dict[str, Any]:
+    global APPLOVIN_MONITOR_ACTIVE_THREAD
+
+    with APPLOVIN_MONITOR_LOCK:
+        runtime = sync_applovin_monitor_runtime()
+        if runtime["status"] == "running":
+            return runtime
+
+        started_at = now_iso()
+        runtime = {
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": "",
+            "reason": reason,
+            "message": "Refreshing 42matters AppLovin tracker pages.",
+            "error": "",
+        }
+        save_applovin_monitor_runtime(runtime)
+
+        worker = threading.Thread(
+            target=run_applovin_sdk_refresh,
+            args=(reason, started_at),
+            daemon=True,
+            name="applovin-monitor-refresh",
+        )
+        APPLOVIN_MONITOR_ACTIVE_THREAD = worker
+        worker.start()
+        return runtime
+
+
+def maybe_start_applovin_monitor_scheduler() -> None:
+    global APPLOVIN_MONITOR_SCHEDULER_STARTED, APPLOVIN_MONITOR_SCHEDULER_THREAD
+
+    with APPLOVIN_MONITOR_LOCK:
+        if APPLOVIN_MONITOR_SCHEDULER_STARTED:
+            return
+
+        def scheduler_loop() -> None:
+            while True:
+                try:
+                    cache = load_applovin_tracker_cache()
+                    runtime = sync_applovin_monitor_runtime()
+                    if runtime["status"] != "running" and applovin_tracker_cache_is_stale(cache):
+                        start_applovin_sdk_refresh("scheduler")
+                except Exception:
+                    pass
+                time.sleep(max(120, APPLOVIN_MONITOR_SCHEDULER_SLEEP_SECONDS))
+
+        worker = threading.Thread(
+            target=scheduler_loop,
+            daemon=True,
+            name="applovin-monitor-scheduler",
+        )
+        APPLOVIN_MONITOR_SCHEDULER_THREAD = worker
+        APPLOVIN_MONITOR_SCHEDULER_STARTED = True
+        worker.start()
+
+
+def ensure_applovin_tracker_cache_ready() -> tuple[dict[str, Any], dict[str, Any]]:
+    maybe_start_applovin_monitor_scheduler()
+    cache = load_applovin_tracker_cache()
+    runtime = sync_applovin_monitor_runtime()
+    if not cache.get("updated_at") and runtime["status"] != "running":
+        run_applovin_sdk_refresh("bootstrap")
+        cache = load_applovin_tracker_cache()
+        runtime = sync_applovin_monitor_runtime()
+    elif applovin_tracker_cache_is_stale(cache) and runtime["status"] != "running":
+        runtime = start_applovin_sdk_refresh("stale_auto")
+    return cache, runtime
+
+
+def build_applovin_cross_category_rows(cache: dict[str, Any], platform_id: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    pages = cache.get("pages") if isinstance(cache.get("pages"), dict) else {}
+    for category in APPLOVIN_MONITOR_CATEGORIES:
+        category_id = str(category.get("id") or "")
+        selection_key = build_applovin_selection_key(platform_id, category_id)
+        page = pages.get(selection_key) if isinstance(pages.get(selection_key), dict) else {}
+        primary = page.get("primary_applovin") if isinstance(page.get("primary_applovin"), dict) else {}
+        rows.append(
+            {
+                "selection_key": selection_key,
+                "category_id": category_id,
+                "category_title": str(category.get("title") or category_id),
+                "category_reason": str(category.get("reason") or "").strip(),
+                "detail_url": url_for(
+                    "data_monitor_page",
+                    tab="applovin",
+                    platform=platform_id,
+                    category=category_id,
+                ),
+                "has_applovin": bool(primary),
+                "entry_name": str(primary.get("name") or "").strip() or "Not in top snapshot",
+                "rank_label": str(primary.get("rank_label") or "n/a"),
+                "app_share_label": str(primary.get("app_share_label") or "n/a"),
+                "download_share_label": str(primary.get("download_share_label") or "n/a"),
+                "total_apps_label": str(primary.get("total_apps_label") or "n/a"),
+                "total_downloads_label": str(primary.get("total_downloads_label") or "n/a"),
+                "source_updated_label": format_monitor_date_label(page.get("source_updated_at")),
+            }
+        )
+    return rows
+
+
+def build_applovin_snapshot_short_label(value: Any) -> str:
+    timestamp = parse_signal_monitor_datetime(value)
+    if timestamp is None:
+        return "n/a"
+    return timestamp.strftime("%m-%d")
+
+
+def build_applovin_donut_payload(
+    *,
+    chart_key: str,
+    title: str,
+    subtitle: str,
+    total_label: str,
+    segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_segments: list[dict[str, Any]] = []
+    for item in segments:
+        if not isinstance(item, dict):
+            continue
+        value = max(0.0, float(item.get("value") or 0.0))
+        if value <= 0:
+            continue
+        normalized_segments.append(
+            {
+                "label": str(item.get("label") or "").strip(),
+                "value": value,
+                "value_label": str(item.get("value_label") or "").strip() or format_compact_number(value),
+                "share_pct": float(item.get("share_pct") or 0.0),
+                "share_label": str(item.get("share_label") or "").strip() or format_percent_label(item.get("share_pct") or 0.0),
+                "color": str(item.get("color") or APPLOVIN_MONITOR_METRIC_COLORS["rest"]),
+            }
+        )
+    return {
+        "chart_key": chart_key,
+        "title": title,
+        "subtitle": subtitle,
+        "total_label": total_label,
+        "segments": normalized_segments,
+    }
+
+
+def build_applovin_history_points(
+    selected_page: dict[str, Any],
+    history_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    combined_rows = [item for item in history_rows if isinstance(item, dict)]
+    current_summary = summarize_applovin_page_for_history(selected_page) if selected_page else {}
+    if current_summary:
+        combined_rows.append(current_summary)
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in combined_rows:
+        point_key = str(item.get("crawled_at") or item.get("source_updated_at") or "").strip()
+        if not point_key:
+            continue
+        deduped[point_key] = item
+
+    ordered = sorted(
+        deduped.values(),
+        key=lambda item: coerce_sort_timestamp(item.get("crawled_at") or item.get("source_updated_at")),
+    )
+    daily_points, _ = collapse_monitor_history_to_daily_latest(
+        ordered[-APPLOVIN_MONITOR_HISTORY_LIMIT :],
+        timestamp_keys=("crawled_at", "source_updated_at"),
+    )
+    return daily_points[-APPLOVIN_MONITOR_HISTORY_LIMIT :]
+
+
+def build_applovin_trend_chart_payload(
+    history_points: list[dict[str, Any]],
+    *,
+    chart_key: str,
+    title: str,
+    subtitle: str,
+    metric_kind: str,
+    series_specs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    points: list[dict[str, Any]] = []
+    for snapshot in history_points:
+        series: list[dict[str, Any]] = []
+        for spec in series_specs:
+            key = str(spec.get("key") or "").strip()
+            value = float(snapshot.get(key) or 0.0)
+            if metric_kind == "share_pct":
+                value_label = format_percent_label(value, decimals=2)
+            else:
+                value_label = format_compact_number(value)
+            series.append(
+                {
+                    "symbol": str(spec.get("symbol") or key),
+                    "label": str(spec.get("label") or key),
+                    "color": str(spec.get("color") or APPLOVIN_MONITOR_METRIC_COLORS["rest"]),
+                    "value": value,
+                    "value_label": value_label,
+                    "secondary_label": f"Rank #{int(snapshot.get('applovin_rank') or 0)}"
+                    if int(snapshot.get("applovin_rank") or 0) > 0
+                    else "",
+                }
+            )
+        points.append(
+            {
+                "label": build_applovin_snapshot_short_label(snapshot.get("crawled_at") or snapshot.get("source_updated_at")),
+                "point_label": format_monitor_date_label(snapshot.get("crawled_at") or snapshot.get("source_updated_at")),
+                "point_at": str(snapshot.get("crawled_at") or snapshot.get("source_updated_at") or "").strip(),
+                "tracked_count": int(snapshot.get("sdk_count") or 0),
+                "reachable_count": int(snapshot.get("applovin_total_apps") or 0),
+                "multi_provider_count": int(snapshot.get("applovin_total_downloads") or 0),
+                "series": series,
+            }
+        )
+
+    return {
+        "chart_key": chart_key,
+        "title": title,
+        "subtitle": subtitle,
+        "metric_kind": metric_kind,
+        "points": points,
+        "visible_point_limit": 18,
+    }
+
+
+def build_applovin_selection_analysis(
+    *,
+    cache: dict[str, Any],
+    selected_key: str,
+    selected_page: dict[str, Any],
+) -> dict[str, Any]:
+    raw_history_rows = [
+        item
+        for item in (cache.get("history") if isinstance(cache.get("history"), list) else [])
+        if isinstance(item, dict) and str(item.get("selection_key") or "").strip() == selected_key
+    ]
+    raw_history_rows = sorted(
+        raw_history_rows,
+        key=lambda item: coerce_sort_timestamp(item.get("crawled_at") or item.get("source_updated_at")),
+        reverse=True,
+    )[:APPLOVIN_MONITOR_HISTORY_LIMIT]
+    formatted_history_rows = [
+        {
+            **item,
+            "crawled_at_label": format_monitor_date_label(item.get("crawled_at")),
+            "source_updated_label": format_monitor_date_label(item.get("source_updated_at")),
+            "rank_label": f"#{int(item.get('applovin_rank') or 0)}" if int(item.get("applovin_rank") or 0) > 0 else "n/a",
+            "app_share_label": format_percent_label(item.get("applovin_app_share_pct"), decimals=2)
+            if bool(item.get("applovin_present"))
+            else "n/a",
+            "download_share_label": format_percent_label(item.get("applovin_download_share_pct"), decimals=2)
+            if bool(item.get("applovin_present"))
+            else "n/a",
+        }
+        for item in raw_history_rows
+    ]
+    history_points = build_applovin_history_points(selected_page, raw_history_rows)
+    recent_changes = (
+        cache.get("recent_changes", {}).get(selected_key, [])
+        if isinstance(cache.get("recent_changes"), dict)
+        else []
+    )
+
+    latest_point = history_points[-1] if history_points else {}
+    previous_point = history_points[-2] if len(history_points) > 1 else {}
+    history_span_label = ""
+    if history_points:
+        history_span_label = (
+            f"{format_monitor_date_label(history_points[0].get('point_at'))} to "
+            f"{format_monitor_date_label(history_points[-1].get('point_at'))}"
+        )
+
+    highlight_cards: list[dict[str, str]] = []
+    if latest_point:
+        latest_series = latest_point.get("series") if isinstance(latest_point.get("series"), list) else []
+        latest_app_share = next((item for item in latest_series if str(item.get("symbol") or "") == "app_share"), {})
+        latest_download_share = next((item for item in latest_series if str(item.get("symbol") or "") == "download_share"), {})
+        latest_rank_value = ""
+        if latest_series and str(latest_series[0].get("secondary_label") or "").strip():
+            latest_rank_value = str(latest_series[0].get("secondary_label") or "").strip()
+        highlight_cards.append(
+            build_monitor_signal_item(
+                "Current Standing",
+                "Latest stored AppLovin position inside the selected 42matters page.",
+                value=latest_rank_value or "Top snapshot",
+                tone="neutral",
+            )
+        )
+        if latest_app_share:
+            highlight_cards.append(
+                build_monitor_signal_item(
+                    "App Share",
+                    "Current app-side integration coverage for the selected AppLovin row.",
+                    value=str(latest_app_share.get("value_label") or "n/a"),
+                    tone="neutral",
+                )
+            )
+        if latest_download_share:
+            highlight_cards.append(
+                build_monitor_signal_item(
+                    "Download Share",
+                    "Current download-side coverage for the selected AppLovin row.",
+                    value=str(latest_download_share.get("value_label") or "n/a"),
+                    tone="neutral",
+                )
+            )
+
+    signal_items: list[dict[str, str]] = []
+    if latest_point and previous_point:
+        latest_rank = int(selected_page.get("primary_applovin", {}).get("rank") or 0)
+        previous_rank = int(previous_point.get("series", [{}])[0].get("secondary_label", "").replace("Rank #", "") or 0)
+        if latest_rank and previous_rank and latest_rank != previous_rank:
+            signal_items.append(
+                build_monitor_signal_item(
+                    "Rank Shift",
+                    f"AppLovin moved from #{previous_rank} to #{latest_rank} in the latest stored daily snapshot.",
+                    tone="warning",
+                    timestamp_label=format_monitor_date_label(latest_point.get("point_at")),
+                )
+            )
+
+        latest_series_by_symbol = {
+            str(item.get("symbol") or ""): item
+            for item in latest_point.get("series", [])
+            if isinstance(item, dict)
+        }
+        previous_series_by_symbol = {
+            str(item.get("symbol") or ""): item
+            for item in previous_point.get("series", [])
+            if isinstance(item, dict)
+        }
+        for symbol, title in [("app_share", "App Share Move"), ("download_share", "Download Share Move")]:
+            latest_item = latest_series_by_symbol.get(symbol, {})
+            previous_item = previous_series_by_symbol.get(symbol, {})
+            diff = float(latest_item.get("value") or 0.0) - float(previous_item.get("value") or 0.0)
+            if abs(diff) >= 0.1:
+                signal_items.append(
+                    build_monitor_signal_item(
+                        title,
+                        f"{str(latest_item.get('label') or title)} changed {format_signed_pp(diff)} versus the prior day.",
+                        tone="warning" if abs(diff) >= 0.5 else "neutral",
+                        timestamp_label=format_monitor_date_label(latest_point.get("point_at")),
+                    )
+                )
+
+    for change in recent_changes[:4]:
+        if not isinstance(change, dict):
+            continue
+        signal_items.append(
+            build_monitor_signal_item(
+                str(change.get("label") or "Recent Change"),
+                str(change.get("summary") or "").strip(),
+                tone="warning",
+            )
+        )
+
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    confidence_items = [
+        build_monitor_confidence_item(
+            "Daily stored points",
+            str(len(history_points)),
+            detail=history_span_label or "Daily AppLovin points appear as the crawler stores comparable snapshots.",
+            tone="positive" if len(history_points) >= 7 else "neutral",
+        ),
+        build_monitor_confidence_item(
+            "Tracked pages",
+            f"{int(summary.get('available_page_count') or 0)} / {int(summary.get('tracked_page_count') or 0)}",
+            detail="Both Google Play and App Store pages are crawled across the three selected categories.",
+            tone="positive" if int(summary.get("available_page_count") or 0) >= int(summary.get("tracked_page_count") or 0) else "warning",
+        ),
+        build_monitor_confidence_item(
+            "Fresh pages in last crawl",
+            str(int(summary.get("fresh_page_count") or 0)),
+            detail="Pages that were re-fetched instead of reusing older cache entries.",
+            tone="positive" if int(summary.get("fresh_page_count") or 0) else "warning",
+        ),
+        build_monitor_confidence_item(
+            "Fetch errors",
+            str(int(summary.get("page_error_count") or 0)),
+            detail="Errors stay visible so a stale page does not silently look current.",
+            tone="warning" if int(summary.get("page_error_count") or 0) else "positive",
+        ),
+        build_monitor_confidence_item(
+            "Last crawler run",
+            format_monitor_date_label(cache.get("updated_at")),
+            detail="Timeline points use the latest stored AppLovin row for each day.",
+            tone="positive",
+        ),
+    ]
+
+    return {
+        "history_rows": raw_history_rows,
+        "formatted_history_rows": formatted_history_rows,
+        "history_points": history_points,
+        "recent_changes": recent_changes,
+        "confidence_items": confidence_items,
+        "highlight_cards": highlight_cards[:3],
+        "signal_items": signal_items[:6],
+        "history_span_label": history_span_label,
+    }
+
+
+def build_applovin_data_monitor_context(
+    *,
+    platform_id: str | None = None,
+    category_id: str | None = None,
+) -> dict[str, Any]:
+    cache, runtime = ensure_applovin_tracker_cache_ready()
+    pages = cache.get("pages") if isinstance(cache.get("pages"), dict) else {}
+    selected_platform_id = normalize_applovin_monitor_platform(platform_id, fallback="gplay")
+    selected_category_id = normalize_applovin_monitor_category(category_id, fallback="top-ad-mediation-sdks")
+    selected_key = build_applovin_selection_key(selected_platform_id, selected_category_id)
+    selected_page = pages.get(selected_key) if isinstance(pages.get(selected_key), dict) else {}
+
+    if not selected_page and pages:
+        first_page = next(iter(pages.values()))
+        if isinstance(first_page, dict):
+            selected_page = first_page
+            selected_platform_id = str(first_page.get("platform_id") or selected_platform_id)
+            selected_category_id = str(first_page.get("category_id") or selected_category_id)
+            selected_key = build_applovin_selection_key(selected_platform_id, selected_category_id)
+
+    selected_platform = applovin_platform_meta(selected_platform_id)
+    selected_category = applovin_category_meta(selected_category_id)
+    selected_primary = (
+        selected_page.get("primary_applovin") if isinstance(selected_page.get("primary_applovin"), dict) else {}
+    )
+    selected_applovin_rows = (
+        selected_page.get("applovin_rows") if isinstance(selected_page.get("applovin_rows"), list) else []
+    )
+    selected_leaderboard_rows = selected_page.get("sdks") if isinstance(selected_page.get("sdks"), list) else []
+    selection_analysis = build_applovin_selection_analysis(
+        cache=cache,
+        selected_key=selected_key,
+        selected_page=selected_page,
+    )
+    history_rows = selection_analysis["history_rows"]
+    formatted_history_rows = selection_analysis["formatted_history_rows"]
+    recent_changes = selection_analysis["recent_changes"]
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    platform_rows = build_applovin_cross_category_rows(cache, selected_platform_id)
+    history_points = selection_analysis["history_points"]
+
+    selected_apps = float(selected_primary.get("apps") or 0.0)
+    selected_games = float(selected_primary.get("games") or 0.0)
+    selected_total_apps = max(0.0, float(selected_primary.get("total_apps") or 0.0))
+    selected_app_downloads = float(selected_primary.get("app_downloads") or 0.0)
+    selected_game_downloads = float(selected_primary.get("game_downloads") or 0.0)
+    selected_total_downloads = max(0.0, float(selected_primary.get("total_downloads") or 0.0))
+    app_share_pct = float(selected_primary.get("app_share_pct") or 0.0)
+    download_share_pct = float(selected_primary.get("download_share_pct") or 0.0)
+
+    def safe_share(part: float, total: float) -> float:
+        if total <= 0:
+            return 0.0
+        return (part / total) * 100.0
+
+    applovin_mix_donuts = [
+        build_applovin_donut_payload(
+            chart_key="app-mix",
+            title="Apps vs Games",
+            subtitle="Current split of AppLovin integrations within this selected row.",
+            total_label=str(selected_primary.get("total_apps_label") or "0"),
+            segments=[
+                {
+                    "label": "Apps",
+                    "value": selected_apps,
+                    "value_label": format_compact_number(selected_apps),
+                    "share_pct": safe_share(selected_apps, selected_total_apps),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["apps"],
+                },
+                {
+                    "label": "Games",
+                    "value": selected_games,
+                    "value_label": format_compact_number(selected_games),
+                    "share_pct": safe_share(selected_games, selected_total_apps),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["games"],
+                },
+            ],
+        ),
+        build_applovin_donut_payload(
+            chart_key="download-mix",
+            title="App Downloads vs Game Downloads",
+            subtitle="Current download mix inside the selected AppLovin row.",
+            total_label=str(selected_primary.get("total_downloads_label") or "0"),
+            segments=[
+                {
+                    "label": "App Downloads",
+                    "value": selected_app_downloads,
+                    "value_label": format_compact_number(selected_app_downloads),
+                    "share_pct": safe_share(selected_app_downloads, selected_total_downloads),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["app_downloads"],
+                },
+                {
+                    "label": "Game Downloads",
+                    "value": selected_game_downloads,
+                    "value_label": format_compact_number(selected_game_downloads),
+                    "share_pct": safe_share(selected_game_downloads, selected_total_downloads),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["game_downloads"],
+                },
+            ],
+        ),
+        build_applovin_donut_payload(
+            chart_key="app-share-split",
+            title="App Share vs Rest",
+            subtitle="Share of apps in this category using the selected AppLovin row.",
+            total_label=str(selected_primary.get("app_share_label") or "n/a"),
+            segments=[
+                {
+                    "label": "AppLovin",
+                    "value": max(0.0, app_share_pct),
+                    "value_label": format_percent_label(app_share_pct),
+                    "share_pct": max(0.0, app_share_pct),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["app_share"],
+                },
+                {
+                    "label": "Rest of Category",
+                    "value": max(0.0, 100.0 - app_share_pct),
+                    "value_label": format_percent_label(max(0.0, 100.0 - app_share_pct)),
+                    "share_pct": max(0.0, 100.0 - app_share_pct),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["rest"],
+                },
+            ],
+        ),
+        build_applovin_donut_payload(
+            chart_key="download-share-split",
+            title="Download Share vs Rest",
+            subtitle="Share of downloads in this category covered by the selected AppLovin row.",
+            total_label=str(selected_primary.get("download_share_label") or "n/a"),
+            segments=[
+                {
+                    "label": "AppLovin",
+                    "value": max(0.0, download_share_pct),
+                    "value_label": format_percent_label(download_share_pct),
+                    "share_pct": max(0.0, download_share_pct),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["download_share"],
+                },
+                {
+                    "label": "Rest of Category",
+                    "value": max(0.0, 100.0 - download_share_pct),
+                    "value_label": format_percent_label(max(0.0, 100.0 - download_share_pct)),
+                    "share_pct": max(0.0, 100.0 - download_share_pct),
+                    "color": APPLOVIN_MONITOR_METRIC_COLORS["rest"],
+                },
+            ],
+        ),
+    ]
+
+    share_trend_chart = build_applovin_trend_chart_payload(
+        history_points,
+        chart_key="applovin-share-trend",
+        title="Share Through Time",
+        subtitle="How AppLovin's app-share and download-share move across stored snapshots.",
+        metric_kind="share_pct",
+        series_specs=[
+            {
+                "key": "applovin_app_share_pct",
+                "symbol": "app_share",
+                "label": "App Share",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["app_share"],
+            },
+            {
+                "key": "applovin_download_share_pct",
+                "symbol": "download_share",
+                "label": "Download Share",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["download_share"],
+            },
+        ],
+    )
+    integrations_trend_chart = build_applovin_trend_chart_payload(
+        history_points,
+        chart_key="applovin-integrations-trend",
+        title="Integrations Through Time",
+        subtitle="Apps and Games counts inside the selected AppLovin row.",
+        metric_kind="count",
+        series_specs=[
+            {
+                "key": "applovin_apps",
+                "symbol": "apps",
+                "label": "Apps",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["apps"],
+            },
+            {
+                "key": "applovin_games",
+                "symbol": "games",
+                "label": "Games",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["games"],
+            },
+        ],
+    )
+    downloads_trend_chart = build_applovin_trend_chart_payload(
+        history_points,
+        chart_key="applovin-downloads-trend",
+        title="Downloads Through Time",
+        subtitle="App-download and game-download counts inside the selected AppLovin row.",
+        metric_kind="count",
+        series_specs=[
+            {
+                "key": "applovin_app_downloads",
+                "symbol": "app_downloads",
+                "label": "App Downloads",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["app_downloads"],
+            },
+            {
+                "key": "applovin_game_downloads",
+                "symbol": "game_downloads",
+                "label": "Game Downloads",
+                "color": APPLOVIN_MONITOR_METRIC_COLORS["game_downloads"],
+            },
+        ],
+    )
+
+    return {
+        "applovin_cache": cache,
+        "applovin_runtime": {
+            **runtime,
+            "status_label": monitor_runtime_status_label(runtime["status"]),
+            "status_tone": monitor_runtime_status_tone(runtime["status"]),
+            "is_running": runtime["status"] == "running",
+            "started_at_label": format_monitor_date_label(runtime.get("started_at")),
+            "finished_at_label": format_monitor_date_label(runtime.get("finished_at")),
+        },
+        "applovin_status_poll_seconds": APPLOVIN_MONITOR_STATUS_POLL_INTERVAL_SECONDS,
+        "applovin_is_stale": applovin_tracker_cache_is_stale(cache),
+        "applovin_last_updated_label": format_monitor_date_label(cache.get("updated_at")),
+        "applovin_auto_refresh_label": (
+            f"Application runtime refreshes every {APPLOVIN_MONITOR_REFRESH_INTERVAL_HOURS} hours."
+        ),
+        "applovin_source_name": str(cache.get("source", {}).get("name") or "42matters SDK Analysis"),
+        "applovin_source_url": str(cache.get("source", {}).get("url") or ""),
+        "applovin_source_endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        "applovin_notes": str(cache.get("notes") or ""),
+        "applovin_platform_options": deepcopy(APPLOVIN_MONITOR_PLATFORMS),
+        "applovin_category_options": deepcopy(APPLOVIN_MONITOR_CATEGORIES),
+        "applovin_selected_platform_id": selected_platform_id,
+        "applovin_selected_category_id": selected_category_id,
+        "applovin_selected_platform_title": str(selected_page.get("platform_title") or selected_platform.get("title") or ""),
+        "applovin_selected_category_title": str(selected_page.get("category_title") or selected_category.get("title") or ""),
+        "applovin_selected_page_title": str(selected_page.get("page_title") or "").strip()
+        or f"{selected_platform.get('title')} / {selected_category.get('title')}",
+        "applovin_selected_page_source_url": str(
+            selected_page.get("source_url") or build_applovin_monitor_url(selected_platform_id, selected_category_id)
+        ),
+        "applovin_selected_source_updated_label": format_monitor_date_label(selected_page.get("source_updated_at")),
+        "applovin_selected_category_reason": str(
+            selected_page.get("category_reason") or selected_category.get("reason") or ""
+        ).strip(),
+        "applovin_tracked_page_count": int(
+            summary.get("tracked_page_count") or len(APPLOVIN_MONITOR_PLATFORMS) * len(APPLOVIN_MONITOR_CATEGORIES)
+        ),
+        "applovin_available_page_count": int(summary.get("available_page_count") or len(pages)),
+        "applovin_fresh_page_count": int(summary.get("fresh_page_count") or 0),
+        "applovin_present_page_count": int(summary.get("applovin_present_page_count") or 0),
+        "applovin_page_error_count": int(summary.get("page_error_count") or 0),
+        "applovin_primary_present": bool(selected_primary),
+        "applovin_primary_name": str(selected_primary.get("name") or "Not in top snapshot"),
+        "applovin_primary_rank_label": str(selected_primary.get("rank_label") or "n/a"),
+        "applovin_primary_app_share_label": str(selected_primary.get("app_share_label") or "n/a"),
+        "applovin_primary_total_apps_label": str(selected_primary.get("total_apps_label") or "n/a"),
+        "applovin_primary_download_share_label": str(selected_primary.get("download_share_label") or "n/a"),
+        "applovin_primary_total_downloads_label": str(selected_primary.get("total_downloads_label") or "n/a"),
+        "applovin_primary_website_url": str(selected_primary.get("website_url") or ""),
+        "applovin_primary_description": str(selected_primary.get("description") or "").strip(),
+        "applovin_match_count": len(selected_applovin_rows),
+        "applovin_rows": selected_applovin_rows,
+        "applovin_leaderboard_rows": selected_leaderboard_rows,
+        "applovin_cross_category_rows": platform_rows,
+        "applovin_recent_changes": recent_changes,
+        "applovin_history_rows": formatted_history_rows,
+        "applovin_history_point_count": len(history_points),
+        "applovin_confidence_items": selection_analysis["confidence_items"],
+        "applovin_highlight_cards": selection_analysis["highlight_cards"],
+        "applovin_signal_items": selection_analysis["signal_items"],
+        "applovin_history_span_label": selection_analysis["history_span_label"],
+        "applovin_mix_donuts": applovin_mix_donuts,
+        "applovin_share_trend_chart": share_trend_chart,
+        "applovin_integrations_trend_chart": integrations_trend_chart,
+        "applovin_downloads_trend_chart": downloads_trend_chart,
+        "applovin_page_errors": cache.get("page_errors") if isinstance(cache.get("page_errors"), list) else [],
+    }
+
+
 def get_signal_report(report_name: str) -> dict[str, Any]:
     return load_report_from_directory(report_name, SIGNAL_MONITOR_REPORTS_DIR)
 
@@ -5517,6 +10236,8 @@ def stock_entry_template(symbol: str) -> dict[str, Any]:
         "display_name": symbol,
         "created_at": stamp,
         "updated_at": stamp,
+        "setup_reader_annotations": [],
+        "setup_reading_record": normalize_reader_activity({}),
         "earnings": normalize_stock_earnings_info({}),
         "earnings_calls": [],
         "earnings_call_sync": normalize_stock_earnings_call_sync_info({}),
@@ -5566,6 +10287,7 @@ def normalize_stock_earnings_call_entry(raw_call: Any, *, trust_saved_html: bool
         fiscal_quarter = int(raw_call.get("fiscal_quarter") or 0)
     except (TypeError, ValueError):
         fiscal_quarter = 0
+    content_signature = build_reader_content_signature(transcript_text, transcript_html)
 
     return {
         "id": str(raw_call.get("id") or uuid.uuid4().hex[:12]).strip()[:40],
@@ -5594,6 +10316,11 @@ def normalize_stock_earnings_call_entry(raw_call: Any, *, trust_saved_html: bool
         ],
         "fiscal_year": fiscal_year,
         "fiscal_quarter": fiscal_quarter,
+        "reader_annotations": normalize_reader_annotation_list(
+            raw_call.get("reader_annotations", []),
+            content_signature=content_signature,
+        ),
+        "reading_record": normalize_reader_activity(raw_call.get("reading_record")),
     }
 
 
@@ -5615,6 +10342,8 @@ def normalize_note(raw_note: Any, *, trust_saved_html: bool = False) -> dict[str
     if not content_html or not content_text:
         return None
 
+    content_signature = build_reader_content_signature(content_text, content_html)
+
     return {
         "id": str(raw_note.get("id") or uuid.uuid4().hex[:10]),
         "title": str(raw_note.get("title") or "").strip()[:120],
@@ -5626,6 +10355,11 @@ def normalize_note(raw_note: Any, *, trust_saved_html: bool = False) -> dict[str
         "source_file_name": str(raw_note.get("source_file_name") or "").strip()[:240],
         "source_mode": str(raw_note.get("source_mode") or "").strip()[:40],
         "tags": normalize_tag_list(raw_note.get("tags", [])),
+        "reader_annotations": normalize_reader_annotation_list(
+            raw_note.get("reader_annotations", []),
+            content_signature=content_signature,
+        ),
+        "reading_record": normalize_reader_activity(raw_note.get("reading_record")),
     }
 
 
@@ -5658,6 +10392,8 @@ def normalize_file_entry(raw_file: Any, *, fallback_symbol: str = "") -> dict[st
         "tags": normalize_tag_list(raw_file.get("tags", [])),
         "storage_symbol": storage_symbol,
         "linked_symbols": linked_symbols,
+        "reader_annotations": normalize_reader_annotation_list(raw_file.get("reader_annotations", [])),
+        "reading_record": normalize_reader_activity(raw_file.get("reading_record")),
     }
 
 
@@ -5718,6 +10454,7 @@ def normalize_transcript_entry(raw_transcript: Any, *, trust_saved_html: bool = 
         }
     )
     linked_symbol = linked_symbols[0] if linked_symbols else ""
+    content_signature = build_reader_content_signature(transcript_text, transcript_html)
 
     return {
         "id": str(raw_transcript.get("id") or uuid.uuid4().hex[:10]),
@@ -5768,6 +10505,11 @@ def normalize_transcript_entry(raw_transcript: Any, *, trust_saved_html: bool = 
         "transcript_html": transcript_html,
         "transcript_text": transcript_text,
         "tags": normalize_tag_list(raw_transcript.get("tags", [])),
+        "reader_annotations": normalize_reader_annotation_list(
+            raw_transcript.get("reader_annotations", []),
+            content_signature=content_signature,
+        ),
+        "reading_record": normalize_reader_activity(raw_transcript.get("reading_record")),
     }
 
 
@@ -5919,6 +10661,17 @@ def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[
         for raw_item in source.get("schedule_items", [])
         if (item := normalize_schedule_item(raw_item)) is not None
     ]
+    report_reader_state: dict[str, dict[str, Any]] = {}
+    raw_report_reader_state = source.get("report_reader_state")
+    if isinstance(raw_report_reader_state, dict):
+        for raw_filename, raw_state in raw_report_reader_state.items():
+            filename = str(raw_filename or "").strip()[:240]
+            if not filename or not isinstance(raw_state, dict):
+                continue
+            report_reader_state[filename] = {
+                "reader_annotations": normalize_reader_annotation_list(raw_state.get("reader_annotations", [])),
+                "reading_record": normalize_reader_activity(raw_state.get("reading_record")),
+            }
     trash = [
         trash_entry
         for raw_entry in source.get("trash", [])
@@ -5938,6 +10691,10 @@ def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[
                 entry["display_name"] = str(raw_entry.get("display_name") or symbol).strip() or symbol
                 entry["created_at"] = str(raw_entry.get("created_at") or entry["created_at"])
                 entry["updated_at"] = str(raw_entry.get("updated_at") or entry["updated_at"])
+                entry["setup_reader_annotations"] = normalize_reader_annotation_list(
+                    raw_entry.get("setup_reader_annotations", [])
+                )
+                entry["setup_reading_record"] = normalize_reader_activity(raw_entry.get("setup_reading_record"))
                 entry["earnings"] = normalize_stock_earnings_info(raw_entry.get("earnings"))
                 entry["earnings_calls"] = [
                     call
@@ -5973,6 +10730,14 @@ def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[
     for symbol in list_stock_symbols({"groups": groups, "favorites": favorites, "stocks": stocks}):
         stocks.setdefault(symbol, stock_entry_template(symbol))
 
+    raw_workspace_settings = source.get("workspace_settings")
+    if not isinstance(raw_workspace_settings, dict):
+        raw_workspace_settings = {}
+    raw_ai_direct_access_enabled = raw_workspace_settings.get("ai_direct_access_enabled")
+    ai_direct_access_enabled = raw_ai_direct_access_enabled is True or (
+        str(raw_ai_direct_access_enabled or "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
     return {
         "groups": groups,
         "favorites": favorites,
@@ -5980,7 +10745,11 @@ def normalize_stock_store(data: Any, *, trust_saved_html: bool = False) -> dict[
         "transcripts": transcripts,
         "experts": experts,
         "schedule_items": schedule_items,
+        "report_reader_state": report_reader_state,
         "trash": trash,
+        "workspace_settings": {
+            "ai_direct_access_enabled": ai_direct_access_enabled,
+        },
     }
 
 
@@ -6022,10 +10791,7 @@ def load_stock_store() -> dict[str, Any]:
 
 def save_stock_store(store: dict[str, Any]) -> None:
     normalized = normalize_stock_store(store)
-    STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = STOCK_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(STOCK_STORE_PATH)
+    write_json_atomic(STOCK_STORE_PATH, normalized)
     with STOCK_STORE_CACHE_LOCK:
         STOCK_STORE_CACHE["signature"] = get_stock_store_signature()
         STOCK_STORE_CACHE["data"] = normalized
@@ -6352,16 +11118,111 @@ def normalize_data_monitor_tab(raw_value: str | None, *, fallback: str = "stable
     value = str(raw_value or "").strip().lower()
     if value in {"stablecoins", "stablecoin", "stable", "stables", "usdt"}:
         return "stablecoins"
+    if value in {"gpu", "gpus", "gpu-prices", "gpu_prices", "gpu-price", "gpu_price", "h100", "h200", "b200"}:
+        return "gpu_prices"
+    if value in {"cdn", "cdns", "edge", "website", "web", "tracker"}:
+        return "cdn"
+    if value in {"applovin", "sdk", "sdks", "ad-sdk", "adsdk", "42matters"}:
+        return "applovin"
     return fallback
 
 
-def is_web_access_authenticated() -> bool:
+def current_web_access_role() -> str:
     if not WEB_ACCESS_PASSWORD_SIGNATURE:
-        return True
-    return hmac.compare_digest(
-        str(session.get(WEB_ACCESS_SESSION_KEY) or ""),
-        WEB_ACCESS_PASSWORD_SIGNATURE,
+        return WEB_ACCESS_ROLE_ADMIN
+
+    session_signature = str(session.get(WEB_ACCESS_SESSION_KEY) or "")
+    session_role = str(session.get(WEB_ACCESS_ROLE_SESSION_KEY) or "").strip().lower()
+
+    if hmac.compare_digest(session_signature, WEB_ACCESS_PASSWORD_SIGNATURE):
+        return WEB_ACCESS_ROLE_ADMIN
+
+    if (
+        WEB_VISITOR_PASSWORD_SIGNATURE
+        and session_role == WEB_ACCESS_ROLE_VISITOR
+        and hmac.compare_digest(session_signature, WEB_VISITOR_PASSWORD_SIGNATURE)
+    ):
+        return WEB_ACCESS_ROLE_VISITOR
+
+    return ""
+
+
+def is_visitor_mode() -> bool:
+    return current_web_access_role() == WEB_ACCESS_ROLE_VISITOR
+
+
+def build_access_reenter_url(default: str = "/") -> str:
+    next_url = request.full_path if request.query_string else request.path
+    return url_for("access_password_gate", force=1, next=safe_next_url(next_url, default))
+
+
+def current_visitor_share_token() -> str:
+    configured = str(os.getenv("WEB_VISITOR_SHARE_TOKEN", "")).strip()
+    if configured:
+        return configured
+
+    seed = "|".join(
+        [
+            str(app.secret_key or ""),
+            WEB_VISITOR_PASSWORD_SIGNATURE or "",
+            WEB_ACCESS_PASSWORD_SIGNATURE or "",
+            "visitor-direct-entry",
+        ]
     )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def is_ai_direct_access_enabled(store: dict[str, Any] | None = None) -> bool:
+    resolved_store = store if isinstance(store, dict) else load_stock_store()
+    settings = resolved_store.get("workspace_settings")
+    if not isinstance(settings, dict):
+        return False
+    return bool(settings.get("ai_direct_access_enabled"))
+
+
+def is_ai_direct_request_allowed() -> bool:
+    if request.method.upper() not in AI_DIRECT_SAFE_METHODS:
+        return False
+    if request.path in AI_DIRECT_READ_ONLY_EXACT_PATHS:
+        return True
+    return any(request.path.startswith(prefix) for prefix in AI_DIRECT_READ_ONLY_PATH_PREFIXES)
+
+
+def is_web_access_authenticated() -> bool:
+    return bool(current_web_access_role())
+
+
+def unauthenticated_access_response():
+    next_url = request.full_path if request.query_string else request.path
+    access_url = url_for("access_password_gate", next=next_url)
+
+    if expects_json_response() or request.path.startswith("/api/"):
+        response = jsonify(
+            {
+                "ok": False,
+                "message": "authentication required",
+                "access_url": access_url,
+            }
+        )
+        response.status_code = 401
+        return response
+
+    return redirect(access_url)
+
+
+def visitor_read_only_response(message: str):
+    if expects_json_response() or request.path.startswith("/api/"):
+        return jsonify({"ok": False, "message": message}), 403
+
+    flash(message, "error")
+    return redirect(url_for("monitor_page"))
+
+
+def static_asset_url(filename: str, *, version: str | None = None) -> str:
+    resolved_version = version if version is not None else STATIC_ASSET_VERSIONS.get(filename)
+    if resolved_version:
+        return url_for("static", filename=filename, v=resolved_version)
+    return url_for("static", filename=filename)
 
 
 @app.before_request
@@ -6369,15 +11230,53 @@ def enforce_web_access_password():
     if not WEB_ACCESS_PASSWORD_SIGNATURE:
         return None
 
-    allowed_endpoints = {"static", "favicon", "access_password_gate", "access_password_submit"}
+    allowed_endpoints = {"static", "favicon", "access_password_gate", "access_password_submit", "visitor_direct_entry"}
     if request.endpoint in allowed_endpoints:
         return None
 
-    if is_web_access_authenticated():
+    if is_ai_direct_request_allowed() and is_ai_direct_access_enabled():
         return None
 
-    next_url = request.full_path if request.query_string else request.path
-    return redirect(url_for("access_password_gate", next=next_url))
+    if is_web_access_authenticated():
+        if is_visitor_mode():
+            if request.endpoint in VISITOR_BLOCKED_ENDPOINTS:
+                return visitor_read_only_response("访客模式只开放阅读页面，当前入口已隐藏。")
+            if request.method.upper() not in VISITOR_SAFE_METHODS:
+                return visitor_read_only_response("访客模式是只读的，不能上传、删除或修改内容。")
+        return None
+
+    return unauthenticated_access_response()
+
+
+@app.after_request
+def apply_access_response_headers(response):
+    if request.endpoint == "static" and request.method.upper() == "GET" and response.status_code < 400:
+        if request.args.get("v"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=3600"
+        response.headers.pop("Pragma", None)
+        return response
+
+    if is_visitor_mode():
+        response.headers["Cache-Control"] = "no-store, private, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
+@app.context_processor
+def inject_access_mode_context():
+    role = current_web_access_role() or "guest"
+    return {
+        "access_mode": role,
+        "is_visitor_mode": role == WEB_ACCESS_ROLE_VISITOR,
+        "is_admin_mode": role == WEB_ACCESS_ROLE_ADMIN,
+        "ai_direct_access_enabled": is_ai_direct_access_enabled(),
+        "access_reenter_url": build_access_reenter_url(url_for("monitor_page")) if request else url_for("monitor_page"),
+        "static_asset_url": static_asset_url,
+        "static_asset_versions": STATIC_ASSET_VERSIONS,
+    }
 
 
 def expects_json_response() -> bool:
@@ -6386,6 +11285,293 @@ def expects_json_response() -> bool:
 
     accept_mimetypes = request.accept_mimetypes
     return accept_mimetypes["application/json"] > accept_mimetypes["text/html"]
+
+
+def clipboard_json_error(message: str, status_code: int = 400):
+    response = jsonify({"ok": False, "message": message})
+    response.status_code = status_code
+    return response
+
+
+def ensure_clipboard_admin_access():
+    if current_web_access_role() != WEB_ACCESS_ROLE_ADMIN:
+        return clipboard_json_error("剪贴板只对管理员开放。", 403)
+    return None
+
+
+def clipboard_item_dir(item_id: str) -> Path:
+    safe_item_id = secure_filename(item_id)[:24] or uuid.uuid4().hex[:12]
+    return CLIPBOARD_UPLOADS_DIR / safe_item_id
+
+
+def normalize_clipboard_image(raw_image: Any) -> dict[str, str] | None:
+    if not isinstance(raw_image, dict):
+        return None
+
+    stored_name = secure_filename(str(raw_image.get("stored_name") or "").strip())
+    if not stored_name:
+        return None
+
+    suffix = Path(stored_name).suffix.lower()
+    if suffix not in CLIPBOARD_ALLOWED_IMAGE_SUFFIXES:
+        return None
+
+    image_id = str(raw_image.get("id") or uuid.uuid4().hex[:10]).strip()[:24] or uuid.uuid4().hex[:10]
+    original_name = str(raw_image.get("original_name") or stored_name).strip()[:240] or stored_name
+    uploaded_at = str(raw_image.get("uploaded_at") or now_iso())
+    return {
+        "id": image_id,
+        "stored_name": stored_name,
+        "original_name": original_name,
+        "uploaded_at": uploaded_at,
+    }
+
+
+def normalize_clipboard_item(raw_item: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_item, dict):
+        return None
+
+    item_id = secure_filename(str(raw_item.get("id") or uuid.uuid4().hex[:12]).strip())[:24] or uuid.uuid4().hex[:12]
+    text = str(raw_item.get("text") or "")[:CLIPBOARD_MAX_TEXT_CHARS]
+    created_at = str(raw_item.get("created_at") or now_iso())
+    updated_at = str(raw_item.get("updated_at") or created_at or now_iso())
+    images: list[dict[str, str]] = []
+    seen_image_ids: set[str] = set()
+    raw_images = raw_item.get("images")
+    if isinstance(raw_images, list):
+        for raw_image in raw_images:
+            image = normalize_clipboard_image(raw_image)
+            if not image or image["id"] in seen_image_ids:
+                continue
+            image_path = clipboard_item_dir(item_id) / image["stored_name"]
+            if not image_path.exists() or not path_is_within(image_path, CLIPBOARD_UPLOADS_DIR):
+                continue
+            images.append(image)
+            seen_image_ids.add(image["id"])
+
+    if not text.strip() and not images:
+        return None
+
+    return {
+        "id": item_id,
+        "text": text,
+        "images": images,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def normalize_clipboard_store(raw_store: Any) -> dict[str, Any]:
+    raw_items = raw_store.get("items") if isinstance(raw_store, dict) else []
+    items: list[dict[str, Any]] = []
+    seen_item_ids: set[str] = set()
+
+    if isinstance(raw_items, list):
+        for raw_item in raw_items:
+            item = normalize_clipboard_item(raw_item)
+            if not item or item["id"] in seen_item_ids:
+                continue
+            items.append(item)
+            seen_item_ids.add(item["id"])
+
+    items.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    fallback_updated_at = items[0]["updated_at"] if items else now_iso()
+    updated_at = str(raw_store.get("updated_at") or fallback_updated_at) if isinstance(raw_store, dict) else fallback_updated_at
+    return {
+        "items": items,
+        "updated_at": updated_at,
+    }
+
+
+def load_clipboard_store() -> dict[str, Any]:
+    return normalize_clipboard_store(load_json(CLIPBOARD_STORE_PATH))
+
+
+def save_clipboard_store(store: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_clipboard_store(store)
+    normalized["updated_at"] = str(normalized.get("updated_at") or now_iso())
+    write_json_atomic(CLIPBOARD_STORE_PATH, normalized)
+    return normalized
+
+
+def find_clipboard_item(store: dict[str, Any], item_id: str) -> tuple[int, dict[str, Any] | None]:
+    for index, item in enumerate(store.get("items", [])):
+        if item.get("id") == item_id:
+            return index, item
+    return -1, None
+
+
+def clipboard_image_content_length(uploaded) -> int:
+    if getattr(uploaded, "content_length", None):
+        try:
+            return int(uploaded.content_length)
+        except (TypeError, ValueError):
+            return 0
+
+    stream = getattr(uploaded, "stream", None)
+    if stream is None or not hasattr(stream, "seek") or not hasattr(stream, "tell"):
+        return 0
+
+    try:
+        current_position = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = int(stream.tell())
+        stream.seek(current_position)
+        return size
+    except (OSError, ValueError):
+        return 0
+
+
+def list_clipboard_uploads_from_request() -> list[Any]:
+    uploads = [uploaded for uploaded in request.files.getlist("images") if uploaded and uploaded.filename]
+    if len(uploads) > CLIPBOARD_MAX_UPLOAD_IMAGES:
+        raise ValueError(f"一次最多上传 {CLIPBOARD_MAX_UPLOAD_IMAGES} 张图片。")
+    return uploads
+
+
+def validate_clipboard_uploads(uploads: list[Any]) -> list[dict[str, Any]]:
+    validated: list[dict[str, Any]] = []
+    for uploaded in uploads:
+        original_name = str(uploaded.filename or "").strip()
+        if not original_name:
+            continue
+
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in CLIPBOARD_ALLOWED_IMAGE_SUFFIXES:
+            raise ValueError("剪贴板目前只支持 PNG、JPG、WEBP、GIF、BMP 图片。")
+
+        content_length = clipboard_image_content_length(uploaded)
+        if content_length > CLIPBOARD_MAX_IMAGE_BYTES:
+            raise ValueError("图片太大了，请压缩后再试。")
+
+        safe_name = secure_filename(original_name)
+        if not safe_name:
+            safe_name = f"clipboard-image{suffix or '.png'}"
+
+        validated.append(
+            {
+                "uploaded": uploaded,
+                "original_name": original_name[:240],
+                "safe_name": safe_name,
+            }
+        )
+    return validated
+
+
+def store_clipboard_upload_images(item_id: str, uploads: list[Any]) -> list[dict[str, str]]:
+    validated_uploads = validate_clipboard_uploads(uploads)
+    if not validated_uploads:
+        return []
+
+    target_dir = clipboard_item_dir(item_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stored_images: list[dict[str, str]] = []
+    stored_paths: list[Path] = []
+
+    try:
+        for upload in validated_uploads:
+            stored_name = (
+                f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{upload['safe_name']}"
+            )
+            target_path = target_dir / stored_name
+            uploaded = upload["uploaded"]
+            stream = getattr(uploaded, "stream", None)
+            if stream is not None and hasattr(stream, "seek"):
+                try:
+                    stream.seek(0)
+                except OSError:
+                    pass
+            uploaded.save(target_path)
+            stored_paths.append(target_path)
+            stored_images.append(
+                {
+                    "id": uuid.uuid4().hex[:10],
+                    "stored_name": stored_name,
+                    "original_name": upload["original_name"],
+                    "uploaded_at": now_iso(),
+                }
+            )
+    except OSError:
+        for stored_path in stored_paths:
+            try:
+                stored_path.unlink()
+            except OSError:
+                continue
+        raise
+
+    return stored_images
+
+
+def remove_clipboard_image_files(item_id: str, images: list[dict[str, Any]]) -> None:
+    target_dir = clipboard_item_dir(item_id)
+    for image in images:
+        stored_name = secure_filename(str(image.get("stored_name") or "").strip())
+        if not stored_name:
+            continue
+        target_path = target_dir / stored_name
+        if not target_path.exists() or not path_is_within(target_path, CLIPBOARD_UPLOADS_DIR):
+            continue
+        try:
+            target_path.unlink()
+        except OSError:
+            continue
+
+    try:
+        if target_dir.exists() and path_is_within(target_dir, CLIPBOARD_UPLOADS_DIR) and not any(target_dir.iterdir()):
+            target_dir.rmdir()
+    except OSError:
+        return
+
+
+def remove_clipboard_item_dir(item_id: str) -> None:
+    target_dir = clipboard_item_dir(item_id)
+    if not target_dir.exists() or not path_is_within(target_dir, CLIPBOARD_UPLOADS_DIR):
+        return
+    shutil.rmtree(target_dir, ignore_errors=True)
+
+
+def build_clipboard_item_payload(item: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(item.get("id") or "")
+    images = []
+    for image in item.get("images", []):
+        images.append(
+            {
+                "id": image["id"],
+                "original_name": image["original_name"],
+                "uploaded_at": image["uploaded_at"],
+                "display_uploaded_at": format_iso_timestamp(image["uploaded_at"]),
+                "url": url_for("clipboard_file", item_id=item_id, filename=image["stored_name"]),
+            }
+        )
+
+    return {
+        "id": item_id,
+        "text": str(item.get("text") or ""),
+        "created_at": str(item.get("created_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "display_created_at": format_iso_timestamp(item.get("created_at")),
+        "display_updated_at": format_iso_timestamp(item.get("updated_at")),
+        "image_count": len(images),
+        "images": images,
+    }
+
+
+def build_clipboard_bootstrap_payload(store: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved_store = normalize_clipboard_store(store if isinstance(store, dict) else load_clipboard_store())
+    items = [build_clipboard_item_payload(item) for item in resolved_store.get("items", [])]
+    return {
+        "ok": True,
+        "items": items,
+        "item_count": len(items),
+        "updated_at": resolved_store.get("updated_at") or now_iso(),
+        "display_updated_at": format_iso_timestamp(resolved_store.get("updated_at")),
+        "limits": {
+            "max_text_chars": CLIPBOARD_MAX_TEXT_CHARS,
+            "max_images_per_item": CLIPBOARD_MAX_IMAGES_PER_ITEM,
+            "max_upload_images": CLIPBOARD_MAX_UPLOAD_IMAGES,
+            "max_image_bytes": CLIPBOARD_MAX_IMAGE_BYTES,
+        },
+    }
 
 
 def stock_memberships(store: dict[str, Any], symbol: str) -> list[dict[str, str]]:
@@ -6574,6 +11760,7 @@ def build_schedule_card(
     note = str(item.get("note") or "").strip()
     location = str(item.get("location") or "").strip()
     fallback_summary = location or build_schedule_time_label(item)
+    reader_text = note or str(item.get("title") or "").strip()
 
     return {
         **item,
@@ -6594,6 +11781,19 @@ def build_schedule_card(
         "is_today": scheduled_date == today,
         "is_focus": bool(focus_item_id and str(item.get("id") or "") == focus_item_id),
         "stock_url": url_for("stock_detail", symbol=item["symbol"]) if item.get("symbol") else "",
+        **build_reader_content_fields(
+            item,
+            content_text=reader_text,
+            content_html=plain_text_to_html(reader_text),
+        ),
+        "reader_bootstrap": build_reader_bootstrap_payload(
+            item,
+            kind="schedule",
+            item_id=str(item.get("id") or ""),
+            save_url=url_for("persist_schedule_reader_state", item_id=str(item.get("id") or "")),
+            content_text=reader_text,
+            content_html=plain_text_to_html(reader_text),
+        ),
     }
 
 
@@ -7270,12 +12470,25 @@ def build_expert_resource_preview_context(
             "source_file_name_display": note.get("source_file_name")
             or (str(source_file.get("original_name") or "") if source_file else ""),
             "tags": normalize_tag_list(note.get("tags", [])),
+            **build_reader_content_fields(
+                note,
+                content_text=note.get("content_text") or "",
+                content_html=note.get("content_html") or "",
+            ),
+            "reader_bootstrap": build_reader_bootstrap_payload(
+                note,
+                kind="note",
+                item_id=str(note.get("id") or ""),
+                save_url=url_for("persist_stock_note_reader_state", symbol=symbol, note_id=str(note.get("id") or "")),
+                content_text=note.get("content_text") or "",
+                content_html=note.get("content_html") or "",
+            ),
         }
         return context
 
     if preview_kind == "file":
         symbol = str(resolved.get("symbol") or "")
-        file_entry = get_stock_file_entry(store, symbol, str(resolved.get("resource_id") or ""))
+        file_entry = get_stock_file_record(store, symbol, str(resolved.get("resource_id") or ""))
         return {
             **context,
             "stock_symbol": symbol,
@@ -7552,7 +12765,59 @@ def build_stock_tag_summary(store: dict[str, Any], symbol: str | None = None) ->
     return collect_tag_counts(items)
 
 
-def build_stock_earnings_call_cards(entry: dict[str, Any]) -> list[dict[str, Any]]:
+def build_stock_earnings_call_card(
+    call: dict[str, Any],
+    *,
+    include_reader_body: bool = True,
+    include_reader_state: bool = True,
+) -> dict[str, Any]:
+    quality_chips = build_stock_earnings_call_quality_chips(call)
+    reader_annotations = (
+        build_reader_annotation_views(list(call.get("reader_annotations", []))) if include_reader_state else []
+    )
+    reader_activity = (
+        build_reader_activity_view(call.get("reading_record"), reader_annotations) if include_reader_state else {}
+    )
+    reader_content_signature = (
+        build_reader_content_signature(
+            str(call.get("transcript_text") or ""),
+            str(call.get("transcript_html") or ""),
+        )
+        if include_reader_state
+        else ""
+    )
+
+    display_call_date = call.get("call_date") or ""
+    if not display_call_date and call.get("published_at"):
+        display_call_date = format_iso_timestamp(call.get("published_at"))
+
+    return {
+        **call,
+        "display_title": call.get("title") or call.get("original_title") or "电话会议",
+        "display_call_date": display_call_date or "待补充",
+        "display_published_at": (
+            format_iso_timestamp(call.get("published_at")) if call.get("published_at") else "待补充"
+        ),
+        "reader_content_html": (
+            call.get("transcript_html") or plain_text_to_html(call.get("transcript_text") or "")
+            if include_reader_body
+            else ""
+        ),
+        "summary_excerpt": call.get("summary_excerpt")
+        or summarize_text_block(call.get("summary_text") or call.get("transcript_text") or ""),
+        "quality_chips": quality_chips,
+        "reader_annotations": reader_annotations,
+        "reader_activity": reader_activity,
+        "reader_content_signature": reader_content_signature,
+    }
+
+
+def build_stock_earnings_call_cards(
+    entry: dict[str, Any],
+    *,
+    include_reader_body: bool = True,
+    include_reader_state: bool = True,
+) -> list[dict[str, Any]]:
     raw_calls = entry.get("earnings_calls", [])
     if not isinstance(raw_calls, list):
         raw_calls = []
@@ -7568,26 +12833,12 @@ def build_stock_earnings_call_cards(entry: dict[str, Any]) -> list[dict[str, Any
 
     cards: list[dict[str, Any]] = []
     for call in calls:
-        quality_chips = build_stock_earnings_call_quality_chips(call)
-
-        display_call_date = call.get("call_date") or ""
-        if not display_call_date and call.get("published_at"):
-            display_call_date = format_iso_timestamp(call.get("published_at"))
-
         cards.append(
-            {
-                **call,
-                "display_title": call.get("title") or call.get("original_title") or "电话会议",
-                "display_call_date": display_call_date or "待补充",
-                "display_published_at": (
-                    format_iso_timestamp(call.get("published_at")) if call.get("published_at") else "待补充"
-                ),
-                "reader_content_html": call.get("transcript_html")
-                or plain_text_to_html(call.get("transcript_text") or ""),
-                "summary_excerpt": call.get("summary_excerpt")
-                or summarize_text_block(call.get("summary_text") or call.get("transcript_text") or ""),
-                "quality_chips": quality_chips,
-            }
+            build_stock_earnings_call_card(
+                call,
+                include_reader_body=include_reader_body,
+                include_reader_state=include_reader_state,
+            )
         )
 
     return cards
@@ -7717,7 +12968,12 @@ def build_stock_timeline(
             }
         )
 
-    for transcript in build_transcript_cards(store, symbol_filter=symbol):
+    for transcript in build_transcript_cards(
+        store,
+        symbol_filter=symbol,
+        include_reader_body=False,
+        include_reader_state=False,
+    ):
         events.append(
             {
                 "kind": "transcript",
@@ -7730,7 +12986,11 @@ def build_stock_timeline(
                 "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
                 "tags": normalize_tag_list(transcript.get("tags", [])),
                 "status_label": transcript.get("status_label"),
-                "reader_template_id": f"stock-transcript-reader-{transcript['id']}",
+                "reader_url": url_for(
+                    "preview_transcript_fragment",
+                    transcript_id=transcript["id"],
+                    next=url_for("stock_detail", symbol=symbol),
+                ),
                 "anchor": "transcripts-panel",
             }
         )
@@ -8403,8 +13663,17 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
     entry = ensure_stock_entry(store, symbol)
     notes = sorted(entry["notes"], key=lambda item: item["created_at"], reverse=True)
     files = sorted(entry["files"], key=lambda item: item["uploaded_at"], reverse=True)
-    transcripts = build_transcript_cards(store, symbol_filter=symbol)
-    earnings_calls = build_stock_earnings_call_cards(entry)
+    transcripts = build_transcript_cards(
+        store,
+        symbol_filter=symbol,
+        include_reader_body=False,
+        include_reader_state=False,
+    )
+    earnings_calls = build_stock_earnings_call_cards(
+        entry,
+        include_reader_body=False,
+        include_reader_state=False,
+    )
     file_lookup = {file_entry["id"]: file_entry for file_entry in files}
     related_reports = find_related_reports(symbol)
 
@@ -8424,6 +13693,19 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
                     else ""
                 ),
                 "tags": normalize_tag_list(note.get("tags", [])),
+                **build_reader_content_fields(
+                    note,
+                    content_text=note.get("content_text") or "",
+                    content_html=note.get("content_html") or "",
+                ),
+                "reader_bootstrap": build_reader_bootstrap_payload(
+                    note,
+                    kind="note",
+                    item_id=str(note.get("id") or ""),
+                    save_url=url_for("persist_stock_note_reader_state", symbol=symbol, note_id=str(note.get("id") or "")),
+                    content_text=note.get("content_text") or "",
+                    content_html=note.get("content_html") or "",
+                ),
             }
             for note in notes
         ],
@@ -8448,7 +13730,7 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "timeline": build_stock_timeline(store, symbol, related_reports=related_reports),
         "tag_summary": build_stock_tag_summary(store, symbol)[:12],
         "created_label": format_iso_timestamp(entry.get("created_at")),
-        "setup": build_stock_setup_view(symbol),
+        "setup": build_stock_setup_view(store, symbol),
     }
 
 
@@ -8650,7 +13932,12 @@ def build_stock_timeline(
             }
         )
 
-    for transcript in build_transcript_cards(store, symbol_filter=symbol):
+    for transcript in build_transcript_cards(
+        store,
+        symbol_filter=symbol,
+        include_reader_body=False,
+        include_reader_state=False,
+    ):
         events.append(
             {
                 "kind": "transcript",
@@ -8663,7 +13950,11 @@ def build_stock_timeline(
                 "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
                 "tags": normalize_tag_list(transcript.get("tags", [])),
                 "status_label": transcript.get("status_label"),
-                "reader_template_id": f"stock-transcript-reader-{transcript['id']}",
+                "reader_url": url_for(
+                    "preview_transcript_fragment",
+                    transcript_id=transcript["id"],
+                    next=url_for("stock_detail", symbol=symbol),
+                ),
                 "anchor": "transcripts-panel",
             }
         )
@@ -8701,8 +13992,17 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         key=lambda item: str(item.get("uploaded_at") or ""),
         reverse=True,
     )
-    transcripts = build_transcript_cards(store, symbol_filter=symbol)
-    earnings_calls = build_stock_earnings_call_cards(entry)
+    transcripts = build_transcript_cards(
+        store,
+        symbol_filter=symbol,
+        include_reader_body=False,
+        include_reader_state=False,
+    )
+    earnings_calls = build_stock_earnings_call_cards(
+        entry,
+        include_reader_body=False,
+        include_reader_state=False,
+    )
     file_lookup = {str(file_entry.get("id") or ""): file_entry for file_entry in files}
     related_reports = find_related_reports(symbol)
 
@@ -8722,6 +14022,19 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
                     else ""
                 ),
                 "tags": normalize_tag_list(note.get("tags", [])),
+                **build_reader_content_fields(
+                    note,
+                    content_text=note.get("content_text") or "",
+                    content_html=note.get("content_html") or "",
+                ),
+                "reader_bootstrap": build_reader_bootstrap_payload(
+                    note,
+                    kind="note",
+                    item_id=str(note.get("id") or ""),
+                    save_url=url_for("persist_stock_note_reader_state", symbol=symbol, note_id=str(note.get("id") or "")),
+                    content_text=note.get("content_text") or "",
+                    content_html=note.get("content_html") or "",
+                ),
             }
             for note in notes
         ],
@@ -8733,7 +14046,7 @@ def build_stock_detail(store: dict[str, Any], symbol: str) -> dict[str, Any]:
         "timeline": build_stock_timeline(store, symbol, related_reports=related_reports),
         "tag_summary": build_stock_tag_summary(store, symbol)[:12],
         "created_label": format_iso_timestamp(entry.get("created_at")),
-        "setup": build_stock_setup_view(symbol),
+        "setup": build_stock_setup_view(store, symbol),
     }
 
 
@@ -8763,6 +14076,9 @@ def build_stock_file_preview_context(
         elif file_entry.get("description"):
             preview_note_html = plain_text_to_html(str(file_entry.get("description") or "").strip())
 
+    reader_text = preview_text if preview_text else note_html_to_text(preview_note_html)
+    reader_html = preview_note_html if preview_note_html else plain_text_to_html(preview_text) if preview_text else ""
+
     return {
         "file_entry": build_stock_file_card(store, record, access_symbol=symbol),
         "preview_text": preview_text,
@@ -8771,6 +14087,19 @@ def build_stock_file_preview_context(
         "image_url": url_for("inline_stock_file", symbol=symbol, file_id=file_entry["id"])
         if is_image_previewable(original_name)
         else "",
+        **build_reader_content_fields(
+            file_entry,
+            content_text=reader_text,
+            content_html=reader_html,
+        ),
+        "reader_bootstrap": build_reader_bootstrap_payload(
+            file_entry,
+            kind="file",
+            item_id=str(file_entry.get("id") or ""),
+            save_url=url_for("persist_stock_file_reader_state", symbol=symbol, file_id=str(file_entry.get("id") or "")),
+            content_text=reader_text,
+            content_html=reader_html,
+        ),
     }
 
 
@@ -8780,6 +14109,152 @@ def get_transcript_entry(store: dict[str, Any], transcript_id: str) -> dict[str,
             return transcript
 
     abort(404)
+
+
+def get_stock_note_entry(store: dict[str, Any], symbol: str, note_id: str) -> dict[str, Any]:
+    entry = ensure_stock_entry(store, symbol)
+    for note in entry.get("notes", []):
+        if str(note.get("id") or "").strip() == str(note_id or "").strip():
+            return note
+
+    abort(404)
+
+
+def get_stock_earnings_call_entry(store: dict[str, Any], symbol: str, call_id: str) -> dict[str, Any]:
+    entry = ensure_stock_entry(store, symbol)
+    for call in entry.get("earnings_calls", []):
+        if str(call.get("id") or "").strip() == call_id:
+            return call
+
+    abort(404)
+
+
+def build_reader_state_payload(
+    item: dict[str, Any],
+    *,
+    save_url: str,
+    kind: str = "",
+    item_id: str = "",
+    content_text: Any = "",
+    content_html: Any = "",
+) -> dict[str, Any]:
+    fields = build_reader_content_fields(
+        item,
+        content_text=content_text,
+        content_html=content_html,
+    )
+    return {
+        "kind": kind,
+        "item_id": item_id,
+        "annotations": fields["reader_annotations"],
+        "activity": fields["reader_activity"],
+        "content_signature": fields["reader_content_signature"],
+        "save_url": save_url,
+    }
+
+
+def apply_reader_state_action(
+    item: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    content_text: Any = "",
+    content_html: Any = "",
+) -> None:
+    action = str(payload.get("action") or "").strip().lower()
+    if not action:
+        raise ValueError("缺少阅读操作。")
+
+    source_text = content_text
+    source_html = content_html
+    if not str(source_text or "").strip() and not str(source_html or "").strip():
+        source_text = item.get("transcript_text") or item.get("content_text") or ""
+        source_html = item.get("transcript_html") or item.get("content_html") or ""
+    normalized_text, normalized_html = normalize_reader_content(source_text, source_html)
+    content_signature = build_reader_content_signature(normalized_text, normalized_html)
+    requested_signature = str(payload.get("content_signature") or "").strip()[:40]
+    if requested_signature and content_signature and requested_signature != content_signature:
+        raise ValueError("当前正文已更新，请刷新页面后再试。")
+
+    annotations = normalize_reader_annotation_list(
+        item.get("reader_annotations", []),
+        content_signature=content_signature,
+    )
+    activity = normalize_reader_activity(item.get("reading_record"))
+    now = now_iso()
+
+    if action == "open":
+        activity["open_count"] += 1
+        activity["last_opened_at"] = now
+        activity["last_read_at"] = now
+    elif action == "progress":
+        try:
+            scroll_ratio = float(payload.get("scroll_ratio") or 0.0)
+        except (TypeError, ValueError):
+            scroll_ratio = 0.0
+        activity["last_scroll_ratio"] = min(max(scroll_ratio, 0.0), 1.0)
+        activity["last_read_at"] = now
+    elif action == "add_annotation":
+        kind = str(payload.get("kind") or "").strip().lower()
+        if kind not in READER_ANNOTATION_KIND_META:
+            raise ValueError("暂不支持这种标注类型。")
+        if len(annotations) >= MAX_READER_ANNOTATIONS_PER_ITEM:
+            raise ValueError("这篇内容的标注已经很多了，请先删掉一些再继续。")
+
+        try:
+            start_offset = max(0, int(payload.get("start_offset") or 0))
+            end_offset = max(0, int(payload.get("end_offset") or 0))
+        except (TypeError, ValueError):
+            raise ValueError("标注范围无效。") from None
+        if end_offset <= start_offset or end_offset - start_offset > MAX_READER_SELECTION_CHARS:
+            raise ValueError("这次选中的范围有点大，请缩短一点再试。")
+        if reader_annotations_overlap(annotations, start_offset, end_offset, kind=kind):
+            raise ValueError("暂不支持重叠标注，请先移除原来的标注。")
+
+        quote_text = trim_note_content(
+            str(payload.get("quote_text") or "").strip(),
+            limit=MAX_READER_SELECTION_CHARS,
+        )
+        if not quote_text:
+            raise ValueError("请先选中一段正文。")
+
+        note_text = trim_note_content(
+            str(payload.get("note_text") or "").strip(),
+            limit=MAX_READER_NOTE_CHARS,
+        )
+        if kind == "note" and not note_text:
+            raise ValueError("附注内容还没有写。")
+
+        annotations.append(
+            {
+                "id": uuid.uuid4().hex[:10],
+                "kind": kind,
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+                "quote_text": quote_text,
+                "note_text": note_text,
+                "content_signature": content_signature,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        annotations = normalize_reader_annotation_list(annotations, content_signature=content_signature)
+        activity["last_read_at"] = now
+    elif action == "delete_annotation":
+        annotation_id = str(payload.get("annotation_id") or "").strip()
+        if not annotation_id:
+            raise ValueError("没有指定要删除的标注。")
+        filtered_annotations = [
+            annotation for annotation in annotations if str(annotation.get("id") or "").strip() != annotation_id
+        ]
+        if len(filtered_annotations) == len(annotations):
+            raise ValueError("没有找到这条标注。")
+        annotations = filtered_annotations
+        activity["last_read_at"] = now
+    else:
+        raise ValueError("暂不支持这种阅读操作。")
+
+    item["reader_annotations"] = annotations
+    item["reading_record"] = activity
 
 
 TRANSCRIPT_PDF_FONT_CACHE: str | None = None
@@ -8975,11 +14450,33 @@ def build_navigation_context(
 
 @app.get("/access")
 def access_password_gate() -> str:
+    if is_truthy_flag(request.args.get("force")):
+        session.clear()
+        session.permanent = False
+
     if is_web_access_authenticated():
         return redirect(safe_next_url(request.args.get("next"), url_for("index")))
 
     next_url = safe_next_url(request.args.get("next"), url_for("index"))
     return render_template("access_gate.html", next_url=next_url)
+
+
+@app.get("/visitor/<access_token>")
+def visitor_direct_entry(access_token: str):
+    if not WEB_VISITOR_PASSWORD_SIGNATURE:
+        abort(404)
+
+    expected_token = current_visitor_share_token()
+    if not access_token or not hmac.compare_digest(str(access_token), expected_token):
+        abort(404)
+
+    next_url = safe_next_url(request.args.get("next"), url_for("monitor_page"))
+    session.clear()
+    session.permanent = False
+    session[WEB_ACCESS_SESSION_KEY] = WEB_VISITOR_PASSWORD_SIGNATURE
+    session[WEB_ACCESS_ROLE_SESSION_KEY] = WEB_ACCESS_ROLE_VISITOR
+    session.modified = True
+    return redirect(next_url)
 
 
 @app.post("/access")
@@ -8989,14 +14486,200 @@ def access_password_submit():
         return redirect(next_url)
 
     submitted_password = str(request.form.get("password") or "")
-    if not hmac.compare_digest(submitted_password, WEB_ACCESS_PASSWORD):
-        flash("访问密码不对，请再试一次。", "error")
-        return redirect(url_for("access_password_gate", next=next_url))
+    if hmac.compare_digest(submitted_password, WEB_ACCESS_PASSWORD):
+        session.clear()
+        session.permanent = True
+        session[WEB_ACCESS_SESSION_KEY] = WEB_ACCESS_PASSWORD_SIGNATURE
+        session[WEB_ACCESS_ROLE_SESSION_KEY] = WEB_ACCESS_ROLE_ADMIN
+        flash(f"访问验证已通过，当前浏览器 {WEB_ACCESS_REMEMBER_DAYS} 天内不用重复输入。", "success")
+        return redirect(next_url)
 
-    session.permanent = True
-    session[WEB_ACCESS_SESSION_KEY] = WEB_ACCESS_PASSWORD_SIGNATURE
-    flash(f"访问验证已通过，当前浏览器 {WEB_ACCESS_REMEMBER_DAYS} 天内不用重复输入。", "success")
+    if WEB_VISITOR_PASSWORD_SIGNATURE and hmac.compare_digest(submitted_password, WEB_VISITOR_PASSWORD):
+        session.clear()
+        session.permanent = False
+        session[WEB_ACCESS_SESSION_KEY] = WEB_VISITOR_PASSWORD_SIGNATURE
+        session[WEB_ACCESS_ROLE_SESSION_KEY] = WEB_ACCESS_ROLE_VISITOR
+        session.modified = True
+        flash("访客模式已开启：当前窗口内只读浏览，关闭后需要重新输入。", "success")
+        return redirect(next_url)
+
+    flash("访问密码不对，请再试一次。", "error")
+    return redirect(url_for("access_password_gate", next=next_url))
+
+
+@app.post("/access/ai-direct")
+def update_ai_direct_access():
+    if current_web_access_role() != WEB_ACCESS_ROLE_ADMIN:
+        abort(403)
+
+    next_url = safe_next_url(request.form.get("next_url"), url_for("monitor_page"))
+    store = load_stock_store()
+    settings = store.setdefault("workspace_settings", {})
+    settings["ai_direct_access_enabled"] = is_truthy_flag(request.form.get("enabled"))
+    save_stock_store(store)
+
+    if settings["ai_direct_access_enabled"]:
+        flash("AI 直连已开启：GPT 现在可以直接读取 /api/ai/*，不需要先输入密码。", "success")
+    else:
+        flash("AI 直连已关闭：/api/ai/* 已恢复访问密码保护。", "success")
     return redirect(next_url)
+
+
+@app.get("/clipboard/bootstrap")
+def clipboard_bootstrap():
+    access_error = ensure_clipboard_admin_access()
+    if access_error:
+        return access_error
+    return jsonify(build_clipboard_bootstrap_payload(load_clipboard_store()))
+
+
+@app.post("/clipboard/items")
+def create_clipboard_item():
+    access_error = ensure_clipboard_admin_access()
+    if access_error:
+        return access_error
+
+    text = str(request.form.get("text") or "")[:CLIPBOARD_MAX_TEXT_CHARS]
+    try:
+        uploads = list_clipboard_uploads_from_request()
+    except ValueError as error:
+        return clipboard_json_error(str(error), 400)
+
+    if not text.strip() and not uploads:
+        return clipboard_json_error("至少放一段文字或一张图片。", 400)
+
+    item_id = uuid.uuid4().hex[:12]
+    created_at = now_iso()
+    stored_images: list[dict[str, str]] = []
+    try:
+        stored_images = store_clipboard_upload_images(item_id, uploads)
+        store = load_clipboard_store()
+        store.setdefault("items", []).insert(
+            0,
+            {
+                "id": item_id,
+                "text": text,
+                "images": stored_images,
+                "created_at": created_at,
+                "updated_at": created_at,
+            },
+        )
+        store["updated_at"] = created_at
+        saved_store = save_clipboard_store(store)
+    except ValueError as error:
+        remove_clipboard_image_files(item_id, stored_images)
+        return clipboard_json_error(str(error), 400)
+    except OSError:
+        remove_clipboard_image_files(item_id, stored_images)
+        return clipboard_json_error("剪贴板保存失败，请稍后再试。", 500)
+
+    return jsonify(build_clipboard_bootstrap_payload(saved_store))
+
+
+@app.post("/clipboard/items/<item_id>")
+def update_clipboard_item(item_id: str):
+    access_error = ensure_clipboard_admin_access()
+    if access_error:
+        return access_error
+
+    safe_item_id = secure_filename(item_id)[:24]
+    if not safe_item_id:
+        return clipboard_json_error("剪贴板条目不存在。", 404)
+
+    store = load_clipboard_store()
+    item_index, item = find_clipboard_item(store, safe_item_id)
+    if item_index < 0 or not isinstance(item, dict):
+        return clipboard_json_error("剪贴板条目不存在。", 404)
+
+    text = str(request.form.get("text") or "")[:CLIPBOARD_MAX_TEXT_CHARS]
+    remove_image_ids = {
+        str(value).strip()
+        for value in request.form.getlist("remove_image_ids")
+        if str(value).strip()
+    }
+
+    try:
+        uploads = list_clipboard_uploads_from_request()
+    except ValueError as error:
+        return clipboard_json_error(str(error), 400)
+
+    existing_images = list(item.get("images", []))
+    kept_images = [image for image in existing_images if image.get("id") not in remove_image_ids]
+    removed_images = [image for image in existing_images if image.get("id") in remove_image_ids]
+
+    if len(kept_images) + len(uploads) > CLIPBOARD_MAX_IMAGES_PER_ITEM:
+        return clipboard_json_error(f"每条剪贴板内容最多保留 {CLIPBOARD_MAX_IMAGES_PER_ITEM} 张图片。", 400)
+
+    if not text.strip() and not kept_images and not uploads:
+        return clipboard_json_error("至少保留一段文字或一张图片。", 400)
+
+    stored_images: list[dict[str, str]] = []
+    try:
+        stored_images = store_clipboard_upload_images(safe_item_id, uploads)
+        updated_at = now_iso()
+        item["text"] = text
+        item["images"] = kept_images + stored_images
+        item["updated_at"] = updated_at
+        if not item.get("created_at"):
+            item["created_at"] = updated_at
+        store["items"][item_index] = item
+        store["updated_at"] = updated_at
+        saved_store = save_clipboard_store(store)
+    except ValueError as error:
+        remove_clipboard_image_files(safe_item_id, stored_images)
+        return clipboard_json_error(str(error), 400)
+    except OSError:
+        remove_clipboard_image_files(safe_item_id, stored_images)
+        return clipboard_json_error("剪贴板保存失败，请稍后再试。", 500)
+
+    if removed_images:
+        remove_clipboard_image_files(safe_item_id, removed_images)
+
+    return jsonify(build_clipboard_bootstrap_payload(saved_store))
+
+
+@app.post("/clipboard/items/<item_id>/delete")
+def delete_clipboard_item(item_id: str):
+    access_error = ensure_clipboard_admin_access()
+    if access_error:
+        return access_error
+
+    safe_item_id = secure_filename(item_id)[:24]
+    if not safe_item_id:
+        return clipboard_json_error("剪贴板条目不存在。", 404)
+
+    store = load_clipboard_store()
+    item_index, item = find_clipboard_item(store, safe_item_id)
+    if item_index < 0 or not isinstance(item, dict):
+        return clipboard_json_error("剪贴板条目不存在。", 404)
+
+    del store["items"][item_index]
+    store["updated_at"] = now_iso()
+    try:
+        saved_store = save_clipboard_store(store)
+    except OSError:
+        return clipboard_json_error("剪贴板删除失败，请稍后再试。", 500)
+
+    remove_clipboard_item_dir(safe_item_id)
+    return jsonify(build_clipboard_bootstrap_payload(saved_store))
+
+
+@app.get("/clipboard/files/<item_id>/<filename>")
+def clipboard_file(item_id: str, filename: str):
+    if current_web_access_role() != WEB_ACCESS_ROLE_ADMIN:
+        abort(403)
+
+    safe_item_id = secure_filename(item_id)[:24]
+    safe_filename = secure_filename(filename)
+    if not safe_item_id or not safe_filename:
+        abort(404)
+
+    target_dir = clipboard_item_dir(safe_item_id)
+    target_path = target_dir / safe_filename
+    if not target_path.exists() or not path_is_within(target_path, CLIPBOARD_UPLOADS_DIR):
+        abort(404)
+
+    return send_from_directory(target_dir, safe_filename, as_attachment=False)
 
 
 def load_codex_model_catalog() -> list[dict[str, Any]]:
@@ -9130,10 +14813,7 @@ def load_ai_chat_store() -> dict[str, Any]:
 
 def save_ai_chat_store(store: dict[str, Any]) -> None:
     normalized = normalize_ai_chat_store(store)
-    AI_CHAT_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = AI_CHAT_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(AI_CHAT_STORE_PATH)
+    write_json_atomic(AI_CHAT_STORE_PATH, normalized)
 
 
 def generate_ai_session_title(source_text: str) -> str:
@@ -9379,6 +15059,40 @@ def extract_mindmap_scope_request_payload(source: Any) -> dict[str, Any]:
     }
 
 
+def normalize_mindmap_generation_prompt(value: Any, *, limit: int = 1_200) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip()
+    return text
+
+
+def normalize_mindmap_generation_brief_text(value: Any, *, limit: int = MINDMAP_BRIEF_TEXT_CHAR_LIMIT) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip()
+    return text
+
+
+def normalize_mindmap_generation_brief(raw_brief: Any) -> dict[str, str]:
+    source = raw_brief if isinstance(raw_brief, dict) else {}
+    text = normalize_mindmap_generation_brief_text(source.get("text"))
+    original_name = re.sub(r"\s+", " ", str(source.get("original_name") or "").strip())[:240]
+    stored_name = secure_filename(str(source.get("stored_name") or "").strip())[:240]
+    uploaded_at = str(source.get("uploaded_at") or "").strip()[:40]
+    summary = re.sub(r"\s+", " ", str(source.get("summary") or "").strip())[:320]
+    if not summary and text:
+        summary = summarize_text_block(text, limit=140)
+    return {
+        "original_name": original_name,
+        "stored_name": stored_name,
+        "uploaded_at": uploaded_at,
+        "summary": summary,
+        "text": text,
+    }
+
+
 def save_mindmap_scope_draft(scope_settings: dict[str, Any] | None) -> None:
     if not scope_settings:
         session.pop(MINDMAP_SCOPE_DRAFT_SESSION_KEY, None)
@@ -9397,6 +15111,20 @@ def load_mindmap_scope_draft(*, known_symbols: set[str] | None = None) -> dict[s
         return normalize_ai_scope_settings(raw_scope, known_symbols=known_symbols)
     except ValueError:
         return None
+
+
+def save_mindmap_generation_prompt_draft(prompt_text: str | None) -> None:
+    normalized_prompt = normalize_mindmap_generation_prompt(prompt_text)
+    if not normalized_prompt:
+        session.pop(MINDMAP_GENERATION_PROMPT_DRAFT_SESSION_KEY, None)
+        return
+
+    session[MINDMAP_GENERATION_PROMPT_DRAFT_SESSION_KEY] = normalized_prompt
+    session.modified = True
+
+
+def load_mindmap_generation_prompt_draft() -> str:
+    return normalize_mindmap_generation_prompt(session.get(MINDMAP_GENERATION_PROMPT_DRAFT_SESSION_KEY))
 
 
 def should_use_mindmap_scope_draft_fallback(
@@ -9440,7 +15168,6 @@ def build_ai_scope_time_bounds(scope_settings: dict[str, Any]) -> tuple[float | 
 
 
 def report_matches_symbol(report: dict[str, Any], symbol: str) -> bool:
-    pattern = re.compile(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", re.IGNORECASE)
     haystack = "\n".join(
         [
             str(report.get("title") or ""),
@@ -9449,7 +15176,9 @@ def report_matches_symbol(report: dict[str, Any], symbol: str) -> bool:
             str(report.get("content") or ""),
         ]
     )
-    return bool(pattern.search(haystack))
+    display_name = resolve_stock_display_name(symbol)
+    aliases = build_ai_native_symbol_search_terms(symbol, display_name=display_name)
+    return any(text_contains_search_alias(haystack, alias) for alias in aliases)
 
 
 def resolve_report_activity_date(report: dict[str, Any]) -> str:
@@ -10492,6 +16221,6232 @@ def build_ai_scoped_knowledge_bundle(session: dict[str, Any]) -> Path:
     return bundle_path
 
 
+def load_ai_native_readme_text() -> str:
+    quick_start = """## Quick Start
+
+1. Read `/api/ai/bootstrap.json` first for entrypoints and time semantics.
+2. For open-ended discovery, use `/api/ai/search.json?q=<QUERY>`.
+3. For a single stock, prefer `/api/ai/brief.json?symbol=<SYMBOL>`.
+4. Use `/api/ai/experts.json?symbol=<SYMBOL>` for expert materials.
+5. Use `/api/ai/context-pack.json?query=<QUERY>&symbols=<SYMBOL>` when you need a compact evidence pack.
+6. Use `/api/analysis/timeline.json?symbols=<SYMBOL>` for chronology-first analysis.
+7. Use `/api/analysis/compare.json?symbols=<SYMBOL1,SYMBOL2>` for side-by-side comparison.
+8. Use `/api/ai/bundle.md?symbols=<SYMBOL>&include_setups=1` for a markdown research bundle.
+9. Fall back to `/api/ai/manifest.json?symbol=<SYMBOL>` for the full index.
+
+## Time Fields
+
+- `activity_date`: primary chronology field for reasoning.
+- `display_time`: human-readable time label for the item.
+- `updated_at`: source or system update time; use as a fallback time anchor.
+- `generated_at`: response generation time.
+"""
+    fallback = """# AI Native Layer
+
+## Quick Start
+
+1. Read `/api/ai/bootstrap.json` first for entrypoints and time semantics.
+2. For open-ended discovery, use `/api/ai/search.json?q=<QUERY>`.
+3. For a single stock, prefer `/api/ai/brief.json?symbol=<SYMBOL>`.
+4. Use `/api/ai/experts.json?symbol=<SYMBOL>` for expert materials.
+5. Use `/api/ai/context-pack.json?query=<QUERY>&symbols=<SYMBOL>` when you need a compact evidence pack.
+6. Use `/api/analysis/timeline.json?symbols=<SYMBOL>` for chronology-first analysis.
+7. Use `/api/analysis/compare.json?symbols=<SYMBOL1,SYMBOL2>` for side-by-side comparison.
+8. Use `/api/ai/bundle.md?symbols=<SYMBOL>&include_setups=1` for a markdown research bundle.
+9. Fall back to `/api/ai/manifest.json?symbol=<SYMBOL>` for the full index.
+
+## Time Fields
+
+- `activity_date`: primary chronology field for reasoning.
+- `display_time`: human-readable time label for the item.
+- `updated_at`: source or system update time; use as a fallback time anchor.
+- `generated_at`: response generation time.
+
+Use `/api/ai/manifest.json` to discover available documents, `/api/ai/experts.json` for expert materials, and `/api/ai/bundle.md` to request a scoped markdown bundle.
+All endpoints inherit the site's existing password gate and only expose curated content, never secrets or environment variables.
+"""
+    try:
+        text = AI_NATIVE_README_TEMPLATE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return fallback.strip() + "\n"
+
+    merged = (text or fallback).strip()
+    additions: list[str] = []
+    if "/api/ai/search.json" not in merged or "/api/ai/context-pack.json" not in merged:
+        additions.append(
+            """## Search And Context Pack
+
+- `/api/ai/search.json?q=<QUERY>&symbols=<SYMBOL>&kinds=<KIND1,KIND2>`
+- `/api/ai/context-pack.json?query=<QUERY>&symbols=<SYMBOL>&kinds=<KIND1,KIND2>`
+
+Use `search.json` for lightweight retrieval and ranking.
+Use `context-pack.json` when the model needs a smaller set of full-text chunks instead of a long manifest.
+""".strip()
+        )
+    if "/api/analysis/timeline.json" not in merged or "/api/analysis/compare.json" not in merged:
+        additions.append(
+            """## Analysis Endpoints
+
+- `/api/analysis/timeline.json?symbols=<SYMBOL>&kinds=<KIND1,KIND2>`
+- `/api/analysis/compare.json?symbols=<SYMBOL1,SYMBOL2>&q=<QUERY>&kinds=<KIND1,KIND2>`
+- `/api/agent/bootstrap.json`
+
+Use `timeline.json` for chronology-first summaries.
+Use `compare.json` for per-symbol deltas, shared tags, and kind matrices.
+Use `agent/bootstrap.json` and `/api/agent/tools/*.json` when a GPT tool layer expects a stable read-only envelope.
+""".strip()
+        )
+    if "/api/agent/writes/operations.json" not in merged:
+        additions.append(
+            """## Guarded Write Endpoints
+
+- `POST /api/agent/writes/clipboard/preview.json`
+- `POST /api/agent/writes/stock-note/preview.json`
+- `GET /api/agent/writes/operations.json`
+- `POST /api/agent/writes/operations/<OP_ID>/commit.json`
+- `POST /api/agent/writes/operations/<OP_ID>/discard.json`
+
+Write tools are admin-only.
+They must go through `preview -> review diff -> commit`; the backend does not expose direct destructive write tools.
+Stock-note updates also verify the source note fingerprint before commit to avoid overwriting newer edits silently.
+""".strip()
+        )
+    if "/api/artifacts/bootstrap.json" not in merged or "/api/jobs/artifacts/timeline.json" not in merged:
+        additions.append(
+            """## Artifact Store And Job Queue
+
+- `GET /api/artifacts/bootstrap.json`
+- `GET /api/artifacts/list.json?kinds=<KIND>&symbols=<SYMBOL>`
+- `GET /api/artifacts/<ARTIFACT_ID>.json`
+- `GET /api/jobs/list.json?statuses=<STATUS>`
+- `POST /api/jobs/artifacts/timeline.json`
+- `POST /api/jobs/artifacts/compare.json`
+
+Use the artifact store when analysis results should be reusable instead of re-computed every time.
+Use the job queue for heavier timeline/compare builds so the main page request stays fast and stable.
+Artifact/job creation is additive and does not replace the existing page write path.
+""".strip()
+        )
+
+    if "bootstrap.json" in merged and "brief.json" in merged:
+        if additions:
+            merged = f"{merged.rstrip()}\n\n{'\n\n'.join(additions)}"
+        return merged.rstrip() + "\n"
+
+    first_line, _, rest = merged.partition("\n")
+    if first_line.startswith("# "):
+        merged = "\n".join([first_line, "", quick_start.strip(), "", rest.strip()]).strip()
+    else:
+        merged = f"{quick_start.strip()}\n\n{merged}".strip()
+    if additions:
+        merged = f"{merged.rstrip()}\n\n{'\n\n'.join(additions)}"
+    return merged.rstrip() + "\n"
+
+
+def materialize_ai_native_readme_text() -> str:
+    readme_text = load_ai_native_readme_text()
+    AI_NATIVE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(AI_NATIVE_DATA_DIR / "README.md", readme_text)
+    return readme_text
+
+
+def build_ai_native_readme_payload(*, readme_text: str | None = None) -> dict[str, Any]:
+    content = readme_text if isinstance(readme_text, str) else materialize_ai_native_readme_text()
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "content_type": "text/markdown; charset=utf-8",
+        "bootstrap_url": url_for("ai_native_bootstrap_json"),
+        "readme_markdown_url": url_for("ai_native_readme_markdown"),
+        "content": content,
+        "line_count": len(content.splitlines()),
+    }
+
+
+def slugify_ai_native_segment(value: str, *, fallback: str = "item", limit: int = 64) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = normalized.encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip("-._")
+    if not normalized:
+        normalized = fallback
+    return normalized[:limit] or fallback
+
+
+def build_ai_native_asset_dir(kind: str, doc_id: str) -> Path:
+    kind_key = slugify_ai_native_segment(kind, fallback="document-kind", limit=40)
+    doc_key = slugify_ai_native_segment(doc_id, fallback="document", limit=56)
+    digest = sha256_text(f"{kind}:{doc_id}")[:12]
+    return AI_NATIVE_DOCS_DIR / kind_key / f"{doc_key}-{digest}"
+
+
+def build_ai_native_asset_rel_dir(kind: str, doc_id: str) -> str:
+    asset_dir = build_ai_native_asset_dir(kind, doc_id)
+    try:
+        return asset_dir.relative_to(BASE_DIR).as_posix()
+    except ValueError:
+        return asset_dir.as_posix()
+
+
+def build_ai_native_front_matter_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def build_ai_native_front_matter(payload: dict[str, Any]) -> str:
+    lines = ["---"]
+    for key, value in payload.items():
+        lines.append(f"{key}: {build_ai_native_front_matter_value(value)}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def build_ai_native_markdown_document(descriptor: dict[str, Any]) -> str:
+    body_markdown = str(descriptor.get("body_markdown") or "").strip()
+    if not body_markdown:
+        title = str(descriptor.get("title") or "Untitled").strip() or "Untitled"
+        summary = str(descriptor.get("summary") or "").strip()
+        body_markdown = f"# {title}\n\n{summary or 'No body text is available.'}"
+
+    front_matter = build_ai_native_front_matter(
+        {
+            "doc_kind": str(descriptor.get("kind") or ""),
+            "doc_id": str(descriptor.get("doc_id") or ""),
+            "title": str(descriptor.get("title") or ""),
+            "symbols": list(descriptor.get("symbols") or []),
+            "tags": list(descriptor.get("tags") or []),
+            "activity_date": str(descriptor.get("activity_date") or ""),
+            "updated_at": str(descriptor.get("updated_at") or ""),
+            "source_name": str(descriptor.get("source_name") or ""),
+            "detail_url": str(descriptor.get("detail_url") or ""),
+        }
+    )
+    return f"{front_matter}\n\n{body_markdown.rstrip()}\n"
+
+
+def build_ai_native_chunks(body_markdown: str) -> list[dict[str, Any]]:
+    lines = str(body_markdown or "").splitlines()
+    sections: list[tuple[list[str], str]] = []
+    heading_path: list[str] = []
+    current_lines: list[str] = []
+
+    def flush_section() -> None:
+        section_text = "\n".join(current_lines).strip()
+        if section_text:
+            sections.append((heading_path.copy(), section_text))
+
+    for line in lines:
+        match = re.match(r"^(#{1,6})\s+(.*)$", line.strip())
+        if match:
+            flush_section()
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            heading_path[:] = heading_path[: level - 1] + [title]
+            current_lines = [line]
+            continue
+        current_lines.append(line)
+
+    flush_section()
+
+    if not sections and str(body_markdown or "").strip():
+        sections = [([], str(body_markdown).strip())]
+
+    chunks: list[dict[str, Any]] = []
+    chunk_index = 1
+    for section_heading_path, section_text in sections:
+        blocks = [block.strip() for block in re.split(r"\n{2,}", section_text) if block.strip()]
+        if not blocks:
+            continue
+
+        current_blocks: list[str] = []
+        current_size = 0
+        for block in blocks:
+            block_size = len(block)
+            if current_blocks and current_size + block_size + 2 > AI_NATIVE_CHUNK_TARGET_CHARS:
+                chunk_text = "\n\n".join(current_blocks).strip()
+                chunks.append(
+                    {
+                        "chunk_id": f"chunk-{chunk_index:04d}",
+                        "heading_path": section_heading_path,
+                        "char_count": len(chunk_text),
+                        "preview": summarize_text_block(chunk_text, limit=140),
+                        "text": chunk_text,
+                    }
+                )
+                chunk_index += 1
+                current_blocks = []
+                current_size = 0
+
+            current_blocks.append(block)
+            current_size += block_size + 2
+
+        if current_blocks:
+            chunk_text = "\n\n".join(current_blocks).strip()
+            chunks.append(
+                {
+                    "chunk_id": f"chunk-{chunk_index:04d}",
+                    "heading_path": section_heading_path,
+                    "char_count": len(chunk_text),
+                    "preview": summarize_text_block(chunk_text, limit=140),
+                    "text": chunk_text,
+                }
+            )
+            chunk_index += 1
+
+    return chunks
+
+
+def write_ai_native_chunks_jsonl(path: Path, chunks: list[dict[str, Any]]) -> None:
+    lines = [json.dumps(chunk, ensure_ascii=False) for chunk in chunks]
+    write_text_atomic(path, ("\n".join(lines) + ("\n" if lines else "")))
+
+
+def build_ai_native_document_urls(kind: str, doc_id: str) -> dict[str, str]:
+    return {
+        "markdown_url": url_for("ai_native_document_markdown_plain", kind=kind, doc_id=doc_id),
+        "json_url": url_for("ai_native_document_json_plain", kind=kind, doc_id=doc_id),
+    }
+
+
+def build_ai_native_public_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
+    kind = str(descriptor.get("kind") or "")
+    doc_id = str(descriptor.get("doc_id") or "")
+    urls = build_ai_native_document_urls(kind, doc_id)
+    asset_dir = build_ai_native_asset_dir(kind, doc_id)
+    return {
+        "kind": kind,
+        "kind_label": AI_NATIVE_DOCUMENT_KIND_META.get(kind, "文档"),
+        "doc_id": doc_id,
+        "title": str(descriptor.get("title") or ""),
+        "summary": str(descriptor.get("summary") or ""),
+        "symbols": list(descriptor.get("symbols") or []),
+        "tags": list(descriptor.get("tags") or []),
+        "activity_date": str(descriptor.get("activity_date") or ""),
+        "display_time": str(descriptor.get("display_time") or ""),
+        "updated_at": str(descriptor.get("updated_at") or ""),
+        "source_name": str(descriptor.get("source_name") or ""),
+        "detail_url": str(descriptor.get("detail_url") or ""),
+        "sort_value": float(descriptor.get("sort_value") or 0.0),
+        "asset_rel_dir": build_ai_native_asset_rel_dir(kind, doc_id),
+        "asset_cached": asset_dir.exists(),
+        **urls,
+    }
+
+
+def ensure_ai_native_document_asset(descriptor: dict[str, Any]) -> dict[str, Any]:
+    kind = str(descriptor.get("kind") or "").strip()
+    doc_id = str(descriptor.get("doc_id") or "").strip()
+    if not kind or not doc_id:
+        raise ValueError("缺少 AI 文档标识。")
+
+    markdown_text = build_ai_native_markdown_document(descriptor)
+    body_markdown = str(descriptor.get("body_markdown") or "").strip()
+    chunks = build_ai_native_chunks(body_markdown)
+    source_hash = sha256_text(
+        json.dumps(
+            {
+                "kind": kind,
+                "doc_id": doc_id,
+                "title": descriptor.get("title"),
+                "summary": descriptor.get("summary"),
+                "symbols": descriptor.get("symbols", []),
+                "tags": descriptor.get("tags", []),
+                "activity_date": descriptor.get("activity_date"),
+                "updated_at": descriptor.get("updated_at"),
+                "source_name": descriptor.get("source_name"),
+                "detail_url": descriptor.get("detail_url"),
+                "body_markdown": body_markdown,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+    asset_dir = build_ai_native_asset_dir(kind, doc_id)
+    markdown_path = asset_dir / "document.md"
+    meta_path = asset_dir / "meta.json"
+    chunks_path = asset_dir / "chunks.jsonl"
+    existing_meta = load_json(meta_path)
+    if (
+        existing_meta.get("source_hash") == source_hash
+        and markdown_path.exists()
+        and chunks_path.exists()
+    ):
+        return existing_meta
+
+    public_descriptor = build_ai_native_public_descriptor(descriptor)
+    meta_payload = {
+        **public_descriptor,
+        "source_hash": source_hash,
+        "chunk_count": len(chunks),
+        "generated_at": now_iso(),
+        "markdown_file": "document.md",
+        "meta_file": "meta.json",
+        "chunks_file": "chunks.jsonl",
+    }
+
+    write_text_atomic(markdown_path, markdown_text)
+    write_json_atomic(meta_path, meta_payload)
+    write_ai_native_chunks_jsonl(chunks_path, chunks)
+    return meta_payload
+
+
+def read_ai_native_chunks(kind: str, doc_id: str) -> list[dict[str, Any]]:
+    chunks_path = build_ai_native_asset_dir(kind, doc_id) / "chunks.jsonl"
+    if not chunks_path.exists():
+        return []
+
+    chunks: list[dict[str, Any]] = []
+    try:
+        for line in chunks_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                chunks.append(payload)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return chunks
+
+
+def materialize_ai_native_support_files(manifest: dict[str, Any]) -> None:
+    AI_NATIVE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(AI_NATIVE_DATA_DIR / "README.md", load_ai_native_readme_text())
+    write_json_atomic(AI_NATIVE_DATA_DIR / "manifest.json", manifest)
+
+
+def build_stock_display_name_map(store: dict[str, Any] | None = None) -> dict[str, str]:
+    active_store = store if isinstance(store, dict) else load_stock_store()
+    stocks = active_store.get("stocks", {}) if isinstance(active_store.get("stocks"), dict) else {}
+    mapping: dict[str, str] = {}
+    for raw_symbol, raw_entry in stocks.items():
+        normalized_symbol = normalize_stock_symbol(str(raw_symbol) or "")
+        if not normalized_symbol:
+            continue
+        entry = raw_entry if isinstance(raw_entry, dict) else {}
+        display_name = str(entry.get("display_name") or normalized_symbol).strip() or normalized_symbol
+        mapping[normalized_symbol] = display_name
+    return mapping
+
+
+def resolve_stock_display_name(symbol: str, *, store: dict[str, Any] | None = None) -> str:
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    if not normalized_symbol:
+        return ""
+
+    return build_stock_display_name_map(store).get(normalized_symbol, normalized_symbol)
+
+
+def build_ai_native_symbol_search_terms(
+    symbol: str,
+    *,
+    display_name: str = "",
+) -> list[str]:
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    normalized_name = re.sub(r"\s+", " ", str(display_name or "").strip())
+    terms: list[str] = []
+    if normalized_symbol:
+        terms.append(normalized_symbol)
+    if normalized_name and normalized_name.casefold() != normalized_symbol.casefold():
+        terms.append(normalized_name)
+    if normalized_symbol and normalized_name:
+        terms.append(f"{normalized_symbol} {normalized_name}")
+    return ordered_unique([item for item in terms if item])
+
+
+def build_ai_native_symbols_search_text(
+    symbols: list[str] | tuple[str, ...] | set[str],
+    *,
+    store: dict[str, Any] | None = None,
+    display_name_map: dict[str, str] | None = None,
+) -> str:
+    terms: list[str] = []
+    normalized_map = {
+        normalize_stock_symbol(str(key) or "") or "": re.sub(r"\s+", " ", str(value or "").strip())
+        for key, value in dict(display_name_map or {}).items()
+        if normalize_stock_symbol(str(key) or "")
+    }
+    for symbol in normalize_stock_symbol_list(symbols):
+        display_name = normalized_map.get(symbol) or resolve_stock_display_name(symbol, store=store)
+        terms.extend(build_ai_native_symbol_search_terms(symbol, display_name=display_name))
+    return " ".join(ordered_unique(item for item in terms if item))
+
+
+def build_ai_native_search_text(*parts: Any, limit: int = AI_NATIVE_SEARCH_TEXT_LIMIT) -> str:
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize(
+            "NFKC",
+            " ".join(str(part or "").strip() for part in parts if str(part or "").strip()),
+        ),
+    ).strip()
+    if limit > 0 and len(normalized) > limit:
+        return normalized[:limit].rstrip()
+    return normalized
+
+
+def text_contains_search_alias(text: str, alias: str) -> bool:
+    normalized_text = re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+    normalized_alias = re.sub(r"\s+", " ", str(alias or "").strip()).casefold()
+    if not normalized_text or not normalized_alias:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", normalized_alias):
+        return normalized_alias in normalized_text
+    if " " in normalized_alias:
+        return normalized_alias in normalized_text
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])",
+            normalized_text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def build_ai_native_report_symbols(
+    report: dict[str, Any],
+    known_symbols: list[str],
+    *,
+    display_name_map: dict[str, str] | None = None,
+) -> list[str]:
+    matches: list[str] = []
+    for symbol in known_symbols:
+        display_name = str((display_name_map or {}).get(symbol) or "").strip()
+        aliases = build_ai_native_symbol_search_terms(symbol, display_name=display_name)
+        if any(
+            text_contains_search_alias(
+                "\n".join(
+                    [
+                        str(report.get("title") or ""),
+                        str(report.get("summary") or ""),
+                        str(report.get("filename") or ""),
+                        str(report.get("content") or ""),
+                    ]
+                ),
+                alias,
+            )
+            for alias in aliases
+        ):
+            matches.append(symbol)
+        if len(matches) >= 12:
+            break
+    return matches
+
+
+def build_ai_native_report_descriptor(
+    report: dict[str, Any],
+    *,
+    kind: str,
+    known_symbols: list[str],
+    include_body: bool = False,
+    display_name_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    filename = str(report.get("filename") or "").strip()
+    content = str(report.get("content") or "").strip()
+    title = str(report.get("title") or filename or "未命名报告").strip()
+    body_markdown = ""
+    if include_body:
+        body_markdown = content or f"# {title}\n\n{str(report.get('summary') or '').strip()}"
+        if body_markdown and not body_markdown.lstrip().startswith("#"):
+            body_markdown = f"# {title}\n\n{body_markdown}"
+
+    detail_endpoint = "index" if kind == "report" else "monitor_page"
+    detail_kwargs = {"report": filename} if kind == "report" else {"tab": "signals", "signal_report": filename}
+    matched_symbols = build_ai_native_report_symbols(report, known_symbols, display_name_map=display_name_map)
+    return {
+        "kind": kind,
+        "doc_id": filename,
+        "title": title,
+        "summary": str(report.get("summary") or "").strip(),
+        "symbols": matched_symbols,
+        "tags": [],
+        "activity_date": resolve_report_activity_date(report),
+        "display_time": str(report.get("report_date") or "").strip(),
+        "updated_at": str(report.get("updated_at") or report.get("report_date") or "").strip(),
+        "source_name": filename,
+        "detail_url": url_for(detail_endpoint, **detail_kwargs),
+        "sort_value": float(report.get("sort_key") or 0.0),
+        "body_markdown": body_markdown,
+        "search_text": build_ai_native_search_text(
+            content,
+            build_ai_native_symbols_search_text(matched_symbols, display_name_map=display_name_map),
+        ),
+    }
+
+
+def build_ai_native_stock_setup_descriptor(
+    symbol: str,
+    *,
+    include_body: bool = False,
+    display_name: str = "",
+) -> dict[str, Any] | None:
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not normalized_symbol:
+        return None
+
+    path = stock_setup_path(normalized_symbol)
+    if not path.exists():
+        return None
+
+    content = read_text_file(path).strip()
+    if not content:
+        return None
+
+    if include_body and not content.lstrip().startswith("#"):
+        content = f"# {normalized_symbol} Setup\n\n{content}"
+
+    stat_result = path.stat()
+    updated_at = format_timestamp(stat_result.st_mtime)
+    symbol_search_text = build_ai_native_symbols_search_text(
+        [normalized_symbol],
+        display_name_map={normalized_symbol: display_name} if display_name else None,
+    )
+    return {
+        "kind": "stock_setup",
+        "doc_id": normalized_symbol,
+        "title": f"{normalized_symbol} Setup",
+        "summary": extract_summary(content),
+        "symbols": [normalized_symbol],
+        "tags": [],
+        "activity_date": iso_to_date(datetime.fromtimestamp(stat_result.st_mtime).isoformat()) or "",
+        "display_time": format_iso_timestamp(updated_at) if updated_at else "",
+        "updated_at": updated_at,
+        "source_name": path.name,
+        "detail_url": url_for("stock_detail", symbol=normalized_symbol),
+        "sort_value": stat_result.st_mtime,
+        "body_markdown": content if include_body else "",
+        "search_text": build_ai_native_search_text(content, symbol_search_text),
+    }
+
+
+def build_ai_native_note_descriptor(
+    symbol: str,
+    note: dict[str, Any],
+    *,
+    include_body: bool = False,
+    display_name: str = "",
+) -> dict[str, Any]:
+    note_id = str(note.get("id") or "").strip()
+    title = str(note.get("title") or "未命名笔记").strip() or "未命名笔记"
+    content_text = str(note.get("content_text") or "").strip()
+    doc_id = f"{symbol}--{note_id}"
+    detail_url = url_for("stock_detail", symbol=symbol) + (f"#note-{note_id}" if note_id else "")
+    body_markdown = ""
+    if include_body:
+        body_markdown = "\n".join(
+            [
+                f"# {title}",
+                "",
+                f"- 股票: {symbol}",
+                f"- 时间: {note_display_time(note)}",
+                f"- 标签: {', '.join(normalize_tag_list(note.get('tags', []))) or '无'}",
+                "",
+                "## 正文",
+                "",
+                content_text or "当前没有正文。",
+            ]
+        )
+
+    symbol_search_text = build_ai_native_symbols_search_text(
+        [symbol],
+        display_name_map={symbol: display_name} if display_name else None,
+    )
+    return {
+        "kind": "note",
+        "doc_id": doc_id,
+        "title": title,
+        "summary": summarize_text_block(content_text),
+        "symbols": [symbol],
+        "tags": normalize_tag_list(note.get("tags", [])),
+        "activity_date": str(note.get("record_date") or iso_to_date(note.get("created_at")) or ""),
+        "display_time": note_display_time(note),
+        "updated_at": str(note.get("created_at") or ""),
+        "source_name": str(note.get("source_file_name") or note_id or title),
+        "detail_url": detail_url,
+        "sort_value": coerce_sort_timestamp(note.get("created_at")),
+        "body_markdown": body_markdown,
+        "search_text": build_ai_native_search_text(content_text, symbol_search_text),
+    }
+
+
+def resolve_ai_native_stock_file_path(symbol: str, file_entry: dict[str, Any]) -> Path | None:
+    base_dir = stock_upload_dir(symbol).resolve()
+    candidate = (base_dir / str(file_entry.get("stored_name") or "").strip()).resolve()
+    if not path_is_within(candidate, base_dir):
+        return None
+    return candidate
+
+
+def build_ai_native_file_text_cache_dir() -> Path:
+    return AI_NATIVE_DATA_DIR / "file-text-cache"
+
+
+def build_ai_native_file_text_cache_path(symbol: str, file_entry: dict[str, Any]) -> Path:
+    cache_key = secure_filename(f"{symbol}--{str(file_entry.get('id') or '').strip()}") or sha256_text(
+        serialize_stable_json(
+            {
+                "symbol": symbol,
+                "file_id": str(file_entry.get("id") or "").strip(),
+                "stored_name": str(file_entry.get("stored_name") or "").strip(),
+            }
+        )
+    )[:24]
+    return build_ai_native_file_text_cache_dir() / f"{cache_key}.json"
+
+
+def build_ai_native_file_text_cache_fingerprint(path: Path, file_entry: dict[str, Any]) -> str:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        stat_result = None
+    return sha256_text(
+        serialize_stable_json(
+            {
+                "path": str(path),
+                "stored_name": str(file_entry.get("stored_name") or "").strip(),
+                "original_name": str(file_entry.get("original_name") or "").strip(),
+                "size": int(stat_result.st_size) if stat_result else -1,
+                "mtime_ns": int(stat_result.st_mtime_ns) if stat_result else -1,
+            }
+        )
+    )
+
+
+def read_ai_native_file_text_cache(symbol: str, file_entry: dict[str, Any], path: Path) -> dict[str, Any]:
+    cache_payload = load_json(build_ai_native_file_text_cache_path(symbol, file_entry))
+    if cache_payload.get("fingerprint") != build_ai_native_file_text_cache_fingerprint(path, file_entry):
+        return {}
+    return cache_payload if isinstance(cache_payload, dict) else {}
+
+
+def write_ai_native_file_text_cache(
+    symbol: str,
+    file_entry: dict[str, Any],
+    path: Path,
+    *,
+    status: str,
+    text: str = "",
+) -> None:
+    cache_path = build_ai_native_file_text_cache_path(symbol, file_entry)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(
+        cache_path,
+        {
+            "symbol": symbol,
+            "file_id": str(file_entry.get("id") or "").strip(),
+            "stored_name": str(file_entry.get("stored_name") or "").strip(),
+            "original_name": str(file_entry.get("original_name") or "").strip(),
+            "fingerprint": build_ai_native_file_text_cache_fingerprint(path, file_entry),
+            "status": status,
+            "char_count": len(text),
+            "text": build_ai_native_search_text(text, limit=AI_NATIVE_FILE_TEXT_CACHE_LIMIT),
+            "updated_at": now_iso(),
+        },
+    )
+
+
+def load_ai_native_stock_file_extract_text(
+    symbol: str,
+    file_entry: dict[str, Any],
+    *,
+    allow_direct_extract: bool = False,
+) -> tuple[str, str]:
+    file_path = resolve_ai_native_stock_file_path(symbol, file_entry)
+    if file_path is None or not file_path.exists():
+        return "", "missing"
+
+    cache_payload = read_ai_native_file_text_cache(symbol, file_entry, file_path)
+    cached_text = str(cache_payload.get("text") or "").strip()
+    cached_status = str(cache_payload.get("status") or "").strip()
+    if cached_text:
+        return cached_text, "cached_extract"
+    if cached_status and not allow_direct_extract:
+        return "", cached_status
+    if not allow_direct_extract:
+        return "", "cache_miss"
+
+    suffix = Path(str(file_entry.get("original_name") or "")).suffix.lower()
+    if suffix not in TEXT_EXTRACTION_SUFFIXES:
+        write_ai_native_file_text_cache(symbol, file_entry, file_path, status="unsupported")
+        return "", "unsupported"
+
+    try:
+        file_size = int(file_path.stat().st_size)
+    except OSError:
+        file_size = -1
+    if file_size > AI_NATIVE_FILE_SEARCH_EXTRACT_MAX_BYTES:
+        write_ai_native_file_text_cache(symbol, file_entry, file_path, status="skipped_size")
+        return "", "skipped_size"
+
+    extracted_text, extracted = try_extract_file_text(file_path, str(file_entry.get("original_name") or ""))
+    normalized_text = build_ai_native_search_text(extracted_text or "", limit=AI_NATIVE_FILE_TEXT_CACHE_LIMIT)
+    if extracted and normalized_text:
+        write_ai_native_file_text_cache(symbol, file_entry, file_path, status="ok", text=normalized_text)
+        return normalized_text, "direct_extract"
+
+    write_ai_native_file_text_cache(symbol, file_entry, file_path, status="extract_failed")
+    return "", "extract_failed"
+
+
+def build_ai_native_file_body(
+    symbol: str,
+    file_entry: dict[str, Any],
+    note_lookup: dict[str, dict[str, Any]],
+    *,
+    allow_direct_extract: bool = False,
+) -> tuple[str, str]:
+    linked_note_id = str(file_entry.get("linked_note_id") or "").strip()
+    linked_note = note_lookup.get(linked_note_id, {})
+    linked_note_text = str(linked_note.get("content_text") or "").strip()
+    if linked_note_text:
+        return trim_note_content(linked_note_text), "linked_note"
+
+    extracted_text, extract_mode = load_ai_native_stock_file_extract_text(
+        symbol,
+        file_entry,
+        allow_direct_extract=allow_direct_extract,
+    )
+    if extracted_text:
+        return trim_note_content(extracted_text), extract_mode
+
+    description = str(file_entry.get("description") or "").strip()
+    if description:
+        return description, "description_only"
+    return "", extract_mode or "empty"
+
+
+def build_ai_native_file_descriptor(
+    symbol: str,
+    file_entry: dict[str, Any],
+    note_lookup: dict[str, dict[str, Any]],
+    *,
+    include_body: bool = False,
+    display_name_map: dict[str, str] | None = None,
+    allow_search_extract: bool = False,
+) -> dict[str, Any]:
+    file_id = str(file_entry.get("id") or "").strip()
+    title = str(file_entry.get("original_name") or "已上传文件").strip() or "已上传文件"
+    body_text, source_mode = build_ai_native_file_body(
+        symbol,
+        file_entry,
+        note_lookup,
+        allow_direct_extract=include_body or allow_search_extract,
+    )
+    detail_url = url_for("stock_detail", symbol=symbol) + (f"#file-{file_id}" if file_id else "")
+    description = str(file_entry.get("description") or "").strip()
+    linked_note_id = str(file_entry.get("linked_note_id") or "").strip()
+    linked_symbols = stock_file_linked_symbols(file_entry, symbol)
+    symbol_search_text = build_ai_native_symbols_search_text(linked_symbols, display_name_map=display_name_map)
+    file_id = str(file_entry.get("id") or "").strip()
+    original_name = str(file_entry.get("original_name") or "").strip()
+    is_previewable = is_file_previewable(original_name)
+    is_text_previewable_value = is_text_previewable(original_name)
+    is_image_previewable_value = is_image_previewable(original_name)
+    download_url = url_for("download_stock_file", symbol=symbol, file_id=file_id) if file_id else ""
+    inline_url = url_for("inline_stock_file", symbol=symbol, file_id=file_id) if file_id else ""
+    preview_url = url_for("preview_stock_file", symbol=symbol, file_id=file_id) if file_id else ""
+    preview_fragment_url = url_for("preview_stock_file_fragment", symbol=symbol, file_id=file_id) if file_id else ""
+
+    body_markdown = ""
+    if include_body:
+        lines = [
+            f"# {title}",
+            "",
+            f"- 股票: {symbol}",
+            f"- 上传时间: {file_display_time(file_entry)}",
+            f"- 文件类型: {detect_file_type_label(title)}",
+            f"- 标签: {', '.join(normalize_tag_list(file_entry.get('tags', []))) or '无'}",
+            f"- 来源模式: {source_mode or 'unknown'}",
+            "",
+        ]
+        if description:
+            lines.extend(["## 说明", "", description, ""])
+        lines.extend(["## 机器正文", "", body_text or "当前没有可直接提供给 AI 的正文。"])
+        body_markdown = "\n".join(lines)
+
+    return {
+        "kind": "file",
+        "doc_id": f"{symbol}--{file_id}",
+        "title": title,
+        "summary": summarize_text_block(description or title),
+        "symbols": linked_symbols,
+        "tags": normalize_tag_list(file_entry.get("tags", [])),
+        "activity_date": str(file_entry.get("record_date") or iso_to_date(file_entry.get("uploaded_at")) or ""),
+        "display_time": file_display_time(file_entry),
+        "updated_at": str(file_entry.get("uploaded_at") or ""),
+        "source_name": title,
+        "detail_url": detail_url,
+        "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
+        "body_markdown": body_markdown,
+        "search_text": build_ai_native_search_text(body_text, description, symbol_search_text),
+        "extra": {
+            "file_id": file_id,
+            "original_name": original_name,
+            "storage_symbol": symbol,
+            "linked_note_id": linked_note_id,
+            "linked_note_title": str(file_entry.get("linked_note_title") or "").strip(),
+            "file_type": detect_file_type_label(original_name),
+            "source_mode": source_mode,
+            "download_url": download_url,
+            "inline_url": inline_url,
+            "preview_url": preview_url if is_previewable else "",
+            "preview_fragment_url": preview_fragment_url if is_previewable else "",
+            "is_previewable": is_previewable,
+            "is_text_previewable": is_text_previewable_value,
+            "is_image_previewable": is_image_previewable_value,
+        },
+    }
+
+
+def build_ai_native_expert_resource_doc_binding(resource: dict[str, Any]) -> tuple[str, str] | None:
+    kind = str(resource.get("kind") or "").strip()
+    resource_id = str(resource.get("resource_id") or "").strip()
+    symbol = normalize_stock_symbol(str(resource.get("symbol") or "").strip()) or ""
+    if kind in {"note", "file"} and symbol and resource_id:
+        return kind, f"{symbol}--{resource_id}"
+    if kind == "transcript" and resource_id:
+        return kind, resource_id
+    return None
+
+
+def build_ai_native_expert_related_resources(store: dict[str, Any], expert: dict[str, Any]) -> list[dict[str, Any]]:
+    resources: list[dict[str, Any]] = []
+    for resource_ref in expert.get("resource_refs", []):
+        resolved = resolve_expert_resource_ref(store, resource_ref)
+        if resolved is None:
+            continue
+
+        binding = build_ai_native_expert_resource_doc_binding(resolved)
+        ai_urls: dict[str, str] = {}
+        ai_kind = ""
+        ai_doc_id = ""
+        if binding is not None:
+            ai_kind, ai_doc_id = binding
+            ai_urls = build_ai_native_document_urls(ai_kind, ai_doc_id)
+
+        resources.append(
+            {
+                "kind": str(resolved.get("kind") or ""),
+                "kind_label": str(resolved.get("kind_label") or ""),
+                "resource_id": str(resolved.get("resource_id") or ""),
+                "symbol": normalize_stock_symbol(str(resolved.get("symbol") or "")) or "",
+                "symbols": normalize_stock_symbol_list(resolved.get("symbols", [])),
+                "title": str(resolved.get("title") or "").strip(),
+                "summary": str(resolved.get("summary") or "").strip(),
+                "display_time": str(resolved.get("display_time") or "").strip(),
+                "status_label": str(resolved.get("status_label") or "").strip(),
+                "preview_url": str(resolved.get("preview_url") or "").strip(),
+                "detail_url": str(resolved.get("url") or "").strip(),
+                "secondary_url": str(resolved.get("secondary_url") or "").strip(),
+                "secondary_label": str(resolved.get("secondary_label") or "").strip(),
+                "sort_value": float(resolved.get("sort_value") or 0.0),
+                "ai_kind": ai_kind,
+                "ai_doc_id": ai_doc_id,
+                "ai_markdown_url": str(ai_urls.get("markdown_url") or ""),
+                "ai_json_url": str(ai_urls.get("json_url") or ""),
+            }
+        )
+
+    resources.sort(
+        key=lambda item: (
+            float(item.get("sort_value") or 0.0),
+            str(item.get("display_time") or ""),
+            str(item.get("title") or "").casefold(),
+        ),
+        reverse=True,
+    )
+    return resources
+
+
+def build_ai_native_expert_descriptor(
+    expert: dict[str, Any],
+    store: dict[str, Any],
+    *,
+    include_body: bool = False,
+) -> dict[str, Any]:
+    expert_id = str(expert.get("id") or "").strip()
+    if not expert_id:
+        raise ValueError("缺少专家 id。")
+
+    card = build_expert_card(expert, selected_expert_id=expert_id)
+    resources = build_ai_native_expert_related_resources(store, expert)
+    interviews = [build_expert_interview_card(item) for item in expert.get("interviews", [])]
+    interviews.sort(key=expert_interview_sort_key, reverse=True)
+
+    related_symbols = set(normalize_stock_symbol_list(card.get("related_symbols", [])))
+    for resource in resources:
+        related_symbols.update(normalize_stock_symbol_list(resource.get("symbols", [])))
+        resource_symbol = normalize_stock_symbol(str(resource.get("symbol") or ""))
+        if resource_symbol:
+            related_symbols.add(resource_symbol)
+    symbols = sorted(related_symbols, key=str.casefold)
+
+    tags = normalize_tag_list(expert.get("tags", []))
+    identity_line = str(card.get("identity_line") or "").strip()
+    latest_interview = interviews[0] if interviews else None
+    summary_parts = [str(card.get("brief") or "").strip()]
+    if interviews:
+        summary_parts.append(f"{len(interviews)} 次访谈")
+    if resources:
+        summary_parts.append(f"{len(resources)} 条关联资料")
+    summary = " · ".join(part for part in summary_parts if part)
+    display_time = str(latest_interview.get("display_date") if latest_interview else "").strip()
+    if not display_time:
+        display_time = format_iso_timestamp(str(expert.get("updated_at") or expert.get("created_at") or ""))
+
+    search_text = " ".join(
+        part
+        for part in [
+            str(card.get("name") or "").strip(),
+            identity_line,
+            str(card.get("category_label") or "").strip(),
+            str(card.get("stage_label") or "").strip(),
+            str(expert.get("expertise") or "").strip(),
+            str(expert.get("contact_notes") or "").strip(),
+            " ".join(symbols),
+            " ".join(tags),
+            " ".join(str(item.get("title") or "").strip() for item in interviews),
+            " ".join(str(item.get("title") or "").strip() for item in resources),
+        ]
+        if part
+    ).strip()
+
+    body_markdown = ""
+    if include_body:
+        lines = [
+            f"# {card.get('name') or '专家资料'}",
+            "",
+            f"- 专家ID: {expert_id}",
+            f"- 类型: {card.get('category_label') or '未标注'}",
+            f"- 阶段: {card.get('stage_label') or '未标注'}",
+            f"- 身份: {identity_line or '未标注'}",
+            f"- 区域: {str(expert.get('region') or '').strip() or '未标注'}",
+            f"- 来源: {str(expert.get('source') or '').strip() or '未标注'}",
+            f"- 关联股票: {'；'.join(symbols) or '未关联'}",
+            f"- 标签: {', '.join(tags) or '无'}",
+            f"- 最近访谈: {latest_interview.get('display_date') if latest_interview else '暂无'}",
+            f"- 更新时间: {card.get('display_updated_at') or str(expert.get('updated_at') or '') or '未标注'}",
+            "",
+            "## 专家摘要",
+            "",
+            str(card.get("brief_full") or "当前没有摘要。").strip() or "当前没有摘要。",
+            "",
+            "## 专长与判断",
+            "",
+            str(expert.get("expertise") or "").strip() or "当前没有记录专长。",
+            "",
+            "## 联系与跟进备注",
+            "",
+            str(expert.get("contact_notes") or "").strip() or "当前没有联系备注。",
+            "",
+            "## 已记录访谈",
+            "",
+        ]
+
+        if interviews:
+            for interview in interviews:
+                lines.extend(
+                    [
+                        f"### {interview.get('display_date') or '未定日期'} | {interview.get('title') or '未命名访谈'}",
+                        f"- 类型: {interview.get('kind_label') or '未标注'}",
+                        f"- 状态: {interview.get('status_label') or '未标注'}",
+                        f"- 标签: {', '.join(normalize_tag_list(interview.get('tags', []))) or '无'}",
+                        "",
+                        "#### 核心结论",
+                        "",
+                        str(interview.get("summary") or "").strip() or "当前没有核心结论。",
+                        "",
+                        "#### 下次跟进",
+                        "",
+                        str(interview.get("follow_up") or "").strip() or "当前没有待跟进项。",
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(["当前还没有已记录访谈。", ""])
+
+        lines.extend(["## 已关联资料", ""])
+        if resources:
+            for resource in resources:
+                resource_symbols = sorted(
+                    {
+                        symbol
+                        for symbol in normalize_stock_symbol_list(resource.get("symbols", []))
+                        if symbol
+                    }
+                    | ({str(resource.get("symbol") or "").strip()} if resource.get("symbol") else set()),
+                    key=str.casefold,
+                )
+                lines.extend(
+                    [
+                        f"### [{resource.get('kind_label') or resource.get('kind') or '资料'}] {resource.get('title') or '未命名资料'}",
+                        f"- 时间: {resource.get('display_time') or '未标注'}",
+                        f"- 关联股票: {'；'.join(resource_symbols) or '未关联'}",
+                        f"- 预览链接: {resource.get('preview_url') or ''}",
+                        f"- 页面链接: {resource.get('detail_url') or ''}",
+                    ]
+                )
+                if resource.get("secondary_url"):
+                    lines.append(
+                        f"- {resource.get('secondary_label') or '附加链接'}: {resource.get('secondary_url') or ''}"
+                    )
+                if resource.get("ai_markdown_url"):
+                    lines.append(f"- AI Markdown: {resource.get('ai_markdown_url') or ''}")
+                if resource.get("ai_json_url"):
+                    lines.append(f"- AI JSON: {resource.get('ai_json_url') or ''}")
+                lines.extend(
+                    [
+                        f"- 摘要: {resource.get('summary') or '无'}",
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(["当前还没有已关联资料。", ""])
+
+        body_markdown = "\n".join(lines)
+
+    return {
+        "kind": "expert",
+        "doc_id": expert_id,
+        "title": str(card.get("name") or "专家资料").strip() or "专家资料",
+        "summary": summary or identity_line or "专家资料",
+        "symbols": symbols,
+        "tags": tags,
+        "activity_date": str(latest_interview.get("display_date") if latest_interview else "") or "",
+        "display_time": display_time,
+        "updated_at": str(expert.get("updated_at") or expert.get("created_at") or "").strip(),
+        "source_name": identity_line or str(expert.get("source") or card.get("name") or "").strip(),
+        "detail_url": str(card.get("url") or ""),
+        "sort_value": max(
+            coerce_sort_timestamp(expert.get("updated_at")),
+            coerce_sort_timestamp(latest_interview.get("display_date")) if latest_interview else 0.0,
+        ),
+        "body_markdown": body_markdown,
+        "search_text": search_text,
+        "extra": {
+            "expert_id": expert_id,
+            "name": str(card.get("name") or "").strip(),
+            "identity_line": identity_line,
+            "category": str(expert.get("category") or "").strip(),
+            "category_label": str(card.get("category_label") or "").strip(),
+            "stage": str(expert.get("stage") or "").strip(),
+            "stage_label": str(card.get("stage_label") or "").strip(),
+            "organization": str(expert.get("organization") or "").strip(),
+            "title": str(expert.get("title") or "").strip(),
+            "region": str(expert.get("region") or "").strip(),
+            "source": str(expert.get("source") or "").strip(),
+            "related_symbols": symbols,
+            "interview_count": len(interviews),
+            "resource_count": len(resources),
+            "interviews": [
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "kind_label": str(item.get("kind_label") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "status_label": str(item.get("status_label") or "").strip(),
+                    "display_date": str(item.get("display_date") or "").strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "follow_up": str(item.get("follow_up") or "").strip(),
+                    "tags": normalize_tag_list(item.get("tags", [])),
+                }
+                for item in interviews
+            ],
+            "related_resources": resources,
+        },
+    }
+
+
+def build_ai_native_earnings_call_descriptor(
+    symbol: str,
+    call: dict[str, Any],
+    *,
+    include_body: bool = False,
+    display_name: str = "",
+) -> dict[str, Any]:
+    material = build_stock_earnings_call_material_item(symbol, call)
+    title = str(material.get("title") or "电话会议").strip() or "电话会议"
+    body_markdown = ""
+    if include_body:
+        lines = [
+            f"# {title}",
+            "",
+            f"- 股票: {symbol}",
+            f"- 日期: {material.get('display_time') or '待补充'}",
+            f"- 财季: {material.get('fiscal_label') or '待补充'}",
+            f"- 来源: {material.get('source_label') or '未标注'}",
+            f"- 质量标签: {'；'.join(material.get('quality_chips') or []) or '无'}",
+            "",
+        ]
+        if material.get("summary_text"):
+            lines.extend(["## 摘要", "", str(material["summary_text"]).strip(), ""])
+        lines.extend(
+            [
+                "## Transcript",
+                "",
+                str(material.get("transcript_text") or material.get("summary") or "当前没有完整正文。").strip(),
+            ]
+        )
+        body_markdown = "\n".join(lines)
+
+    symbol_search_text = build_ai_native_symbols_search_text(
+        [symbol],
+        display_name_map={symbol: display_name} if display_name else None,
+    )
+    return {
+        "kind": "earnings_call",
+        "doc_id": f"{symbol}--{material.get('id') or sha256_text(title)[:10]}",
+        "title": title,
+        "summary": str(material.get("summary") or "").strip(),
+        "symbols": [symbol],
+        "tags": [],
+        "activity_date": str(material.get("activity_date") or ""),
+        "display_time": str(material.get("display_time") or "").strip(),
+        "updated_at": str(material.get("published_at") or material.get("call_date") or ""),
+        "source_name": str(material.get("original_title") or title),
+        "detail_url": str(material.get("detail_url") or ""),
+        "sort_value": float(material.get("sort_value") or 0.0),
+        "body_markdown": body_markdown,
+        "search_text": build_ai_native_search_text(
+            str(material.get("summary_text") or ""),
+            str(material.get("transcript_text") or ""),
+            symbol_search_text,
+        ),
+    }
+
+
+def build_ai_native_transcript_descriptor(
+    transcript: dict[str, Any],
+    *,
+    include_body: bool = False,
+    display_name_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    transcript_id = str(transcript.get("id") or "").strip()
+    title = str(transcript.get("title") or transcript.get("original_name") or "会议转录").strip() or "会议转录"
+    linked_symbols = transcript_linked_symbols(transcript)
+    primary_symbol = linked_symbols[0] if linked_symbols else ""
+    detail_url = url_for("transcripts_page")
+    if primary_symbol:
+        detail_url = url_for("stock_detail", symbol=primary_symbol) + "#transcripts-panel"
+
+    transcript_text = str(transcript.get("transcript_text") or "").strip()
+    body_markdown = ""
+    if include_body:
+        lines = [
+            f"# {title}",
+            "",
+            f"- 会议日期: {str(transcript.get('meeting_date') or '') or '待补充'}",
+            f"- 上传时间: {format_iso_timestamp(transcript.get('created_at')) if transcript.get('created_at') else '待补充'}",
+            f"- 状态: {TRANSCRIPT_STATUS_META.get(str(transcript.get('status') or ''), TRANSCRIPT_STATUS_META['pending_api'])['label']}",
+            f"- 关联股票: {'；'.join(linked_symbols) or '未关联'}",
+            f"- 标签: {', '.join(normalize_tag_list(transcript.get('tags', []))) or '无'}",
+            "",
+            "## Transcript",
+            "",
+            transcript_text or TRANSCRIPT_PLACEHOLDER_COPY,
+        ]
+        body_markdown = "\n".join(lines)
+
+    symbol_search_text = build_ai_native_symbols_search_text(linked_symbols, display_name_map=display_name_map)
+    return {
+        "kind": "transcript",
+        "doc_id": transcript_id,
+        "title": title,
+        "summary": summarize_text_block(transcript_text or TRANSCRIPT_PLACEHOLDER_COPY),
+        "symbols": linked_symbols,
+        "tags": normalize_tag_list(transcript.get("tags", [])),
+        "activity_date": normalize_date_field(transcript.get("meeting_date")) or iso_to_date(transcript.get("created_at")) or "",
+        "display_time": str(transcript.get("meeting_date") or "")
+        or (format_iso_timestamp(transcript.get("created_at")) if transcript.get("created_at") else ""),
+        "updated_at": str(transcript.get("updated_at") or transcript.get("created_at") or ""),
+        "source_name": str(transcript.get("original_name") or title),
+        "detail_url": detail_url,
+        "sort_value": coerce_sort_timestamp(transcript.get("meeting_date") or transcript.get("created_at")),
+        "body_markdown": body_markdown,
+        "search_text": build_ai_native_search_text(transcript_text, symbol_search_text),
+    }
+
+
+def normalize_ai_native_cdn_site_limit(value: Any) -> int:
+    try:
+        resolved = int(value or AI_NATIVE_CDN_SITE_LIMIT_DEFAULT)
+    except (TypeError, ValueError):
+        resolved = AI_NATIVE_CDN_SITE_LIMIT_DEFAULT
+    return min(max(resolved, 1), AI_NATIVE_CDN_SITE_LIMIT_MAX)
+
+
+def normalize_ai_native_data_search_limit(value: Any) -> int:
+    try:
+        resolved = int(value or AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        resolved = AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT
+    return min(max(resolved, 1), AI_NATIVE_DATA_SEARCH_MAX_LIMIT)
+
+
+def normalize_ai_native_data_search_dataset_filters(raw_values: Any) -> list[str]:
+    values = normalize_split_choice_list(raw_values, {"stablecoins", "cdn", "applovin", "gpu_prices", "gpu-prices"})
+    return ["gpu_prices" if item == "gpu-prices" else item for item in values]
+
+
+def normalize_ai_native_data_search_type_filters(raw_values: Any) -> list[str]:
+    return normalize_split_choice_list(raw_values, {"snapshot", "coin", "site", "provider", "change", "category", "sdk", "offer", "index"})
+
+
+def score_ai_native_data_search_match(
+    *,
+    title: str,
+    summary: str,
+    search_text: str,
+    query_terms: list[str],
+    sort_value: float = 0.0,
+) -> float:
+    folded_title = str(title or "").casefold()
+    folded_summary = str(summary or "").casefold()
+    folded_search_text = str(search_text or "").casefold()
+    score = 0.0
+    for term in query_terms:
+        if term in folded_title:
+            score += 10.0
+        elif term in folded_summary:
+            score += 6.0
+        elif term in folded_search_text:
+            score += 3.0
+    score += min(float(sort_value or 0.0) / 10_000_000_000, 5.0)
+    return round(score, 6)
+
+
+def filter_ai_native_cdn_site_rows(
+    sites: list[dict[str, Any]],
+    *,
+    provider: str = "",
+    category: str = "",
+    query: str = "",
+) -> list[dict[str, Any]]:
+    normalized_provider = str(provider or "").strip().casefold()
+    normalized_category = str(category or "").strip().casefold()
+    query_terms = [term.casefold() for term in re.split(r"\s+", str(query or "").strip()) if term]
+    filtered: list[dict[str, Any]] = []
+    for site in sites:
+        if not isinstance(site, dict):
+            continue
+        if normalized_provider:
+            provider_candidates = [
+                str(site.get("provider") or "").strip().casefold(),
+                *[
+                    str(item or "").strip().casefold()
+                    for item in site.get("observed_providers", [])
+                    if str(item or "").strip()
+                ],
+            ]
+            if normalized_provider not in provider_candidates:
+                continue
+        if normalized_category:
+            site_category = str(site.get("category") or "").strip().casefold()
+            if normalized_category not in site_category:
+                continue
+        if query_terms:
+            haystack = " ".join(
+                [
+                    str(site.get("label") or ""),
+                    str(site.get("url") or ""),
+                    str(site.get("requested_host") or ""),
+                    str(site.get("final_host") or ""),
+                    str(site.get("provider") or ""),
+                    str(site.get("category") or ""),
+                    str(site.get("bucket") or ""),
+                    str(site.get("compact_summary") or ""),
+                    " ".join(str(item or "") for item in site.get("observed_providers", [])),
+                    " ".join(str(item or "") for item in site.get("provider_evidence", [])),
+                    " ".join(str(item or "") for item in site.get("asset_host_names_compact", [])),
+                ]
+            ).casefold()
+            if not all(term in haystack for term in query_terms):
+                continue
+        filtered.append(site)
+    return filtered
+
+
+def build_ai_native_cdn_payload(
+    *,
+    provider: str = "",
+    category: str = "",
+    query: str = "",
+    site_limit: int = AI_NATIVE_CDN_SITE_LIMIT_DEFAULT,
+) -> dict[str, Any]:
+    cache = load_cdn_tracker_cache()
+    runtime = sync_cdn_monitor_runtime()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    tracked_sites = cache.get("tracked_sites") if isinstance(cache.get("tracked_sites"), list) else []
+    provider_rows = cache.get("provider_rows") if isinstance(cache.get("provider_rows"), list) else []
+    category_rows = cache.get("category_rows") if isinstance(cache.get("category_rows"), list) else []
+    recent_changes = cache.get("recent_changes") if isinstance(cache.get("recent_changes"), list) else []
+    history = cache.get("history") if isinstance(cache.get("history"), list) else []
+    target_catalog = cache.get("target_catalog") if isinstance(cache.get("target_catalog"), dict) else {}
+    normalized_site_limit = normalize_ai_native_cdn_site_limit(site_limit)
+    analysis = build_cdn_monitor_analysis(
+        summary=summary,
+        tracked_sites=tracked_sites,
+        provider_rows=provider_rows,
+        category_rows=category_rows,
+        recent_changes=recent_changes,
+        history=history,
+        target_catalog=target_catalog,
+        cache_updated_at=cache.get("updated_at"),
+    )
+    daily_comparable_history = analysis["daily_comparable_history"]
+    hidden_history_snapshot_count = int(analysis["hidden_history_snapshot_count"] or 0)
+    collapsed_same_day_snapshot_count = int(analysis["collapsed_same_day_snapshot_count"] or 0)
+    trend_providers = analysis["trend_providers"]
+    share_trend_chart = analysis["share_trend_chart"]
+    count_trend_chart = analysis["count_trend_chart"]
+
+    site_rows = build_cdn_site_view_rows(tracked_sites)
+    filtered_site_rows = filter_ai_native_cdn_site_rows(
+        site_rows,
+        provider=provider,
+        category=category,
+        query=query,
+    )
+    returned_sites: list[dict[str, Any]] = []
+    for site in filtered_site_rows[:normalized_site_limit]:
+        if not isinstance(site, dict):
+            continue
+        asset_hosts = []
+        for asset in site.get("asset_hosts_preview", []) if isinstance(site.get("asset_hosts_preview"), list) else []:
+            if not isinstance(asset, dict):
+                continue
+            asset_hosts.append(
+                {
+                    "host": str(asset.get("host") or "").strip(),
+                    "provider": str(asset.get("provider") or "Unknown").strip() or "Unknown",
+                    "evidence": [
+                        str(item or "").strip()
+                        for item in asset.get("evidence", [])
+                        if str(item or "").strip()
+                    ][:2],
+                }
+            )
+        status_code_value = site.get("status_code")
+        try:
+            status_code = int(status_code_value)
+        except (TypeError, ValueError):
+            status_code = None
+        returned_sites.append(
+            {
+                "id": str(site.get("id") or "").strip(),
+                "label": str(site.get("label") or "").strip(),
+                "rank": int(site.get("rank") or 0),
+                "rank_label": str(site.get("rank_label") or "").strip(),
+                "bucket": str(site.get("bucket") or "").strip(),
+                "category": str(site.get("category") or "").strip(),
+                "url": str(site.get("url") or "").strip(),
+                "requested_host": str(site.get("requested_host") or "").strip(),
+                "final_url": str(site.get("final_url") or "").strip(),
+                "final_host": str(site.get("final_host") or "").strip(),
+                "entry_host": str(site.get("entry_host_label") or "").strip(),
+                "status_code": status_code,
+                "status_label": str(site.get("status_label") or "").strip(),
+                "is_reachable": bool(site.get("is_reachable")),
+                "provider": str(site.get("provider") or "Unknown").strip() or "Unknown",
+                "provider_color": str(
+                    site.get("provider_color") or provider_meta(str(site.get("provider") or "Unknown"))["color"]
+                ),
+                "provider_confidence": str(site.get("provider_confidence") or "").strip(),
+                "observed_providers": [
+                    str(item or "").strip()
+                    for item in site.get("observed_providers", [])
+                    if str(item or "").strip()
+                ],
+                "is_multi_provider": bool(site.get("is_multi_provider")),
+                "row_meta_badges": [
+                    str(item or "").strip()
+                    for item in site.get("row_meta_badges", [])
+                    if str(item or "").strip()
+                ],
+                "asset_host_count": int(site.get("asset_host_count") or len(asset_hosts)),
+                "asset_host_names": [
+                    str(item or "").strip()
+                    for item in site.get("asset_host_names_compact", [])
+                    if str(item or "").strip()
+                ],
+                "asset_hosts": asset_hosts,
+                "provider_evidence": [
+                    str(item or "").strip()
+                    for item in site.get("provider_evidence", [])
+                    if str(item or "").strip()
+                ][:4],
+                "compact_summary": str(site.get("compact_summary") or "").strip(),
+                "error": str(site.get("error_label") or site.get("error") or "").strip(),
+            }
+        )
+
+    public_provider_rows: list[dict[str, Any]] = []
+    for row in provider_rows:
+        if not isinstance(row, dict):
+            continue
+        public_provider_rows.append(
+            {
+                "provider": str(row.get("provider") or "Unknown").strip() or "Unknown",
+                "count": int(row.get("count") or 0),
+                "share_pct": round(float(row.get("share_pct") or 0.0), 2),
+                "share_label": str(row.get("share_label") or "").strip(),
+                "color": str(row.get("color") or provider_meta(str(row.get("provider") or "Unknown"))["color"]),
+                "sample_sites": [
+                    str(item or "").strip()
+                    for item in row.get("site_labels", [])
+                    if str(item or "").strip()
+                ][:8],
+            }
+        )
+
+    public_category_rows: list[dict[str, Any]] = []
+    for row in category_rows:
+        if not isinstance(row, dict):
+            continue
+        public_category_rows.append(
+            {
+                "category": str(row.get("category") or "").strip(),
+                "tracked_count": int(row.get("tracked_count") or 0),
+                "reachable_count": int(row.get("reachable_count") or 0),
+                "multi_provider_count": int(row.get("multi_provider_count") or 0),
+                "top_providers": [
+                    {
+                        "provider": str(item.get("provider") or "Unknown").strip() or "Unknown",
+                        "count": int(item.get("count") or 0),
+                        "share_label": str(item.get("share_label") or "").strip(),
+                        "color": str(
+                            item.get("color") or provider_meta(str(item.get("provider") or "Unknown"))["color"]
+                        ),
+                    }
+                    for item in row.get("top_providers", [])
+                    if isinstance(item, dict)
+                ],
+            }
+        )
+
+    comparable_history_rows: list[dict[str, Any]] = []
+    for snapshot in daily_comparable_history:
+        if not isinstance(snapshot, dict):
+            continue
+        comparable_history_rows.append(
+            {
+                "updated_at": str(snapshot.get("updated_at") or "").strip(),
+                "updated_at_label": format_iso_timestamp(snapshot.get("updated_at")) if snapshot.get("updated_at") else "",
+                "tracked_count": int(snapshot.get("tracked_count") or 0),
+                "reachable_count": int(snapshot.get("reachable_count") or 0),
+                "multi_provider_count": int(snapshot.get("multi_provider_count") or 0),
+                "sample_target_count": int(
+                    snapshot.get("sample_target_count")
+                    or snapshot.get("target_count")
+                    or snapshot.get("tracked_count")
+                    or 0
+                ),
+                "target_source_name": str(
+                    snapshot.get("target_source_name") or target_catalog.get("source_name") or "Top Sites Seed"
+                ),
+                "provider_counts": normalize_cdn_provider_counts(snapshot),
+            }
+        )
+
+    recent_history_rows: list[dict[str, Any]] = []
+    for snapshot in history[-6:]:
+        if not isinstance(snapshot, dict):
+            continue
+        recent_history_rows.append(
+            {
+                "updated_at": str(snapshot.get("updated_at") or "").strip(),
+                **summarize_cdn_history_row(snapshot),
+                "provider_counts": normalize_cdn_provider_counts(snapshot),
+            }
+        )
+    recent_history_rows.reverse()
+
+    last_updated_at = str(cache.get("updated_at") or "").strip()
+    last_updated_label = format_iso_timestamp(last_updated_at) if last_updated_at else "not yet collected"
+    return {
+        "version": 1,
+        "dataset": "cdn",
+        "generated_at": now_iso(),
+        "detail_url": url_for("data_monitor_page", tab="cdn"),
+        "filters": {
+            "provider": str(provider or "").strip(),
+            "category": str(category or "").strip(),
+            "query": str(query or "").strip(),
+            "site_limit": normalized_site_limit,
+        },
+        "summary": {
+            "snapshot_updated_at": last_updated_at,
+            "snapshot_updated_label": last_updated_label,
+            "tracked_count": int(summary.get("tracked_count") or len(site_rows)),
+            "reachable_count": int(summary.get("reachable_count") or 0),
+            "detected_count": int(summary.get("detected_count") or 0),
+            "provider_count": int(summary.get("provider_count") or 0),
+            "multi_provider_count": int(summary.get("multi_provider_count") or 0),
+            "changed_count": int(summary.get("changed_count") or len(recent_changes)),
+        },
+        "runtime": {
+            "status": str(runtime.get("status") or ""),
+            "status_label": monitor_runtime_status_label(runtime.get("status")),
+            "started_at": str(runtime.get("started_at") or ""),
+            "finished_at": str(runtime.get("finished_at") or ""),
+            "message": str(runtime.get("message") or ""),
+            "error": str(runtime.get("error") or ""),
+        },
+        "source": {
+            "name": str(cache.get("source", {}).get("name") or "Local HTTP + DNS Probe"),
+            "url": str(cache.get("source", {}).get("url") or ""),
+            "endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        },
+        "target_catalog": {
+            "source_name": str(target_catalog.get("source_name") or "Top Sites Seed"),
+            "source_url": str(target_catalog.get("source_url") or ""),
+            "updated_at": str(target_catalog.get("updated_at") or ""),
+            "updated_at_label": format_iso_timestamp(target_catalog.get("updated_at")) if target_catalog.get("updated_at") else "",
+            "target_count": int(target_catalog.get("target_count") or summary.get("tracked_count") or len(site_rows)),
+        },
+        "methodology": {
+            "tracker_type": "unweighted_website_probe",
+            "notes": str(cache.get("notes") or ""),
+            "points": [
+                "Signals come from homepage HTTP headers, DNS aliases, and a small homepage asset-host scan.",
+                "This dataset tracks website coverage, not real traffic share.",
+                "Comparable history only keeps snapshots with the same sample scope to avoid fake jumps from sample expansion.",
+            ],
+        },
+        "counts": {
+            "total_sites": len(site_rows),
+            "matched_sites": len(filtered_site_rows),
+            "returned_sites": len(returned_sites),
+            "history_snapshots": int(analysis["history_snapshot_count"] or 0),
+            "comparable_history_snapshots": len(comparable_history_rows),
+            "hidden_history_snapshots": hidden_history_snapshot_count,
+            "collapsed_same_day_history_snapshots": collapsed_same_day_snapshot_count,
+        },
+        "confidence_items": analysis["confidence_items"],
+        "signal_items": analysis["signal_items"],
+        "highlight_cards": analysis["highlight_cards"],
+        "provider_rows": public_provider_rows,
+        "category_rows": public_category_rows,
+        "recent_changes": [
+            {
+                "label": str(item.get("label") or "").strip(),
+                "category": str(item.get("category") or "").strip(),
+                "summary": str(item.get("summary") or "").strip(),
+            }
+            for item in recent_changes
+            if isinstance(item, dict)
+        ],
+        "recent_history": recent_history_rows,
+        "comparable_history": comparable_history_rows,
+        "trend_providers": trend_providers,
+        "share_trend_chart": share_trend_chart,
+        "count_trend_chart": count_trend_chart,
+        "sites": returned_sites,
+    }
+
+
+def build_ai_native_cdn_descriptor(*, include_body: bool = False) -> dict[str, Any]:
+    payload = build_ai_native_cdn_payload()
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    target_catalog = payload.get("target_catalog", {}) if isinstance(payload.get("target_catalog"), dict) else {}
+    provider_rows = payload.get("provider_rows", []) if isinstance(payload.get("provider_rows"), list) else []
+    display_time = str(
+        summary.get("snapshot_updated_label") or summary.get("snapshot_updated_at") or payload.get("generated_at") or ""
+    ).strip()
+    body_markdown = ""
+    if include_body:
+        lines = [
+            "# CDN Data Snapshot",
+            "",
+            f"- generated_at: {payload.get('generated_at') or ''}",
+            f"- snapshot_updated_at: {summary.get('snapshot_updated_at') or 'n/a'}",
+            f"- source: {payload.get('source', {}).get('name') or ''}",
+            f"- target_catalog: {target_catalog.get('source_name') or ''} ({target_catalog.get('target_count') or 0} targets)",
+            f"- tracker_type: {payload.get('methodology', {}).get('tracker_type') or ''}",
+            "",
+            "## Summary",
+            "",
+            f"- tracked_count: {int(summary.get('tracked_count') or 0)}",
+            f"- reachable_count: {int(summary.get('reachable_count') or 0)}",
+            f"- detected_count: {int(summary.get('detected_count') or 0)}",
+            f"- provider_count: {int(summary.get('provider_count') or 0)}",
+            f"- multi_provider_count: {int(summary.get('multi_provider_count') or 0)}",
+            f"- changed_count: {int(summary.get('changed_count') or 0)}",
+            "",
+            "## Provider Distribution",
+            "",
+            "| Provider | Count | Share |",
+            "| --- | --- | --- |",
+        ]
+        for row in provider_rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "| {provider} | {count} | {share} |".format(
+                    provider=str(row.get("provider") or "Unknown"),
+                    count=int(row.get("count") or 0),
+                    share=str(row.get("share_label") or ""),
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "## Comparable History",
+                "",
+                "| Updated At | Targets | Reachable | Multi-provider | Leading Provider |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for snapshot in payload.get("comparable_history", []):
+            if not isinstance(snapshot, dict):
+                continue
+            snapshot_summary = summarize_cdn_history_row(snapshot)
+            lines.append(
+                "| {updated_at} | {targets} | {reachable} | {multi} | {leader} |".format(
+                    updated_at=str(snapshot.get("updated_at") or "-"),
+                    targets=int(snapshot.get("sample_target_count") or 0),
+                    reachable=int(snapshot.get("reachable_count") or 0),
+                    multi=int(snapshot.get("multi_provider_count") or 0),
+                    leader=str(snapshot_summary.get("leader_label") or "-"),
+                )
+            )
+        if not payload.get("comparable_history"):
+            lines.append("| - | - | - | - | no comparable history yet |")
+        lines.extend(
+            [
+                "",
+                "## Recent Changes",
+                "",
+            ]
+        )
+        for change in payload.get("recent_changes", [])[:10]:
+            if not isinstance(change, dict):
+                continue
+            label = str(change.get("label") or "site").strip() or "site"
+            category = str(change.get("category") or "").strip()
+            category_label = f" ({category})" if category else ""
+            lines.append(f"- {label}{category_label}: {str(change.get('summary') or '').strip()}")
+        if not payload.get("recent_changes"):
+            lines.append("- no recent provider changes recorded")
+        lines.extend(
+            [
+                "",
+                "## Sites Preview",
+                "",
+                "| Rank | Site | Primary | Observed | Summary |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for site in payload.get("sites", [])[:10]:
+            if not isinstance(site, dict):
+                continue
+            observed_label = ", ".join(
+                str(item or "").strip() for item in site.get("observed_providers", []) if str(item or "").strip()
+            )
+            lines.append(
+                "| {rank} | {label} | {provider} | {observed} | {summary} |".format(
+                    rank=str(site.get("rank_label") or site.get("rank") or "-"),
+                    label=str(site.get("label") or "-"),
+                    provider=str(site.get("provider") or "Unknown"),
+                    observed=observed_label or "-",
+                    summary=str(site.get("compact_summary") or "-"),
+                )
+            )
+        body_markdown = "\n".join(lines)
+
+    top_provider_tags = [
+        str(row.get("provider") or "").strip().lower()
+        for row in provider_rows[:4]
+        if isinstance(row, dict) and str(row.get("provider") or "").strip()
+    ]
+    summary_text = (
+        f"{target_catalog.get('source_name') or 'Top Sites Seed'}; "
+        f"{int(summary.get('tracked_count') or 0)} tracked / "
+        f"{int(summary.get('reachable_count') or 0)} reachable / "
+        f"{int(summary.get('detected_count') or 0)} detected."
+    )
+    updated_at = str(summary.get("snapshot_updated_at") or payload.get("generated_at") or "").strip()
+    return {
+        "kind": "data_snapshot",
+        "doc_id": "cdn",
+        "title": "CDN Data Snapshot",
+        "summary": summary_text,
+        "symbols": [],
+        "tags": normalize_tag_list(["cdn", "data-monitor", "website-tracker", *top_provider_tags]),
+        "activity_date": iso_to_date(updated_at) if updated_at else "",
+        "display_time": display_time,
+        "updated_at": updated_at,
+        "source_name": "cdn",
+        "detail_url": url_for("data_monitor_page", tab="cdn"),
+        "sort_value": coerce_sort_timestamp(updated_at or payload.get("generated_at")),
+        "body_markdown": body_markdown,
+    }
+
+
+def build_ai_native_applovin_payload(
+    *,
+    platform_id: str | None = None,
+    category_id: str | None = None,
+) -> dict[str, Any]:
+    cache = load_applovin_tracker_cache()
+    runtime = sync_applovin_monitor_runtime()
+    pages = cache.get("pages") if isinstance(cache.get("pages"), dict) else {}
+    selected_platform_id = normalize_applovin_monitor_platform(platform_id, fallback="gplay")
+    selected_category_id = normalize_applovin_monitor_category(category_id, fallback="top-ad-mediation-sdks")
+    selected_key = build_applovin_selection_key(selected_platform_id, selected_category_id)
+    selected_page = pages.get(selected_key) if isinstance(pages.get(selected_key), dict) else {}
+
+    if not selected_page and pages:
+        first_page = next(iter(pages.values()))
+        if isinstance(first_page, dict):
+            selected_page = first_page
+            selected_platform_id = str(first_page.get("platform_id") or selected_platform_id)
+            selected_category_id = str(first_page.get("category_id") or selected_category_id)
+            selected_key = build_applovin_selection_key(selected_platform_id, selected_category_id)
+
+    selected_platform = applovin_platform_meta(selected_platform_id)
+    selected_category = applovin_category_meta(selected_category_id)
+    selected_primary = (
+        selected_page.get("primary_applovin") if isinstance(selected_page.get("primary_applovin"), dict) else {}
+    )
+    selection_analysis = build_applovin_selection_analysis(
+        cache=cache,
+        selected_key=selected_key,
+        selected_page=selected_page,
+    )
+    history_points = selection_analysis["history_points"]
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    cross_category_rows = build_applovin_cross_category_rows(cache, selected_platform_id)
+
+    return {
+        "version": 1,
+        "dataset": "applovin",
+        "generated_at": now_iso(),
+        "detail_url": url_for(
+            "data_monitor_page",
+            tab="applovin",
+            platform=selected_platform_id,
+            category=selected_category_id,
+        ),
+        "filters": {
+            "platform": selected_platform_id,
+            "category": selected_category_id,
+        },
+        "summary": {
+            "snapshot_updated_at": str(cache.get("updated_at") or "").strip(),
+            "snapshot_updated_label": format_monitor_date_label(cache.get("updated_at")),
+            "tracked_page_count": int(summary.get("tracked_page_count") or len(APPLOVIN_MONITOR_PLATFORMS) * len(APPLOVIN_MONITOR_CATEGORIES)),
+            "available_page_count": int(summary.get("available_page_count") or len(pages)),
+            "fresh_page_count": int(summary.get("fresh_page_count") or 0),
+            "applovin_present_page_count": int(summary.get("applovin_present_page_count") or 0),
+            "page_error_count": int(summary.get("page_error_count") or 0),
+        },
+        "runtime": {
+            "status": str(runtime.get("status") or ""),
+            "status_label": monitor_runtime_status_label(runtime.get("status")),
+            "started_at": str(runtime.get("started_at") or ""),
+            "finished_at": str(runtime.get("finished_at") or ""),
+            "message": str(runtime.get("message") or ""),
+            "error": str(runtime.get("error") or ""),
+        },
+        "source": {
+            "name": str(cache.get("source", {}).get("name") or "42matters SDK Analysis"),
+            "url": str(cache.get("source", {}).get("url") or ""),
+            "endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        },
+        "selection": {
+            "selection_key": selected_key,
+            "platform_id": selected_platform_id,
+            "platform_title": str(selected_page.get("platform_title") or selected_platform.get("title") or ""),
+            "category_id": selected_category_id,
+            "category_title": str(selected_page.get("category_title") or selected_category.get("title") or ""),
+            "category_reason": str(selected_page.get("category_reason") or selected_category.get("reason") or "").strip(),
+            "page_title": str(selected_page.get("page_title") or "").strip()
+            or f"{selected_platform.get('title')} / {selected_category.get('title')}",
+            "source_url": str(selected_page.get("source_url") or build_applovin_monitor_url(selected_platform_id, selected_category_id)),
+            "source_updated_at": str(selected_page.get("source_updated_at") or "").strip(),
+            "source_updated_label": format_monitor_date_label(selected_page.get("source_updated_at")),
+        },
+        "primary_entry": {
+            "present": bool(selected_primary),
+            "name": str(selected_primary.get("name") or "").strip(),
+            "rank": int(selected_primary.get("rank") or 0),
+            "rank_label": str(selected_primary.get("rank_label") or "n/a"),
+            "app_share_pct": float(selected_primary.get("app_share_pct") or 0.0),
+            "app_share_label": str(selected_primary.get("app_share_label") or "n/a"),
+            "total_apps": int(selected_primary.get("total_apps") or 0),
+            "total_apps_label": str(selected_primary.get("total_apps_label") or "n/a"),
+            "download_share_pct": float(selected_primary.get("download_share_pct") or 0.0),
+            "download_share_label": str(selected_primary.get("download_share_label") or "n/a"),
+            "total_downloads": int(selected_primary.get("total_downloads") or 0),
+            "total_downloads_label": str(selected_primary.get("total_downloads_label") or "n/a"),
+            "website_url": str(selected_primary.get("website_url") or ""),
+            "description": str(selected_primary.get("description") or "").strip(),
+        },
+        "counts": {
+            "history_points": len(history_points),
+            "history_rows": len(selection_analysis["formatted_history_rows"]),
+            "cross_categories": len(cross_category_rows),
+            "leaderboard_rows": len(selected_page.get("sdks") if isinstance(selected_page.get("sdks"), list) else []),
+        },
+        "confidence_items": selection_analysis["confidence_items"],
+        "highlight_cards": selection_analysis["highlight_cards"],
+        "signal_items": selection_analysis["signal_items"],
+        "recent_changes": [
+            {
+                "label": str(item.get("label") or "").strip(),
+                "summary": str(item.get("summary") or "").strip(),
+            }
+            for item in selection_analysis["recent_changes"]
+            if isinstance(item, dict)
+        ],
+        "history": selection_analysis["formatted_history_rows"],
+        "cross_category_rows": cross_category_rows,
+        "leaderboard_rows": [
+            {
+                "rank_label": str(row.get("rank_label") or "").strip(),
+                "name": str(row.get("name") or "").strip(),
+                "is_applovin": bool(row.get("is_applovin")),
+                "app_share_label": str(row.get("app_share_label") or "").strip(),
+                "total_apps_label": str(row.get("total_apps_label") or "").strip(),
+                "download_share_label": str(row.get("download_share_label") or "").strip(),
+                "total_downloads_label": str(row.get("total_downloads_label") or "").strip(),
+                "website_url": str(row.get("website_url") or "").strip(),
+            }
+            for row in selected_page.get("sdks", [])
+            if isinstance(row, dict)
+        ],
+    }
+
+
+def build_ai_native_applovin_descriptor(
+    *,
+    include_body: bool = False,
+    platform_id: str | None = None,
+    category_id: str | None = None,
+) -> dict[str, Any]:
+    payload = build_ai_native_applovin_payload(platform_id=platform_id, category_id=category_id)
+    selection = payload.get("selection", {}) if isinstance(payload.get("selection"), dict) else {}
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    primary = payload.get("primary_entry", {}) if isinstance(payload.get("primary_entry"), dict) else {}
+    display_time = str(selection.get("source_updated_label") or summary.get("snapshot_updated_label") or payload.get("generated_at") or "").strip()
+    body_markdown = ""
+    if include_body:
+        lines = [
+            "# AppLovin Tracker Snapshot",
+            "",
+            f"- generated_at: {payload.get('generated_at') or ''}",
+            f"- platform: {selection.get('platform_title') or ''}",
+            f"- category: {selection.get('category_title') or ''}",
+            f"- source_updated_at: {selection.get('source_updated_at') or 'n/a'}",
+            f"- crawler_updated_at: {summary.get('snapshot_updated_at') or 'n/a'}",
+            "",
+            "## Primary AppLovin Entry",
+            "",
+            f"- name: {primary.get('name') or 'n/a'}",
+            f"- rank: {primary.get('rank_label') or 'n/a'}",
+            f"- app_share: {primary.get('app_share_label') or 'n/a'}",
+            f"- total_apps: {primary.get('total_apps_label') or 'n/a'}",
+            f"- download_share: {primary.get('download_share_label') or 'n/a'}",
+            f"- total_downloads: {primary.get('total_downloads_label') or 'n/a'}",
+            "",
+            "## Recent Signals",
+            "",
+        ]
+        for item in payload.get("signal_items", [])[:10]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- {str(item.get('title') or 'Signal')}: {str(item.get('summary') or '').strip()}")
+        if not payload.get("signal_items"):
+            lines.append("- no recent AppLovin monitor signals")
+        lines.extend(
+            [
+                "",
+                "## Cross Category",
+                "",
+                "| Category | Lead Entry | Rank | App Share | Download Share |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in payload.get("cross_category_rows", []):
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "| {category} | {entry} | {rank} | {app_share} | {download_share} |".format(
+                    category=str(row.get("category_title") or "-"),
+                    entry=str(row.get("entry_name") or "-"),
+                    rank=str(row.get("rank_label") or "-"),
+                    app_share=str(row.get("app_share_label") or "-"),
+                    download_share=str(row.get("download_share_label") or "-"),
+                )
+            )
+        body_markdown = "\n".join(lines)
+
+    summary_text = (
+        f"{selection.get('platform_title') or 'Platform'} / {selection.get('category_title') or 'Category'}; "
+        f"{primary.get('name') or 'AppLovin not present'}; rank {primary.get('rank_label') or 'n/a'}."
+    )
+    updated_at = str(summary.get("snapshot_updated_at") or payload.get("generated_at") or "").strip()
+    return {
+        "kind": "data_snapshot",
+        "doc_id": "applovin",
+        "title": "AppLovin Tracker Snapshot",
+        "summary": summary_text,
+        "symbols": [],
+        "tags": normalize_tag_list(
+            [
+                "applovin",
+                "data-monitor",
+                str(selection.get("platform_id") or ""),
+                str(selection.get("category_id") or ""),
+            ]
+        ),
+        "activity_date": iso_to_date(updated_at) if updated_at else "",
+        "display_time": display_time,
+        "updated_at": updated_at,
+        "source_name": "applovin",
+        "detail_url": str(payload.get("detail_url") or url_for("data_monitor_page", tab="applovin")),
+        "sort_value": coerce_sort_timestamp(updated_at or payload.get("generated_at")),
+        "body_markdown": body_markdown,
+    }
+
+
+def build_ai_native_gpu_price_payload() -> dict[str, Any]:
+    cache = load_gpu_price_tracker_cache()
+    runtime = sync_gpu_price_monitor_runtime()
+    return {
+        "version": 1,
+        "dataset": "gpu_prices",
+        "generated_at": now_iso(),
+        "detail_url": url_for("data_monitor_page", tab="gpu-prices"),
+        "source": {
+            "name": str(cache.get("source", {}).get("name") or "GPUs.io + GetDeploying + Azure Retail Prices"),
+            "url": str(cache.get("source", {}).get("url") or ""),
+            "endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        },
+        "runtime": {
+            "status": str(runtime.get("status") or ""),
+            "status_label": monitor_runtime_status_label(runtime.get("status")),
+            "started_at": str(runtime.get("started_at") or ""),
+            "finished_at": str(runtime.get("finished_at") or ""),
+            "message": str(runtime.get("message") or ""),
+            "error": str(runtime.get("error") or ""),
+        },
+        "summary": cache.get("summary") if isinstance(cache.get("summary"), dict) else {},
+        "families": cache.get("families") if isinstance(cache.get("families"), list) else [],
+        "latest": cache.get("latest") if isinstance(cache.get("latest"), list) else [],
+        "daily_index": cache.get("daily_index") if isinstance(cache.get("daily_index"), list) else [],
+        "csp_daily_index": cache.get("csp_daily_index") if isinstance(cache.get("csp_daily_index"), list) else [],
+        "normalized_offers": cache.get("normalized_offers") if isinstance(cache.get("normalized_offers"), list) else [],
+        "source_health": cache.get("source_health") if isinstance(cache.get("source_health"), list) else [],
+        "history": cache.get("history") if isinstance(cache.get("history"), list) else [],
+        "notes": str(cache.get("notes") or ""),
+        "updated_at": str(cache.get("updated_at") or ""),
+    }
+
+
+def build_ai_native_gpu_price_descriptor(*, include_body: bool = False) -> dict[str, Any]:
+    payload = build_ai_native_gpu_price_payload()
+    latest = payload.get("latest") if isinstance(payload.get("latest"), list) else []
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    updated_at = str(payload.get("updated_at") or payload.get("generated_at") or "").strip()
+    family_labels = [
+        str(item.get("gpu_family") or "").strip()
+        for item in latest
+        if isinstance(item, dict) and str(item.get("gpu_family") or "").strip()
+    ]
+    summary_text = (
+            f"{int(summary.get('offer_count') or 0)} offers / "
+            f"{int(summary.get('provider_count') or 0)} providers; "
+            f"{int(summary.get('csp_daily_index_count') or 0)} Azure CSP index rows; "
+            f"families {', '.join(family_labels) or 'n/a'}."
+    )
+    body_markdown = ""
+    if include_body:
+        lines = [
+            "# GPU Price Tracker Snapshot",
+            "",
+            f"- generated_at: {payload.get('generated_at') or ''}",
+            f"- updated_at: {updated_at or 'n/a'}",
+            f"- source: {payload.get('source', {}).get('name') or ''}",
+            f"- notes: {payload.get('notes') or ''}",
+            "",
+            "## Latest Index",
+            "",
+            "| GPU | Variant | Standardized Available Price | Samples | Cheapest Visible |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for item in latest:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "| {gpu} | {variant} | {price} | {samples} / {providers} | {cheapest} {cheapest_price} |".format(
+                    gpu=str(item.get("gpu_family") or "-"),
+                    variant=str(item.get("variant") or "-"),
+                    price=format_gpu_hour_price(item.get("available_standardized_price")),
+                    samples=int(item.get("available_sample_size") or 0),
+                    providers=int(item.get("available_provider_count") or 0),
+                    cheapest=str(item.get("cheapest_provider") or "n/a"),
+                    cheapest_price=format_gpu_hour_price(item.get("cheapest_price")),
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "## Azure CSP Index",
+                "",
+                "| Date | GPU | Billing | Price | Samples |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for item in payload.get("csp_daily_index", []):
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "| {date} | {gpu} | {billing} | {price} | {samples} / {providers} |".format(
+                    date=str(item.get("date") or "-"),
+                    gpu=str(item.get("gpu_family") or "-"),
+                    billing=str(item.get("billing_type") or "-"),
+                    price=format_gpu_hour_price(item.get("price_standardized")),
+                    samples=int(item.get("sample_size") or 0),
+                    providers=int(item.get("provider_count") or 0),
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "## Source Health",
+                "",
+                "| Source | GPU | OK | HTTP | Rows | Notes |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for item in payload.get("source_health", []):
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "| {source} | {gpu} | {ok} | {status} | {rows} | {notes} |".format(
+                    source=str(item.get("source_name") or "-"),
+                    gpu=str(item.get("gpu_family") or "-"),
+                    ok="yes" if item.get("fetch_ok") else "no",
+                    status=str(item.get("status_code") or "n/a"),
+                    rows=int(item.get("rows_parsed") or 0),
+                    notes=str(item.get("notes") or "").replace("|", "/")[:160],
+                )
+            )
+        body_markdown = "\n".join(lines)
+
+    return {
+        "kind": "data_snapshot",
+        "doc_id": "gpu_prices",
+        "title": "GPU Price Tracker Snapshot",
+        "summary": summary_text,
+        "symbols": family_labels,
+        "tags": normalize_tag_list(["gpu-prices", "data-monitor", *family_labels]),
+        "activity_date": iso_to_date(updated_at) if updated_at else "",
+        "display_time": format_monitor_date_label(updated_at),
+        "updated_at": updated_at,
+        "source_name": "gpu_prices",
+        "detail_url": url_for("data_monitor_page", tab="gpu-prices"),
+        "sort_value": coerce_sort_timestamp(updated_at or payload.get("generated_at")),
+        "body_markdown": body_markdown,
+    }
+
+
+def build_ai_native_data_manifest_payload() -> dict[str, Any]:
+    datasets: list[dict[str, Any]] = []
+    for dataset_id, descriptor, json_endpoint, markdown_endpoint, filters_supported in [
+        (
+            "stablecoins",
+            build_ai_native_stablecoin_descriptor(include_body=False),
+            "ai_native_stablecoin_data_json",
+            "ai_native_stablecoin_data_markdown",
+            [],
+        ),
+        (
+            "cdn",
+            build_ai_native_cdn_descriptor(include_body=False),
+            "ai_native_cdn_data_json",
+            "ai_native_cdn_data_markdown",
+            ["provider", "category", "q", "site_limit"],
+        ),
+        (
+            "applovin",
+            build_ai_native_applovin_descriptor(include_body=False),
+            "ai_native_applovin_data_json",
+            "ai_native_applovin_data_markdown",
+            ["platform", "category"],
+        ),
+        (
+            "gpu_prices",
+            build_ai_native_gpu_price_descriptor(include_body=False),
+            "ai_native_gpu_price_data_json",
+            "ai_native_gpu_price_data_markdown",
+            ["family", "billing", "availability_mode"],
+        ),
+    ]:
+        public_descriptor = build_ai_native_public_descriptor(descriptor)
+        datasets.append(
+            {
+                "dataset_id": dataset_id,
+                "title": public_descriptor["title"],
+                "summary": public_descriptor["summary"],
+                "kind": public_descriptor["kind"],
+                "doc_id": public_descriptor["doc_id"],
+                "activity_date": public_descriptor["activity_date"],
+                "display_time": public_descriptor["display_time"],
+                "updated_at": public_descriptor["updated_at"],
+                "detail_url": public_descriptor["detail_url"],
+                "json_url": url_for(json_endpoint),
+                "markdown_url": url_for(markdown_endpoint),
+                "document_json_url": public_descriptor["json_url"],
+                "document_markdown_url": public_descriptor["markdown_url"],
+                "tags": public_descriptor["tags"],
+                "filters_supported": filters_supported,
+            }
+        )
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "detail_url": url_for("data_monitor_page"),
+        "search_url": url_for("ai_native_data_search_json"),
+        "search_url_template": f"{url_for('ai_native_data_search_json')}?q=<QUERY>&datasets=<DATASET>",
+        "counts": {
+            "datasets": len(datasets),
+        },
+        "datasets": datasets,
+    }
+
+
+def build_ai_native_stablecoin_payload() -> dict[str, Any]:
+    cache = (
+        normalize_stablecoin_market_cache(load_json(STABLECOIN_MONITOR_CACHE_PATH))
+        if STABLECOIN_MONITOR_CACHE_PATH.exists()
+        else normalize_stablecoin_market_cache({})
+    )
+    runtime = (
+        normalize_stablecoin_monitor_runtime(load_json(STABLECOIN_MONITOR_RUNTIME_PATH))
+        if STABLECOIN_MONITOR_RUNTIME_PATH.exists()
+        else normalize_stablecoin_monitor_runtime({})
+    )
+    monthly_series = cache.get("monthly_series") if isinstance(cache.get("monthly_series"), list) else []
+    rows: list[dict[str, Any]] = []
+    for month in monthly_series:
+        if not isinstance(month, dict):
+            continue
+        rows.append(
+            {
+                "month": str(month.get("label") or month.get("month") or ""),
+                "market_cap_total": float(month.get("market_cap_total") or 0.0),
+                "volume_total": float(month.get("volume_total") or 0.0) if month.get("volume_available") else None,
+                "volume_available": bool(month.get("volume_available")),
+                "coins": [
+                    {
+                        "symbol": str(coin.get("symbol") or ""),
+                        "market_cap": float(coin.get("market_cap") or 0.0),
+                        "volume": float(coin.get("volume") or 0.0) if month.get("volume_available") else None,
+                    }
+                    for coin in month.get("coins", [])
+                    if isinstance(coin, dict)
+                ],
+            }
+        )
+
+    latest_snapshot = cache.get("latest_snapshot") if isinstance(cache.get("latest_snapshot"), dict) else {}
+    latest_month_snapshot = (
+        cache.get("latest_month_snapshot") if isinstance(cache.get("latest_month_snapshot"), dict) else {}
+    )
+    market_cap_coverage_label = f"{cache.get('coverage_start') or '-'} to {cache.get('coverage_end') or '-'}"
+    volume_months = [item for item in rows if item.get("volume_available")]
+    volume_coverage_label = (
+        f"{volume_months[0]['month']} to {volume_months[-1]['month']}"
+        if volume_months
+        else "recent rolling volume window"
+    )
+    latest_market_cap_total = float(latest_snapshot.get("total_market_cap") or 0.0)
+    latest_volume_total = float(latest_snapshot.get("total_volume") or 0.0)
+    return {
+        "generated_at": now_iso(),
+        "source": {
+            "name": str(cache.get("source", {}).get("name") or ""),
+            "url": str(cache.get("source", {}).get("url") or ""),
+            "endpoint": str(cache.get("source", {}).get("endpoint") or ""),
+        },
+        "runtime": {
+            "status": str(runtime.get("status") or ""),
+            "status_label": monitor_runtime_status_label(runtime.get("status")),
+            "started_at": str(runtime.get("started_at") or ""),
+            "finished_at": str(runtime.get("finished_at") or ""),
+            "message": str(runtime.get("message") or ""),
+            "error": str(runtime.get("error") or ""),
+        },
+        "coverage": {
+            "market_cap": market_cap_coverage_label,
+            "volume": volume_coverage_label,
+            "combined": f"market cap {market_cap_coverage_label}; volume {volume_coverage_label}",
+        },
+        "latest_snapshot": {
+            "market_cap_total": latest_market_cap_total,
+            "volume_total": latest_volume_total,
+            "latest_point_at": str(latest_snapshot.get("latest_point_at") or ""),
+            "market_cap_change_24h_pct": float(latest_snapshot.get("market_cap_change_24h_pct") or 0.0),
+            "mode_label": "realtime" if bool(latest_snapshot.get("is_realtime")) else "latest snapshot",
+        },
+        "latest_month_snapshot": {
+            "month": str(latest_month_snapshot.get("month") or ""),
+            "market_cap_total": float(latest_month_snapshot.get("total_market_cap") or 0.0),
+            "volume_total": float(latest_month_snapshot.get("total_volume") or 0.0),
+            "latest_point_at": str(latest_month_snapshot.get("latest_point_at") or ""),
+        },
+        "coins": [
+            {
+                "symbol": str(coin.get("symbol") or ""),
+                "label": str(coin.get("label") or ""),
+                "latest_market_cap": float(coin.get("latest_market_cap") or 0.0),
+                "latest_volume": float(coin.get("latest_volume") or 0.0),
+                "share_label": (
+                    f"{(float(coin.get('latest_market_cap') or 0.0) / latest_market_cap_total) * 100:.1f}%"
+                    if latest_market_cap_total > 0
+                    else ""
+                ),
+            }
+            for coin in cache.get("coins", [])
+            if isinstance(coin, dict)
+        ],
+        "monthly_series": rows,
+    }
+
+
+def build_ai_native_stablecoin_descriptor(*, include_body: bool = False) -> dict[str, Any]:
+    payload = build_ai_native_stablecoin_payload()
+    display_time = str(payload.get("latest_snapshot", {}).get("latest_point_at") or "").strip() or str(
+        payload.get("latest_month_snapshot", {}).get("month") or ""
+    ).strip()
+    body_markdown = ""
+    if include_body:
+        lines = [
+            "# Stablecoin Data Snapshot",
+            "",
+            f"- 生成时间: {payload['generated_at']}",
+            f"- 数据源: {payload['source']['name']}",
+            f"- 市值覆盖: {payload['coverage']['market_cap']}",
+            f"- 成交量覆盖: {payload['coverage']['volume']}",
+            "",
+            "## Latest Snapshot",
+            "",
+            f"- 总市值: {format_compact_currency(payload['latest_snapshot']['market_cap_total'])}",
+            f"- 最新成交量: {format_compact_currency(payload['latest_snapshot']['volume_total'])}",
+            f"- 数据时间点: {payload['latest_snapshot']['latest_point_at'] or 'n/a'}",
+            f"- 24h 变化: {format_signed_percent(payload['latest_snapshot']['market_cap_change_24h_pct'])}",
+            "",
+            "## Monthly Totals",
+            "",
+            "| Month | Market Cap | Volume |",
+            "| --- | --- | --- |",
+        ]
+        for item in payload["monthly_series"]:
+            lines.append(
+                "| {month} | {market_cap} | {volume} |".format(
+                    month=item["month"] or "-",
+                    market_cap=format_compact_currency(item["market_cap_total"]),
+                    volume=format_compact_currency(item["volume_total"]) if item.get("volume_available") else "n/a",
+                )
+            )
+        body_markdown = "\n".join(lines)
+
+    return {
+        "kind": "data_snapshot",
+        "doc_id": "stablecoins",
+        "title": "Stablecoin Data Snapshot",
+        "summary": payload["coverage"]["combined"],
+        "symbols": [str(coin.get("symbol") or "") for coin in payload.get("coins", []) if coin.get("symbol")],
+        "tags": ["stablecoins", "data-monitor"],
+        "activity_date": str(payload.get("latest_month_snapshot", {}).get("month") or ""),
+        "display_time": display_time,
+        "updated_at": str(payload.get("generated_at") or ""),
+        "source_name": "stablecoins",
+        "detail_url": url_for("data_monitor_page", tab="stablecoins"),
+        "sort_value": coerce_sort_timestamp(payload.get("generated_at")),
+        "body_markdown": body_markdown,
+    }
+
+
+def build_ai_native_data_search_payload(
+    *,
+    query: str,
+    dataset_filters: list[str] | None = None,
+    type_filters: list[str] | None = None,
+    limit: int = AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    normalized_query = re.sub(r"\s+", " ", str(query or "").strip())
+    resolved_datasets = normalize_ai_native_data_search_dataset_filters(dataset_filters or []) or ["stablecoins", "cdn", "applovin", "gpu_prices"]
+    resolved_types = normalize_ai_native_data_search_type_filters(type_filters or [])
+    resolved_limit = normalize_ai_native_data_search_limit(limit)
+    query_terms = fold_search_terms(split_search_terms(normalized_query))
+    results: list[dict[str, Any]] = []
+
+    def maybe_append_result(
+        *,
+        dataset: str,
+        dataset_label: str,
+        entity_type: str,
+        entity_id: str,
+        title: str,
+        summary: str,
+        search_text: str,
+        detail_url: str,
+        json_url: str,
+        related: dict[str, Any] | None = None,
+        sort_value: float = 0.0,
+    ) -> None:
+        text = re.sub(r"\s+", " ", str(search_text or "").strip())
+        if query_terms and not text_contains_all_terms(
+            text,
+            split_search_terms(normalized_query),
+            text_casefolded=text.casefold(),
+            folded_terms=query_terms,
+        ):
+            return
+        score = score_ai_native_data_search_match(
+            title=title,
+            summary=summary,
+            search_text=text,
+            query_terms=query_terms,
+            sort_value=sort_value,
+        )
+        results.append(
+            {
+                "dataset": dataset,
+                "dataset_label": dataset_label,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "title": title,
+                "summary": summary,
+                "match_score": score,
+                "match_excerpt": build_ai_native_search_result_excerpt(text, summary, title, normalized_query),
+                "detail_url": detail_url,
+                "json_url": json_url,
+                "related": related or {},
+                "sort_value": float(sort_value or 0.0),
+            }
+        )
+
+    if "stablecoins" in resolved_datasets:
+        stablecoin_payload = build_ai_native_stablecoin_payload()
+        stablecoin_detail_url = url_for("data_monitor_page", tab="stablecoins")
+        stablecoin_json_url = url_for("ai_native_stablecoin_data_json")
+        latest_snapshot = (
+            stablecoin_payload.get("latest_snapshot")
+            if isinstance(stablecoin_payload.get("latest_snapshot"), dict)
+            else {}
+        )
+        latest_month_snapshot = (
+            stablecoin_payload.get("latest_month_snapshot")
+            if isinstance(stablecoin_payload.get("latest_month_snapshot"), dict)
+            else {}
+        )
+        snapshot_updated_at = str(
+            latest_snapshot.get("latest_point_at")
+            or latest_month_snapshot.get("latest_point_at")
+            or stablecoin_payload.get("generated_at")
+            or ""
+        ).strip()
+        snapshot_sort_value = coerce_sort_timestamp(snapshot_updated_at)
+        if not resolved_types or "snapshot" in set(resolved_types):
+            snapshot_summary = (
+                f"Latest total market cap {format_compact_currency(latest_snapshot.get('market_cap_total') or 0.0)}; "
+                f"volume {format_compact_currency(latest_snapshot.get('volume_total') or 0.0)}; "
+                f"coverage {str((stablecoin_payload.get('coverage') or {}).get('combined') or '').strip() or 'n/a'}."
+            )
+            snapshot_search_text = " ".join(
+                [
+                    "stablecoins stablecoin monitor snapshot",
+                    str((stablecoin_payload.get("source") or {}).get("name") or ""),
+                    str((stablecoin_payload.get("coverage") or {}).get("market_cap") or ""),
+                    str((stablecoin_payload.get("coverage") or {}).get("volume") or ""),
+                    snapshot_summary,
+                ]
+            )
+            maybe_append_result(
+                dataset="stablecoins",
+                dataset_label="Stablecoins",
+                entity_type="snapshot",
+                entity_id="stablecoins-latest",
+                title="Stablecoin Latest Snapshot",
+                summary=snapshot_summary,
+                search_text=snapshot_search_text,
+                detail_url=stablecoin_detail_url,
+                json_url=stablecoin_json_url,
+                related={
+                    "latest_point_at": snapshot_updated_at,
+                    "market_cap_total": float(latest_snapshot.get("market_cap_total") or 0.0),
+                    "volume_total": float(latest_snapshot.get("volume_total") or 0.0),
+                    "market_cap_change_24h_pct": float(latest_snapshot.get("market_cap_change_24h_pct") or 0.0),
+                },
+                sort_value=snapshot_sort_value,
+            )
+
+        if not resolved_types or "coin" in set(resolved_types):
+            for coin in stablecoin_payload.get("coins", []) if isinstance(stablecoin_payload.get("coins"), list) else []:
+                if not isinstance(coin, dict):
+                    continue
+                symbol = str(coin.get("symbol") or "").strip().upper()
+                label = str(coin.get("label") or symbol).strip() or symbol or "Stablecoin"
+                latest_market_cap = float(coin.get("latest_market_cap") or 0.0)
+                latest_volume = float(coin.get("latest_volume") or 0.0)
+                share_label = str(coin.get("share_label") or "").strip()
+                coin_summary = (
+                    f"{label} ({symbol}) latest market cap {format_compact_currency(latest_market_cap)}; "
+                    f"volume {format_compact_currency(latest_volume)}"
+                    + (f"; share {share_label}" if share_label else "")
+                    + "."
+                )
+                coin_search_text = " ".join(
+                    [
+                        "stablecoin coin",
+                        symbol,
+                        label,
+                        coin_summary,
+                    ]
+                )
+                maybe_append_result(
+                    dataset="stablecoins",
+                    dataset_label="Stablecoins",
+                    entity_type="coin",
+                    entity_id=symbol or label.casefold(),
+                    title=f"{label} ({symbol})" if symbol else label,
+                    summary=coin_summary,
+                    search_text=coin_search_text,
+                    detail_url=stablecoin_detail_url,
+                    json_url=stablecoin_json_url,
+                    related={
+                        "symbol": symbol,
+                        "label": label,
+                        "latest_market_cap": latest_market_cap,
+                        "latest_volume": latest_volume,
+                        "share_label": share_label,
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+    if "gpu_prices" in resolved_datasets:
+        gpu_payload = build_ai_native_gpu_price_payload()
+        gpu_detail_url = url_for("data_monitor_page", tab="gpu-prices")
+        gpu_json_url = url_for("ai_native_gpu_price_data_json")
+        gpu_summary = gpu_payload.get("summary") if isinstance(gpu_payload.get("summary"), dict) else {}
+        snapshot_updated_at = str(gpu_payload.get("updated_at") or gpu_payload.get("generated_at") or "").strip()
+        snapshot_sort_value = coerce_sort_timestamp(snapshot_updated_at)
+
+        if not resolved_types or "snapshot" in set(resolved_types):
+            latest_labels = []
+            for item in gpu_payload.get("latest", []) if isinstance(gpu_payload.get("latest"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                latest_labels.append(
+                    f"{item.get('gpu_family')}: {format_gpu_hour_price(item.get('available_standardized_price'))}"
+                )
+            snapshot_summary = (
+                f"{int(gpu_summary.get('offer_count') or 0)} offers / "
+                f"{int(gpu_summary.get('provider_count') or 0)} providers; "
+                + "; ".join(latest_labels)
+            )
+            maybe_append_result(
+                dataset="gpu_prices",
+                dataset_label="GPU Prices",
+                entity_type="snapshot",
+                entity_id="gpu-prices-latest",
+                title="GPU Price Latest Snapshot",
+                summary=snapshot_summary,
+                search_text=" ".join(["gpu prices h100 h200 b200 cloud rental on-demand", snapshot_summary]),
+                detail_url=gpu_detail_url,
+                json_url=gpu_json_url,
+                related={
+                    "updated_at": snapshot_updated_at,
+                    "offer_count": int(gpu_summary.get("offer_count") or 0),
+                    "provider_count": int(gpu_summary.get("provider_count") or 0),
+                },
+                sort_value=snapshot_sort_value,
+            )
+
+        if not resolved_types or "index" in set(resolved_types):
+            gpu_index_rows = []
+            if isinstance(gpu_payload.get("daily_index"), list):
+                gpu_index_rows.extend(gpu_payload.get("daily_index", []))
+            if isinstance(gpu_payload.get("csp_daily_index"), list):
+                gpu_index_rows.extend(gpu_payload.get("csp_daily_index", []))
+            for row in gpu_index_rows:
+                if not isinstance(row, dict):
+                    continue
+                family = str(row.get("gpu_family") or "").strip()
+                variant = str(row.get("gpu_variant_canonical") or "").strip()
+                is_csp = str(row.get("series_key") or "").startswith("azure:")
+                row_summary = (
+                    f"{family} {variant} {row.get('availability_mode') or 'available'} "
+                    f"median {format_gpu_hour_price(row.get('price_standardized'))}; "
+                    f"{int(row.get('sample_size') or 0)} samples / {int(row.get('provider_count') or 0)} providers."
+                )
+                maybe_append_result(
+                    dataset="gpu_prices",
+                    dataset_label="GPU Prices",
+                    entity_type="index",
+                    entity_id=str(row.get("series_key") or f"{variant}-{row.get('date') or ''}"),
+                    title=f"{family} {variant} {'Azure CSP ' if is_csp else ''}GPU Price Index",
+                    summary=row_summary,
+                    search_text=" ".join(["gpu price index", "azure csp" if is_csp else "", family, variant, row_summary]),
+                    detail_url=gpu_detail_url,
+                    json_url=gpu_json_url,
+                    related={
+                        "date": str(row.get("date") or ""),
+                        "family": family,
+                        "variant": variant,
+                        "availability_mode": str(row.get("availability_mode") or ""),
+                        "price_standardized": row.get("price_standardized"),
+                    },
+                    sort_value=coerce_sort_timestamp(str(row.get("date") or snapshot_updated_at)),
+                )
+
+        if not resolved_types or "offer" in set(resolved_types):
+            for offer in gpu_payload.get("normalized_offers", []) if isinstance(gpu_payload.get("normalized_offers"), list) else []:
+                if not isinstance(offer, dict):
+                    continue
+                offer_summary = (
+                    f"{offer.get('gpu_family') or ''} {offer.get('provider_name') or ''} "
+                    f"{format_gpu_hour_price(offer.get('price_per_gpu_hour_usd'))}; "
+                    f"{offer.get('gpu_count') or '-'} GPU / {offer.get('vcpu_total') or '-'} vCPU / "
+                    f"{offer.get('ram_total_gb') or '-'} GB RAM; {offer.get('availability_status') or 'unknown'}."
+                )
+                maybe_append_result(
+                    dataset="gpu_prices",
+                    dataset_label="GPU Prices",
+                    entity_type="offer",
+                    entity_id=str(offer.get("id") or offer.get("dedupe_key") or uuid.uuid4().hex[:8]),
+                    title=f"{offer.get('gpu_family') or 'GPU'} {offer.get('provider_name') or 'Provider'} Offer",
+                    summary=offer_summary,
+                    search_text=" ".join(
+                        [
+                            "gpu price offer cloud rental",
+                            str(offer.get("gpu_family") or ""),
+                            str(offer.get("provider_name") or ""),
+                            str(offer.get("gpu_variant_canonical") or ""),
+                            offer_summary,
+                        ]
+                    ),
+                    detail_url=gpu_detail_url,
+                    json_url=gpu_json_url,
+                    related={
+                        "family": str(offer.get("gpu_family") or ""),
+                        "provider": str(offer.get("provider_name") or ""),
+                        "price_per_gpu_hour_usd": offer.get("price_per_gpu_hour_usd"),
+                        "availability_status": str(offer.get("availability_status") or ""),
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+    if "cdn" in resolved_datasets:
+        cache = load_cdn_tracker_cache()
+        summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+        tracked_sites = cache.get("tracked_sites") if isinstance(cache.get("tracked_sites"), list) else []
+        site_rows = build_cdn_site_view_rows(tracked_sites)
+        provider_rows = cache.get("provider_rows") if isinstance(cache.get("provider_rows"), list) else []
+        recent_changes = cache.get("recent_changes") if isinstance(cache.get("recent_changes"), list) else []
+        cdn_detail_url = url_for("data_monitor_page", tab="cdn")
+        snapshot_updated_at = str(cache.get("updated_at") or "").strip()
+        snapshot_sort_value = coerce_sort_timestamp(snapshot_updated_at or now_iso())
+
+        if not resolved_types or "snapshot" in set(resolved_types):
+            leading_provider = ""
+            if provider_rows and isinstance(provider_rows[0], dict):
+                leading_provider = str(provider_rows[0].get("provider") or "").strip()
+            snapshot_summary = (
+                f"{int(summary.get('tracked_count') or len(site_rows))} tracked / "
+                f"{int(summary.get('reachable_count') or 0)} reachable / "
+                f"{int(summary.get('detected_count') or 0)} detected"
+                + (f"; leading provider {leading_provider}" if leading_provider else "")
+                + "."
+            )
+            snapshot_search_text = " ".join(
+                [
+                    "cdn tracking snapshot provider distribution website tracker",
+                    snapshot_summary,
+                    " ".join(
+                        str(row.get("provider") or "")
+                        for row in provider_rows[:6]
+                        if isinstance(row, dict)
+                    ),
+                ]
+            )
+            maybe_append_result(
+                dataset="cdn",
+                dataset_label="CDN Tracking",
+                entity_type="snapshot",
+                entity_id="cdn-latest",
+                title="CDN Latest Snapshot",
+                summary=snapshot_summary,
+                search_text=snapshot_search_text,
+                detail_url=cdn_detail_url,
+                json_url=url_for("ai_native_cdn_data_json"),
+                related={
+                    "snapshot_updated_at": snapshot_updated_at,
+                    "tracked_count": int(summary.get("tracked_count") or len(site_rows)),
+                    "reachable_count": int(summary.get("reachable_count") or 0),
+                    "detected_count": int(summary.get("detected_count") or 0),
+                    "leading_provider": leading_provider,
+                },
+                sort_value=snapshot_sort_value,
+            )
+
+        if not resolved_types or "site" in set(resolved_types):
+            for site in site_rows:
+                if not isinstance(site, dict):
+                    continue
+                observed_providers = [
+                    str(item or "").strip()
+                    for item in site.get("observed_providers", [])
+                    if str(item or "").strip()
+                ]
+                site_summary = (
+                    f"Primary {str(site.get('provider') or 'Unknown').strip() or 'Unknown'}; "
+                    f"observed {', '.join(observed_providers) or 'Unknown'}; "
+                    f"{str(site.get('status_label') or '').strip() or 'status n/a'}"
+                )
+                category_label = str(site.get("category") or "").strip()
+                if category_label:
+                    site_summary = f"{site_summary}; {category_label}"
+                site_search_text = " ".join(
+                    [
+                        "cdn site",
+                        str(site.get("label") or ""),
+                        str(site.get("url") or ""),
+                        str(site.get("requested_host") or ""),
+                        str(site.get("final_host") or ""),
+                        str(site.get("provider") or ""),
+                        category_label,
+                        str(site.get("bucket") or ""),
+                        str(site.get("compact_summary") or ""),
+                        " ".join(observed_providers),
+                        " ".join(
+                            str(item or "").strip()
+                            for item in site.get("provider_evidence", [])
+                            if str(item or "").strip()
+                        ),
+                        " ".join(
+                            str(item or "").strip()
+                            for item in site.get("asset_host_names_compact", [])
+                            if str(item or "").strip()
+                        ),
+                    ]
+                )
+                site_json_url = url_for(
+                    "ai_native_cdn_data_json",
+                    q=str(site.get("label") or site.get("final_host") or "").strip(),
+                    site_limit=min(20, AI_NATIVE_CDN_SITE_LIMIT_DEFAULT),
+                )
+                maybe_append_result(
+                    dataset="cdn",
+                    dataset_label="CDN Tracking",
+                    entity_type="site",
+                    entity_id=str(site.get("id") or site.get("label") or "").strip(),
+                    title=str(site.get("label") or site.get("final_host") or "CDN Site").strip() or "CDN Site",
+                    summary=site_summary,
+                    search_text=site_search_text,
+                    detail_url=cdn_detail_url,
+                    json_url=site_json_url,
+                    related={
+                        "provider": str(site.get("provider") or "Unknown").strip() or "Unknown",
+                        "observed_providers": observed_providers,
+                        "category": category_label,
+                        "rank_label": str(site.get("rank_label") or "").strip(),
+                        "status_label": str(site.get("status_label") or "").strip(),
+                        "final_host": str(site.get("final_host") or site.get("requested_host") or "").strip(),
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+        if not resolved_types or "provider" in set(resolved_types):
+            for row in provider_rows:
+                if not isinstance(row, dict):
+                    continue
+                provider_name = str(row.get("provider") or "Unknown").strip() or "Unknown"
+                sample_sites = [
+                    str(item or "").strip()
+                    for item in row.get("site_labels", [])
+                    if str(item or "").strip()
+                ]
+                provider_summary = (
+                    f"{int(row.get('count') or 0)} sites; share {str(row.get('share_label') or '').strip() or 'n/a'}."
+                )
+                provider_search_text = " ".join(
+                    [
+                        "cdn provider distribution",
+                        provider_name,
+                        provider_summary,
+                        " ".join(sample_sites),
+                    ]
+                )
+                maybe_append_result(
+                    dataset="cdn",
+                    dataset_label="CDN Tracking",
+                    entity_type="provider",
+                    entity_id=provider_name.casefold(),
+                    title=f"{provider_name} Provider Share",
+                    summary=provider_summary,
+                    search_text=provider_search_text,
+                    detail_url=cdn_detail_url,
+                    json_url=url_for(
+                        "ai_native_cdn_data_json",
+                        provider=provider_name,
+                        site_limit=min(20, AI_NATIVE_CDN_SITE_LIMIT_DEFAULT),
+                    ),
+                    related={
+                        "provider": provider_name,
+                        "count": int(row.get("count") or 0),
+                        "share_pct": round(float(row.get("share_pct") or 0.0), 2),
+                        "share_label": str(row.get("share_label") or "").strip(),
+                        "sample_sites": sample_sites[:8],
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+        if not resolved_types or "change" in set(resolved_types):
+            for item in recent_changes:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "site").strip() or "site"
+                category_label = str(item.get("category") or "").strip()
+                change_summary = str(item.get("summary") or "").strip()
+                change_search_text = " ".join(
+                    [
+                        "cdn recent change provider switch",
+                        label,
+                        category_label,
+                        change_summary,
+                    ]
+                )
+                maybe_append_result(
+                    dataset="cdn",
+                    dataset_label="CDN Tracking",
+                    entity_type="change",
+                    entity_id=f"change-{secure_filename(label) or uuid.uuid4().hex[:8]}",
+                    title=f"{label} Provider Change",
+                    summary=change_summary or "Recent provider change signal.",
+                    search_text=change_search_text,
+                    detail_url=cdn_detail_url,
+                    json_url=url_for(
+                        "ai_native_cdn_data_json",
+                        q=label,
+                        site_limit=min(20, AI_NATIVE_CDN_SITE_LIMIT_DEFAULT),
+                    ),
+                    related={
+                        "label": label,
+                        "category": category_label,
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+    if "applovin" in resolved_datasets:
+        applovin_payload = build_ai_native_applovin_payload()
+        applovin_detail_url = str(applovin_payload.get("detail_url") or url_for("data_monitor_page", tab="applovin"))
+        applovin_json_url = url_for("ai_native_applovin_data_json")
+        selection = applovin_payload.get("selection", {}) if isinstance(applovin_payload.get("selection"), dict) else {}
+        primary = applovin_payload.get("primary_entry", {}) if isinstance(applovin_payload.get("primary_entry"), dict) else {}
+        summary = applovin_payload.get("summary", {}) if isinstance(applovin_payload.get("summary"), dict) else {}
+        snapshot_updated_at = str(
+            selection.get("source_updated_at")
+            or summary.get("snapshot_updated_at")
+            or applovin_payload.get("generated_at")
+            or ""
+        ).strip()
+        snapshot_sort_value = coerce_sort_timestamp(snapshot_updated_at)
+
+        if not resolved_types or "snapshot" in set(resolved_types):
+            snapshot_summary = (
+                f"{selection.get('platform_title') or 'Platform'} / {selection.get('category_title') or 'Category'}; "
+                f"{primary.get('name') or 'AppLovin not present'}; rank {primary.get('rank_label') or 'n/a'}; "
+                f"app share {primary.get('app_share_label') or 'n/a'}; download share {primary.get('download_share_label') or 'n/a'}."
+            )
+            snapshot_search_text = " ".join(
+                [
+                    "applovin sdk tracker snapshot 42matters",
+                    str(selection.get("platform_title") or ""),
+                    str(selection.get("category_title") or ""),
+                    str(primary.get("name") or ""),
+                    snapshot_summary,
+                ]
+            )
+            maybe_append_result(
+                dataset="applovin",
+                dataset_label="AppLovin Tracker",
+                entity_type="snapshot",
+                entity_id="applovin-latest",
+                title="AppLovin Latest Snapshot",
+                summary=snapshot_summary,
+                search_text=snapshot_search_text,
+                detail_url=applovin_detail_url,
+                json_url=applovin_json_url,
+                related={
+                    "platform": str(selection.get("platform_id") or ""),
+                    "category": str(selection.get("category_id") or ""),
+                    "rank_label": str(primary.get("rank_label") or ""),
+                    "primary_name": str(primary.get("name") or ""),
+                },
+                sort_value=snapshot_sort_value,
+            )
+
+        if not resolved_types or "category" in set(resolved_types):
+            for row in applovin_payload.get("cross_category_rows", []) if isinstance(applovin_payload.get("cross_category_rows"), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                category_summary = (
+                    f"{str(row.get('category_title') or '').strip() or 'Category'} on {selection.get('platform_title') or 'Platform'}; "
+                    f"AppLovin entry {str(row.get('entry_name') or 'n/a').strip() or 'n/a'}; "
+                    f"rank {str(row.get('rank_label') or 'n/a').strip() or 'n/a'}."
+                )
+                category_search_text = " ".join(
+                    [
+                        "applovin category board",
+                        str(row.get("category_title") or ""),
+                        str(row.get("entry_name") or ""),
+                        category_summary,
+                    ]
+                )
+                maybe_append_result(
+                    dataset="applovin",
+                    dataset_label="AppLovin Tracker",
+                    entity_type="category",
+                    entity_id=str(row.get("category_id") or row.get("category_title") or "").strip(),
+                    title=f"{str(row.get('category_title') or 'Category').strip() or 'Category'} AppLovin View",
+                    summary=category_summary,
+                    search_text=category_search_text,
+                    detail_url=str(row.get("detail_url") or applovin_detail_url),
+                    json_url=url_for(
+                        "ai_native_applovin_data_json",
+                        platform=str(selection.get("platform_id") or ""),
+                        category=str(row.get("category_id") or ""),
+                    ),
+                    related={
+                        "platform": str(selection.get("platform_id") or ""),
+                        "category": str(row.get("category_id") or ""),
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+        if not resolved_types or "sdk" in set(resolved_types):
+            for row in applovin_payload.get("leaderboard_rows", []) if isinstance(applovin_payload.get("leaderboard_rows"), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                sdk_name = str(row.get("name") or "").strip()
+                if not sdk_name:
+                    continue
+                sdk_summary = (
+                    f"{sdk_name}; rank {str(row.get('rank_label') or 'n/a').strip() or 'n/a'}; "
+                    f"app share {str(row.get('app_share_label') or 'n/a').strip() or 'n/a'}; "
+                    f"download share {str(row.get('download_share_label') or 'n/a').strip() or 'n/a'}."
+                )
+                sdk_search_text = " ".join(
+                    [
+                        "applovin sdk leaderboard",
+                        sdk_name,
+                        str(selection.get("platform_title") or ""),
+                        str(selection.get("category_title") or ""),
+                        sdk_summary,
+                    ]
+                )
+                maybe_append_result(
+                    dataset="applovin",
+                    dataset_label="AppLovin Tracker",
+                    entity_type="sdk",
+                    entity_id=secure_filename(sdk_name) or uuid.uuid4().hex[:8],
+                    title=sdk_name,
+                    summary=sdk_summary,
+                    search_text=sdk_search_text,
+                    detail_url=applovin_detail_url,
+                    json_url=applovin_json_url,
+                    related={
+                        "platform": str(selection.get("platform_id") or ""),
+                        "category": str(selection.get("category_id") or ""),
+                        "is_applovin": bool(row.get("is_applovin")),
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+        if not resolved_types or "change" in set(resolved_types):
+            for item in applovin_payload.get("signal_items", []) if isinstance(applovin_payload.get("signal_items"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                change_title = str(item.get("title") or "AppLovin Signal").strip() or "AppLovin Signal"
+                change_summary = str(item.get("summary") or "").strip() or "Recent AppLovin tracker signal."
+                change_search_text = " ".join(
+                    [
+                        "applovin recent change signal",
+                        change_title,
+                        change_summary,
+                        str(selection.get("platform_title") or ""),
+                        str(selection.get("category_title") or ""),
+                    ]
+                )
+                maybe_append_result(
+                    dataset="applovin",
+                    dataset_label="AppLovin Tracker",
+                    entity_type="change",
+                    entity_id=f"applovin-change-{secure_filename(change_title) or uuid.uuid4().hex[:8]}",
+                    title=change_title,
+                    summary=change_summary,
+                    search_text=change_search_text,
+                    detail_url=applovin_detail_url,
+                    json_url=applovin_json_url,
+                    related={
+                        "platform": str(selection.get("platform_id") or ""),
+                        "category": str(selection.get("category_id") or ""),
+                    },
+                    sort_value=snapshot_sort_value,
+                )
+
+    results.sort(
+        key=lambda item: (float(item.get("match_score") or 0.0), float(item.get("sort_value") or 0.0)),
+        reverse=True,
+    )
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "query": normalized_query,
+        "filters": {
+            "datasets": resolved_datasets,
+            "types": resolved_types,
+            "limit": resolved_limit,
+        },
+        "counts": {
+            "matched_results": len(results),
+            "returned_results": min(len(results), resolved_limit),
+        },
+        "results": results[:resolved_limit],
+    }
+
+
+def build_ai_native_manifest_documents(*, allow_search_extract: bool = False) -> list[dict[str, Any]]:
+    stock_store = load_stock_store()
+    known_symbols = sorted(list_stock_symbols(stock_store))
+    reports, _ = get_report_catalog()
+    signal_reports = [
+        build_report_catalog_entry(report_path)
+        for report_path in iter_report_paths_in(SIGNAL_MONITOR_REPORTS_DIR)
+    ]
+
+    documents: list[dict[str, Any]] = []
+    for report in reports:
+        documents.append(
+            build_ai_native_report_descriptor(report, kind="report", known_symbols=known_symbols, include_body=False)
+        )
+    for report in signal_reports:
+        documents.append(
+            build_ai_native_report_descriptor(
+                report,
+                kind="signal_report",
+                known_symbols=known_symbols,
+                include_body=False,
+            )
+        )
+
+    for symbol in sorted(stock_store.get("stocks", {}).keys()):
+        entry = ensure_stock_entry(stock_store, symbol)
+        note_lookup = {
+            str(note.get("id") or "").strip(): note
+            for note in entry.get("notes", [])
+            if isinstance(note, dict) and str(note.get("id") or "").strip()
+        }
+
+        setup_descriptor = build_ai_native_stock_setup_descriptor(symbol, include_body=False)
+        if setup_descriptor is not None:
+            documents.append(setup_descriptor)
+
+        for note in entry.get("notes", []):
+            if isinstance(note, dict):
+                documents.append(build_ai_native_note_descriptor(symbol, note, include_body=False))
+
+        for file_entry in entry.get("files", []):
+            if isinstance(file_entry, dict):
+                documents.append(
+                    build_ai_native_file_descriptor(
+                        symbol,
+                        file_entry,
+                        note_lookup,
+                        include_body=False,
+                        allow_search_extract=allow_search_extract,
+                    )
+                )
+
+        for call in entry.get("earnings_calls", []):
+            if isinstance(call, dict):
+                documents.append(build_ai_native_earnings_call_descriptor(symbol, call, include_body=False))
+
+    for expert in stock_store.get("experts", []):
+        if isinstance(expert, dict):
+            documents.append(build_ai_native_expert_descriptor(expert, stock_store, include_body=False))
+
+    for transcript in stock_store.get("transcripts", []):
+        if isinstance(transcript, dict):
+            documents.append(build_ai_native_transcript_descriptor(transcript, include_body=False))
+
+    documents.append(build_ai_native_stablecoin_descriptor(include_body=False))
+    documents.append(build_ai_native_cdn_descriptor(include_body=False))
+    documents.append(build_ai_native_applovin_descriptor(include_body=False))
+    documents.append(build_ai_native_gpu_price_descriptor(include_body=False))
+    documents.sort(key=lambda item: (float(item.get("sort_value") or 0.0), str(item.get("title") or "")), reverse=True)
+    return documents
+
+
+def normalize_ai_native_kind_filters(raw_values: Any) -> list[str]:
+    if isinstance(raw_values, str):
+        values = re.split(r"[\s,;|]+", raw_values.strip())
+    elif isinstance(raw_values, (list, tuple, set)):
+        values = [
+            part
+            for item in raw_values
+            for part in re.split(r"[\s,;|]+", str(item or "").strip())
+            if part
+        ]
+    else:
+        values = []
+    return normalize_choice_list(values, set(AI_NATIVE_DOCUMENT_KIND_META))
+
+
+def normalize_ai_native_symbol_filters(raw_values: Any) -> list[str]:
+    if isinstance(raw_values, str):
+        return normalize_stock_symbol_list(re.split(r"[\s,;|]+", raw_values.strip()))
+    if isinstance(raw_values, (list, tuple, set)):
+        return normalize_stock_symbol_list(
+            [
+                part
+                for item in raw_values
+                for part in re.split(r"[\s,;|]+", str(item or "").strip())
+                if part
+            ]
+        )
+    return normalize_stock_symbol_list(raw_values)
+
+
+def build_ai_native_index_doc_key(kind: str, doc_id: str) -> str:
+    return f"{str(kind or '').strip()}::{str(doc_id or '').strip()}"
+
+
+def build_ai_native_index_document_text(descriptor: dict[str, Any]) -> str:
+    text = " ".join(
+        part
+        for part in [
+            str(descriptor.get("title") or "").strip(),
+            str(descriptor.get("summary") or "").strip(),
+            str(descriptor.get("source_name") or "").strip(),
+            str(descriptor.get("search_text") or "").strip(),
+            " ".join(normalize_stock_symbol_list(descriptor.get("symbols", []))),
+            " ".join(normalize_tag_list(descriptor.get("tags", []))),
+            str(descriptor.get("activity_date") or "").strip(),
+        ]
+        if part
+    )
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip()
+
+
+def build_ai_native_index_document_hash(descriptor: dict[str, Any]) -> str:
+    return sha256_text(
+        serialize_stable_json(
+            {
+                "kind": str(descriptor.get("kind") or "").strip(),
+                "doc_id": str(descriptor.get("doc_id") or "").strip(),
+                "title": str(descriptor.get("title") or "").strip(),
+                "summary": str(descriptor.get("summary") or "").strip(),
+                "symbols": normalize_stock_symbol_list(descriptor.get("symbols", [])),
+                "tags": normalize_tag_list(descriptor.get("tags", [])),
+                "activity_date": str(descriptor.get("activity_date") or "").strip(),
+                "updated_at": str(descriptor.get("updated_at") or "").strip(),
+                "source_name": str(descriptor.get("source_name") or "").strip(),
+                "detail_url": str(descriptor.get("detail_url") or "").strip(),
+                "sort_value": float(descriptor.get("sort_value") or 0.0),
+                "search_text": build_ai_native_index_document_text(descriptor),
+            }
+        )
+    )
+
+
+def build_ai_native_index_manifest_digest(documents: list[dict[str, Any]]) -> str:
+    return sha256_text(
+        serialize_stable_json(
+            [
+                {
+                    "doc_key": build_ai_native_index_doc_key(item.get("kind"), item.get("doc_id")),
+                    "hash": build_ai_native_index_document_hash(item),
+                }
+                for item in documents
+                if isinstance(item, dict)
+            ]
+        )
+    )
+
+
+def connect_ai_native_index_db() -> sqlite3.Connection:
+    AI_NATIVE_INDEX_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(AI_NATIVE_INDEX_DB_PATH, timeout=20)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.DatabaseError:
+        pass
+    try:
+        connection.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError:
+        pass
+    return connection
+
+
+def get_ai_native_index_metadata(connection: sqlite3.Connection, key: str) -> str:
+    row = connection.execute(
+        "SELECT value FROM ai_native_index_metadata WHERE key = ?",
+        (str(key or "").strip(),),
+    ).fetchone()
+    return str(row["value"]) if row and row["value"] is not None else ""
+
+
+def set_ai_native_index_metadata(connection: sqlite3.Connection, key: str, value: Any) -> None:
+    connection.execute(
+        """
+        INSERT INTO ai_native_index_metadata (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (str(key or "").strip(), str(value or "").strip()),
+    )
+
+
+def ensure_ai_native_index_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ai_native_index_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_native_documents (
+            doc_key TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            symbols_json TEXT NOT NULL,
+            tags_json TEXT NOT NULL,
+            activity_date TEXT NOT NULL,
+            display_time TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            detail_url TEXT NOT NULL,
+            markdown_url TEXT NOT NULL,
+            json_url TEXT NOT NULL,
+            asset_rel_dir TEXT NOT NULL,
+            asset_cached INTEGER NOT NULL DEFAULT 0,
+            sort_value REAL NOT NULL DEFAULT 0,
+            search_text TEXT NOT NULL,
+            search_text_folded TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            indexed_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS ai_native_documents_kind_sort_idx
+            ON ai_native_documents(kind, sort_value DESC, title);
+
+        CREATE TABLE IF NOT EXISTS ai_native_document_chunks (
+            doc_key TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            heading_path_json TEXT NOT NULL,
+            preview TEXT NOT NULL,
+            text TEXT NOT NULL,
+            char_count INTEGER NOT NULL DEFAULT 0,
+            search_text_folded TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            cached_at TEXT NOT NULL,
+            PRIMARY KEY (doc_key, chunk_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS ai_native_document_chunks_doc_idx
+            ON ai_native_document_chunks(doc_key, chunk_index);
+        """
+    )
+    set_ai_native_index_metadata(connection, "schema_version", AI_NATIVE_INDEX_SCHEMA_VERSION)
+
+
+def build_ai_native_index_document_row(descriptor: dict[str, Any]) -> dict[str, Any]:
+    public_descriptor = build_ai_native_public_descriptor(descriptor)
+    asset_meta = load_json(build_ai_native_asset_dir(public_descriptor["kind"], public_descriptor["doc_id"]) / "meta.json")
+    chunk_count = max(0, int(asset_meta.get("chunk_count") or 0)) if isinstance(asset_meta, dict) else 0
+    return {
+        "doc_key": build_ai_native_index_doc_key(public_descriptor["kind"], public_descriptor["doc_id"]),
+        "kind": public_descriptor["kind"],
+        "doc_id": public_descriptor["doc_id"],
+        "title": public_descriptor["title"],
+        "summary": public_descriptor["summary"],
+        "symbols_json": json.dumps(normalize_stock_symbol_list(public_descriptor.get("symbols", [])), ensure_ascii=False),
+        "tags_json": json.dumps(normalize_tag_list(public_descriptor.get("tags", [])), ensure_ascii=False),
+        "activity_date": str(public_descriptor.get("activity_date") or ""),
+        "display_time": str(public_descriptor.get("display_time") or ""),
+        "updated_at": str(public_descriptor.get("updated_at") or ""),
+        "source_name": str(public_descriptor.get("source_name") or ""),
+        "detail_url": str(public_descriptor.get("detail_url") or ""),
+        "markdown_url": str(public_descriptor.get("markdown_url") or ""),
+        "json_url": str(public_descriptor.get("json_url") or ""),
+        "asset_rel_dir": str(public_descriptor.get("asset_rel_dir") or ""),
+        "asset_cached": 1 if bool(public_descriptor.get("asset_cached")) else 0,
+        "sort_value": float(public_descriptor.get("sort_value") or 0.0),
+        "search_text": build_ai_native_index_document_text(descriptor),
+        "search_text_folded": build_ai_native_index_document_text(descriptor).casefold(),
+        "source_hash": build_ai_native_index_document_hash(descriptor),
+        "chunk_count": chunk_count,
+        "indexed_at": now_iso(),
+    }
+
+
+def build_ai_native_index_status(connection: sqlite3.Connection) -> dict[str, Any]:
+    document_count = int(
+        (connection.execute("SELECT COUNT(*) AS value FROM ai_native_documents").fetchone() or {"value": 0})["value"]
+    )
+    chunk_count = int(
+        (connection.execute("SELECT COUNT(*) AS value FROM ai_native_document_chunks").fetchone() or {"value": 0})["value"]
+    )
+    return {
+        "schema_version": get_ai_native_index_metadata(connection, "schema_version") or AI_NATIVE_INDEX_SCHEMA_VERSION,
+        "manifest_digest": get_ai_native_index_metadata(connection, "manifest_digest"),
+        "last_refreshed_at": get_ai_native_index_metadata(connection, "last_refreshed_at"),
+        "document_count": document_count,
+        "chunk_count": chunk_count,
+        "db_path": str(AI_NATIVE_INDEX_DB_PATH),
+    }
+
+
+def sync_ai_native_search_index(*, force_refresh: bool = False) -> dict[str, Any]:
+    documents = build_ai_native_manifest_documents(allow_search_extract=True)
+    manifest_digest = build_ai_native_index_manifest_digest(documents)
+
+    with AI_NATIVE_INDEX_LOCK:
+        connection = connect_ai_native_index_db()
+        try:
+            ensure_ai_native_index_schema(connection)
+            current_digest = get_ai_native_index_metadata(connection, "manifest_digest")
+            current_count = int(
+                (connection.execute("SELECT COUNT(*) AS value FROM ai_native_documents").fetchone() or {"value": 0})["value"]
+            )
+            should_refresh = force_refresh or current_digest != manifest_digest or current_count != len(documents)
+            if should_refresh:
+                rows = [build_ai_native_index_document_row(item) for item in documents if isinstance(item, dict)]
+                doc_keys = [row["doc_key"] for row in rows]
+                for row in rows:
+                    connection.execute(
+                        """
+                        INSERT INTO ai_native_documents (
+                            doc_key, kind, doc_id, title, summary, symbols_json, tags_json,
+                            activity_date, display_time, updated_at, source_name, detail_url,
+                            markdown_url, json_url, asset_rel_dir, asset_cached, sort_value,
+                            search_text, search_text_folded, source_hash, chunk_count, indexed_at
+                        )
+                        VALUES (
+                            :doc_key, :kind, :doc_id, :title, :summary, :symbols_json, :tags_json,
+                            :activity_date, :display_time, :updated_at, :source_name, :detail_url,
+                            :markdown_url, :json_url, :asset_rel_dir, :asset_cached, :sort_value,
+                            :search_text, :search_text_folded, :source_hash, :chunk_count, :indexed_at
+                        )
+                        ON CONFLICT(doc_key) DO UPDATE SET
+                            kind = excluded.kind,
+                            doc_id = excluded.doc_id,
+                            title = excluded.title,
+                            summary = excluded.summary,
+                            symbols_json = excluded.symbols_json,
+                            tags_json = excluded.tags_json,
+                            activity_date = excluded.activity_date,
+                            display_time = excluded.display_time,
+                            updated_at = excluded.updated_at,
+                            source_name = excluded.source_name,
+                            detail_url = excluded.detail_url,
+                            markdown_url = excluded.markdown_url,
+                            json_url = excluded.json_url,
+                            asset_rel_dir = excluded.asset_rel_dir,
+                            asset_cached = excluded.asset_cached,
+                            sort_value = excluded.sort_value,
+                            search_text = excluded.search_text,
+                            search_text_folded = excluded.search_text_folded,
+                            source_hash = excluded.source_hash,
+                            chunk_count = excluded.chunk_count,
+                            indexed_at = excluded.indexed_at
+                        """,
+                        row,
+                    )
+                if doc_keys:
+                    placeholders = ", ".join("?" for _ in doc_keys)
+                    connection.execute(
+                        f"DELETE FROM ai_native_documents WHERE doc_key NOT IN ({placeholders})",
+                        doc_keys,
+                    )
+                    connection.execute(
+                        f"DELETE FROM ai_native_document_chunks WHERE doc_key NOT IN ({placeholders})",
+                        doc_keys,
+                    )
+                else:
+                    connection.execute("DELETE FROM ai_native_documents")
+                    connection.execute("DELETE FROM ai_native_document_chunks")
+                set_ai_native_index_metadata(connection, "manifest_digest", manifest_digest)
+                set_ai_native_index_metadata(connection, "last_refreshed_at", now_iso())
+                connection.commit()
+            return build_ai_native_index_status(connection)
+        finally:
+            connection.close()
+
+
+def build_ai_native_public_descriptor_from_index_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    source = dict(row or {})
+    symbols = normalize_stock_symbol_list(json.loads(source.get("symbols_json") or "[]"))
+    tags = normalize_tag_list(json.loads(source.get("tags_json") or "[]"))
+    return {
+        "kind": str(source.get("kind") or ""),
+        "kind_label": AI_NATIVE_DOCUMENT_KIND_META.get(str(source.get("kind") or ""), "Document"),
+        "doc_id": str(source.get("doc_id") or ""),
+        "title": str(source.get("title") or ""),
+        "summary": str(source.get("summary") or ""),
+        "symbols": symbols,
+        "tags": tags,
+        "activity_date": str(source.get("activity_date") or ""),
+        "display_time": str(source.get("display_time") or ""),
+        "updated_at": str(source.get("updated_at") or ""),
+        "source_name": str(source.get("source_name") or ""),
+        "detail_url": str(source.get("detail_url") or ""),
+        "markdown_url": str(source.get("markdown_url") or ""),
+        "json_url": str(source.get("json_url") or ""),
+        "asset_rel_dir": str(source.get("asset_rel_dir") or ""),
+        "asset_cached": bool(int(source.get("asset_cached") or 0)),
+        "sort_value": float(source.get("sort_value") or 0.0),
+        "chunk_count": max(0, int(source.get("chunk_count") or 0)),
+    }
+
+
+def build_ai_native_search_result_excerpt(search_text: str, summary: str, title: str, query: str) -> str:
+    terms = split_search_terms(query)
+    return build_match_excerpt(search_text or summary or title, terms, summary or title, limit=220)
+
+
+def score_ai_native_search_row(row: sqlite3.Row, *, query_terms: list[str], symbol_filters: list[str]) -> float:
+    title = str(row["title"] or "").casefold()
+    summary = str(row["summary"] or "").casefold()
+    search_text = str(row["search_text_folded"] or "")
+    symbols = set(normalize_stock_symbol_list(json.loads(row["symbols_json"] or "[]")))
+    score = 0.0
+    if not query_terms:
+        score += 1.0
+    for term in query_terms:
+        if term in title:
+            score += 10.0
+        elif term in summary:
+            score += 6.0
+        elif term in search_text:
+            score += 3.0
+    if symbol_filters and symbols.intersection(symbol_filters):
+        score += 4.0
+    score += min(float(row["sort_value"] or 0.0) / 10_000_000_000, 5.0)
+    return round(score, 6)
+
+
+def search_ai_native_index(
+    *,
+    query: str = "",
+    symbol_filters: list[str] | None = None,
+    kind_filters: list[str] | None = None,
+    limit: int = 0,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    normalized_query = re.sub(r"\s+", " ", str(query or "").strip())
+    resolved_symbols = normalize_ai_native_symbol_filters(symbol_filters or [])
+    resolved_kinds = normalize_ai_native_kind_filters(kind_filters or [])
+    resolved_limit = max(1, int(limit or AI_NATIVE_SEARCH_DEFAULT_LIMIT))
+    query_terms = fold_search_terms(split_search_terms(normalized_query))
+    index_status = sync_ai_native_search_index(force_refresh=force_refresh)
+
+    with AI_NATIVE_INDEX_LOCK:
+        connection = connect_ai_native_index_db()
+        try:
+            ensure_ai_native_index_schema(connection)
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM ai_native_documents
+                ORDER BY sort_value DESC, title
+                """,
+            ).fetchall()
+        finally:
+            connection.close()
+
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        descriptor = build_ai_native_public_descriptor_from_index_row(row)
+        if resolved_kinds and descriptor["kind"] not in set(resolved_kinds):
+            continue
+        descriptor_symbols = set(descriptor.get("symbols", []))
+        if resolved_symbols and not descriptor_symbols.intersection(resolved_symbols):
+            continue
+        if query_terms and not text_contains_all_terms(
+            str(row["search_text"] or ""),
+            query_terms,
+            text_casefolded=str(row["search_text_folded"] or ""),
+            folded_terms=query_terms,
+        ):
+            continue
+        score = score_ai_native_search_row(row, query_terms=query_terms, symbol_filters=resolved_symbols)
+        matches.append(
+            {
+                **descriptor,
+                "match_score": score,
+                "match_excerpt": build_ai_native_search_result_excerpt(
+                    str(row["search_text"] or ""),
+                    descriptor["summary"],
+                    descriptor["title"],
+                    normalized_query,
+                ),
+            }
+        )
+
+    matches.sort(key=lambda item: (float(item.get("match_score") or 0.0), float(item.get("sort_value") or 0.0)), reverse=True)
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "query": normalized_query,
+        "filters": {
+            "symbols": resolved_symbols,
+            "kinds": resolved_kinds,
+            "limit": resolved_limit,
+        },
+        "index": index_status,
+        "counts": {
+            "matched_documents": len(matches),
+            "returned_documents": min(len(matches), resolved_limit),
+        },
+        "documents": matches[:resolved_limit],
+    }
+
+
+def cache_ai_native_document_chunks(
+    connection: sqlite3.Connection,
+    descriptor: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    meta = ensure_ai_native_document_asset(descriptor)
+    public_descriptor = build_ai_native_public_descriptor(descriptor)
+    doc_key = build_ai_native_index_doc_key(public_descriptor["kind"], public_descriptor["doc_id"])
+    chunks = read_ai_native_chunks(public_descriptor["kind"], public_descriptor["doc_id"])
+    connection.execute("DELETE FROM ai_native_document_chunks WHERE doc_key = ?", (doc_key,))
+    for index, chunk in enumerate(chunks):
+        heading_path = chunk.get("heading_path", []) if isinstance(chunk.get("heading_path"), list) else []
+        search_text = " ".join(
+            part
+            for part in [
+                " / ".join(str(item).strip() for item in heading_path if str(item).strip()),
+                str(chunk.get("preview") or "").strip(),
+                str(chunk.get("text") or "").strip(),
+            ]
+            if part
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_native_document_chunks (
+                doc_key, chunk_id, chunk_index, kind, doc_id, title,
+                heading_path_json, preview, text, char_count, search_text_folded,
+                source_hash, cached_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc_key,
+                str(chunk.get("chunk_id") or f"chunk-{index + 1:04d}"),
+                index,
+                public_descriptor["kind"],
+                public_descriptor["doc_id"],
+                public_descriptor["title"],
+                json.dumps(heading_path, ensure_ascii=False),
+                str(chunk.get("preview") or "").strip(),
+                str(chunk.get("text") or "").strip(),
+                max(0, int(chunk.get("char_count") or 0)),
+                re.sub(r"\s+", " ", unicodedata.normalize("NFKC", search_text)).casefold().strip(),
+                str(meta.get("source_hash") or build_ai_native_index_document_hash(descriptor)),
+                now_iso(),
+            ),
+        )
+    connection.execute(
+        """
+        UPDATE ai_native_documents
+        SET asset_cached = 1,
+            asset_rel_dir = ?,
+            chunk_count = ?,
+            indexed_at = ?
+        WHERE doc_key = ?
+        """,
+        (
+            public_descriptor["asset_rel_dir"],
+            len(chunks),
+            now_iso(),
+            doc_key,
+        ),
+    )
+    return public_descriptor, chunks
+
+
+def score_ai_native_context_chunk(chunk: dict[str, Any], *, query_terms: list[str]) -> float:
+    if not query_terms:
+        return 1.0
+    search_text = " ".join(
+        [
+            " / ".join(str(item).strip() for item in chunk.get("heading_path", []) if str(item).strip()),
+            str(chunk.get("preview") or "").strip(),
+            str(chunk.get("text") or "").strip(),
+        ]
+    ).casefold()
+    score = 0.0
+    for term in query_terms:
+        if term in search_text:
+            score += 1.0 + min(search_text.count(term), 4) * 0.35
+    return round(score, 6)
+
+
+def build_ai_native_context_pack_markdown(
+    *,
+    query: str,
+    documents: list[dict[str, Any]],
+    chunks: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "# AI Context Pack",
+        "",
+        f"- generated_at: {now_iso()}",
+        f"- query: {query or 'none'}",
+        f"- documents: {len(documents)}",
+        f"- chunks: {len(chunks)}",
+        "",
+        "## Documents",
+    ]
+    for item in documents:
+        lines.extend(
+            [
+                f"- [{item.get('kind')}] {item.get('title') or ''}",
+                f"  - doc_id: {item.get('doc_id') or ''}",
+                f"  - symbols: {', '.join(item.get('symbols', [])) or 'none'}",
+                f"  - summary: {item.get('summary') or ''}",
+            ]
+        )
+    lines.append("")
+    lines.append("## Chunks")
+    for chunk in chunks:
+        heading_path = " / ".join(chunk.get("heading_path", [])) if isinstance(chunk.get("heading_path"), list) else ""
+        lines.extend(
+            [
+                f"### [{chunk.get('kind')}] {chunk.get('title') or ''} / {heading_path or chunk.get('chunk_id') or ''}",
+                f"- doc_id: {chunk.get('doc_id') or ''}",
+                f"- score: {chunk.get('score') or 0}",
+                "",
+                str(chunk.get("text") or "").strip(),
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_ai_native_context_pack_payload(
+    *,
+    query: str = "",
+    symbol_filters: list[str] | None = None,
+    kind_filters: list[str] | None = None,
+    document_limit: int = 0,
+    chunk_limit: int = 0,
+    per_document_chunk_limit: int = 0,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    resolved_document_limit = max(1, int(document_limit or AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT))
+    resolved_chunk_limit = max(1, int(chunk_limit or AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT))
+    resolved_per_doc_chunk_limit = max(1, int(per_document_chunk_limit or AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT))
+    search_payload = search_ai_native_index(
+        query=query,
+        symbol_filters=symbol_filters,
+        kind_filters=kind_filters,
+        limit=max(resolved_document_limit * 3, resolved_document_limit),
+        force_refresh=force_refresh,
+    )
+    selected_documents = list(search_payload.get("documents", []))[:resolved_document_limit]
+    query_terms = fold_search_terms(split_search_terms(str(query or "").strip()))
+    selected_chunks: list[dict[str, Any]] = []
+
+    with AI_NATIVE_INDEX_LOCK:
+        connection = connect_ai_native_index_db()
+        try:
+            ensure_ai_native_index_schema(connection)
+            for doc_rank, document in enumerate(selected_documents):
+                descriptor = resolve_ai_native_document_descriptor(
+                    str(document.get("kind") or ""),
+                    str(document.get("doc_id") or ""),
+                )
+                public_descriptor, chunks = cache_ai_native_document_chunks(connection, descriptor)
+                ranked_chunks = [
+                    {
+                        "kind": public_descriptor["kind"],
+                        "doc_id": public_descriptor["doc_id"],
+                        "title": public_descriptor["title"],
+                        "markdown_url": public_descriptor["markdown_url"],
+                        "json_url": public_descriptor["json_url"],
+                        "chunk_id": str(chunk.get("chunk_id") or ""),
+                        "heading_path": chunk.get("heading_path", []) if isinstance(chunk.get("heading_path"), list) else [],
+                        "preview": str(chunk.get("preview") or "").strip(),
+                        "text": str(chunk.get("text") or "").strip(),
+                        "char_count": max(0, int(chunk.get("char_count") or 0)),
+                        "score": score_ai_native_context_chunk(chunk, query_terms=query_terms),
+                        "doc_rank": doc_rank,
+                        "chunk_rank": index,
+                    }
+                    for index, chunk in enumerate(chunks)
+                ]
+                if query_terms:
+                    ranked_chunks = [item for item in ranked_chunks if float(item.get("score") or 0.0) > 0.0] or ranked_chunks
+                ranked_chunks.sort(
+                    key=lambda item: (float(item.get("score") or 0.0), -int(item.get("chunk_rank") or 0)),
+                    reverse=True,
+                )
+                selected_chunks.extend(ranked_chunks[:resolved_per_doc_chunk_limit])
+            connection.commit()
+        finally:
+            connection.close()
+
+    selected_chunks.sort(
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            -int(item.get("doc_rank") or 0),
+            -int(item.get("chunk_rank") or 0),
+        ),
+        reverse=True,
+    )
+    selected_chunks = selected_chunks[:resolved_chunk_limit]
+
+    for document in selected_documents:
+        document["selected_chunk_count"] = sum(
+            1
+            for item in selected_chunks
+            if item.get("kind") == document.get("kind") and item.get("doc_id") == document.get("doc_id")
+        )
+
+    pack_markdown = build_ai_native_context_pack_markdown(
+        query=str(query or "").strip(),
+        documents=selected_documents,
+        chunks=selected_chunks,
+    )
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "query": str(query or "").strip(),
+        "filters": {
+            "symbols": normalize_ai_native_symbol_filters(symbol_filters or []),
+            "kinds": normalize_ai_native_kind_filters(kind_filters or []),
+            "document_limit": resolved_document_limit,
+            "chunk_limit": resolved_chunk_limit,
+            "per_document_chunk_limit": resolved_per_doc_chunk_limit,
+        },
+        "index": search_payload.get("index", {}),
+        "counts": {
+            "matched_documents": int(search_payload.get("counts", {}).get("matched_documents") or 0),
+            "selected_documents": len(selected_documents),
+            "selected_chunks": len(selected_chunks),
+        },
+        "documents": selected_documents,
+        "chunks": selected_chunks,
+        "pack_markdown": pack_markdown,
+    }
+
+
+def filter_ai_native_documents_by_kinds(
+    documents: list[dict[str, Any]],
+    kind_filters: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_kinds = normalize_ai_native_kind_filters(kind_filters or [])
+    if not resolved_kinds:
+        return list(documents)
+    allowed_kinds = set(resolved_kinds)
+    return [
+        item
+        for item in documents
+        if str(item.get("kind") or "").strip() in allowed_kinds
+    ]
+
+
+def build_ai_native_symbol_counts(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counter: Counter[str] = Counter()
+    for item in documents:
+        for symbol in normalize_stock_symbol_list(item.get("symbols", [])):
+            counter[symbol] += 1
+    return [
+        {"symbol": symbol, "count": int(count)}
+        for symbol, count in counter.most_common()
+    ]
+
+
+def build_ai_native_top_tags(
+    documents: list[dict[str, Any]],
+    *,
+    limit: int = AI_ANALYSIS_TOP_TAG_LIMIT,
+) -> list[dict[str, Any]]:
+    resolved_limit = max(1, int(limit or AI_ANALYSIS_TOP_TAG_LIMIT))
+    counter: Counter[str] = Counter()
+    for item in documents:
+        for tag in normalize_tag_list(item.get("tags", [])):
+            counter[tag] += 1
+    return [
+        {"tag": tag, "count": int(count)}
+        for tag, count in counter.most_common(resolved_limit)
+    ]
+
+
+def build_ai_timeline_analysis_payload(
+    *,
+    query: str = "",
+    symbol_filters: list[str] | None = None,
+    kind_filters: list[str] | None = None,
+    limit: int = 0,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    resolved_limit = max(1, int(limit or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT))
+    search_payload = search_ai_native_index(
+        query=query,
+        symbol_filters=symbol_filters,
+        kind_filters=kind_filters,
+        limit=resolved_limit,
+        force_refresh=force_refresh,
+    )
+    documents = list(search_payload.get("documents", []))
+    documents.sort(
+        key=lambda item: (float(item.get("sort_value") or 0.0), str(item.get("title") or "")),
+        reverse=True,
+    )
+
+    date_counter: Counter[str] = Counter()
+    undated_documents = 0
+    timeline: list[dict[str, Any]] = []
+    for position, item in enumerate(documents[:resolved_limit], start=1):
+        activity_date = str(item.get("activity_date") or "").strip()
+        updated_at = str(item.get("updated_at") or "").strip()
+        if activity_date:
+            date_counter[activity_date] += 1
+        else:
+            undated_documents += 1
+        timeline.append(
+            {
+                "position": position,
+                "time_anchor": "activity_date" if activity_date else ("updated_at" if updated_at else ""),
+                "primary_date": activity_date or updated_at,
+                **item,
+            }
+        )
+
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "query": str(query or "").strip(),
+        "filters": {
+            "symbols": normalize_ai_native_symbol_filters(symbol_filters or []),
+            "kinds": normalize_ai_native_kind_filters(kind_filters or []),
+            "limit": resolved_limit,
+        },
+        "index": search_payload.get("index", {}),
+        "counts": {
+            "matched_documents": int(search_payload.get("counts", {}).get("matched_documents") or 0),
+            "returned_documents": len(timeline),
+            "dated_documents": sum(1 for item in timeline if str(item.get("activity_date") or "").strip()),
+            "undated_documents": undated_documents,
+            "symbols_covered": len(build_ai_native_symbol_counts(timeline)),
+        },
+        "time_context": build_ai_native_time_context(timeline),
+        "kind_counts": build_ai_native_kind_counts(timeline),
+        "symbols_covered": build_ai_native_symbol_counts(timeline),
+        "top_tags": build_ai_native_top_tags(timeline),
+        "date_buckets": [
+            {"date": date_value, "count": int(count)}
+            for date_value, count in sorted(date_counter.items(), reverse=True)[:AI_ANALYSIS_DATE_BUCKET_LIMIT]
+        ],
+        "timeline": timeline,
+    }
+
+
+def build_ai_compare_analysis_payload(
+    *,
+    symbol_filters: list[str] | None = None,
+    kind_filters: list[str] | None = None,
+    query: str = "",
+    per_symbol_limit: int = 0,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    resolved_symbols = normalize_ai_native_symbol_filters(symbol_filters or [])
+    resolved_kinds = normalize_ai_native_kind_filters(kind_filters or [])
+    resolved_limit = max(1, int(per_symbol_limit or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT))
+
+    all_descriptors = filter_ai_native_documents_by_kinds(
+        build_ai_native_manifest_documents(),
+        resolved_kinds,
+    )
+    search_payload = search_ai_native_index(
+        query=query,
+        symbol_filters=resolved_symbols,
+        kind_filters=resolved_kinds,
+        limit=max(resolved_limit * max(len(resolved_symbols), 1) * 6, resolved_limit),
+        force_refresh=force_refresh,
+    )
+    search_documents = list(search_payload.get("documents", []))
+    search_documents.sort(
+        key=lambda item: (
+            float(item.get("match_score") or 0.0),
+            float(item.get("sort_value") or 0.0),
+            str(item.get("title") or ""),
+        ),
+        reverse=True,
+    )
+
+    top_hits_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in resolved_symbols}
+    for item in search_documents:
+        item_symbols = set(normalize_stock_symbol_list(item.get("symbols", [])))
+        for symbol in resolved_symbols:
+            if symbol in item_symbols:
+                top_hits_by_symbol[symbol].append(item)
+
+    symbol_sections: list[dict[str, Any]] = []
+    tag_sets: list[set[str]] = []
+    matched_documents_total = 0
+
+    for symbol in resolved_symbols:
+        scoped_descriptors = filter_ai_native_documents(
+            all_descriptors,
+            symbol=symbol,
+            query=query,
+        )
+        public_documents = [build_ai_native_public_descriptor(item) for item in scoped_descriptors]
+        top_documents = top_hits_by_symbol.get(symbol, [])[:resolved_limit] or public_documents[:resolved_limit]
+        kind_counts = build_ai_native_kind_counts(scoped_descriptors)
+        time_context = build_ai_native_time_context(public_documents)
+        top_tags = build_ai_native_top_tags(public_documents)
+        matched_documents_total += len(public_documents)
+        tag_sets.append(
+            {
+                tag
+                for document in public_documents
+                for tag in normalize_tag_list(document.get("tags", []))
+            }
+        )
+        symbol_sections.append(
+            {
+                "symbol": symbol,
+                "counts": {
+                    "documents": len(public_documents),
+                    "dated_documents": sum(
+                        1
+                        for item in public_documents
+                        if str(item.get("activity_date") or "").strip()
+                    ),
+                    "top_documents": len(top_documents),
+                    "by_kind": kind_counts,
+                },
+                "time_context": time_context,
+                "top_tags": top_tags,
+                "latest_document": public_documents[0] if public_documents else None,
+                "top_documents": top_documents,
+            }
+        )
+
+    shared_tags = sorted(set.intersection(*tag_sets))[:AI_ANALYSIS_TOP_TAG_LIMIT] if tag_sets else []
+    shared_kinds = [
+        kind
+        for kind in AI_NATIVE_DOCUMENT_KIND_META
+        if symbol_sections and all(int(section["counts"]["by_kind"].get(kind, 0) or 0) > 0 for section in symbol_sections)
+    ]
+    comparison_rows = [
+        {
+            "metric": "matched_documents",
+            "label": "Matched documents",
+            "values": {
+                section["symbol"]: int(section["counts"]["documents"] or 0)
+                for section in symbol_sections
+            },
+        },
+        {
+            "metric": "active_days",
+            "label": "Active days",
+            "values": {
+                section["symbol"]: int(section["time_context"].get("active_days") or 0)
+                for section in symbol_sections
+            },
+        },
+        {
+            "metric": "latest_activity_date",
+            "label": "Latest activity date",
+            "values": {
+                section["symbol"]: str(section["time_context"].get("latest_activity_date") or "")
+                for section in symbol_sections
+            },
+        },
+        {
+            "metric": "latest_updated_at",
+            "label": "Latest updated at",
+            "values": {
+                section["symbol"]: str(section["time_context"].get("latest_updated_at") or "")
+                for section in symbol_sections
+            },
+        },
+    ]
+    kind_matrix = [
+        {
+            "kind": kind,
+            "label": AI_NATIVE_DOCUMENT_KIND_META.get(kind, kind),
+            "values": {
+                section["symbol"]: int(section["counts"]["by_kind"].get(kind, 0) or 0)
+                for section in symbol_sections
+            },
+        }
+        for kind in AI_NATIVE_DOCUMENT_KIND_META
+        if any(int(section["counts"]["by_kind"].get(kind, 0) or 0) > 0 for section in symbol_sections)
+    ]
+
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "query": str(query or "").strip(),
+        "filters": {
+            "symbols": resolved_symbols,
+            "kinds": resolved_kinds,
+            "per_symbol_limit": resolved_limit,
+        },
+        "index": search_payload.get("index", {}),
+        "counts": {
+            "symbols": len(resolved_symbols),
+            "matched_documents": matched_documents_total,
+            "shared_tags": len(shared_tags),
+            "shared_kinds": len(shared_kinds),
+        },
+        "comparison_rows": comparison_rows,
+        "kind_matrix": kind_matrix,
+        "shared_context": {
+            "shared_tags": shared_tags,
+            "shared_kinds": shared_kinds,
+        },
+        "symbols": symbol_sections,
+    }
+
+
+def build_ai_agent_tool_response(
+    tool_name: str,
+    payload: dict[str, Any],
+    *,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "tool": tool_name,
+        "generated_at": now_iso(),
+        "read_only": True,
+        "request": request_payload,
+        "result": payload,
+    }
+
+
+def build_ai_agent_bootstrap_payload() -> dict[str, Any]:
+    native_bootstrap = build_ai_native_bootstrap_payload()
+    write_store = load_ai_agent_ops_store()
+    write_summary = build_ai_agent_ops_summary(write_store)
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "site_mode": "agent_tools_guarded_writes",
+        "read_only": False,
+        "supports": {
+            "writes": True,
+            "dry_run": True,
+            "destructive_actions": False,
+        },
+        "entrypoints": {
+            "bootstrap_url": url_for("ai_agent_bootstrap_json"),
+            "search_tool_url": url_for("ai_agent_search_tool_json"),
+            "context_pack_tool_url": url_for("ai_agent_context_pack_tool_json"),
+            "timeline_tool_url": url_for("ai_agent_timeline_tool_json"),
+            "compare_tool_url": url_for("ai_agent_compare_tool_json"),
+            "artifact_tool_url": url_for("ai_agent_artifact_tool_json"),
+            "job_tool_url": url_for("ai_agent_job_tool_json"),
+            "artifact_bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+            "artifact_list_url": url_for("ai_artifact_list_json"),
+            "job_list_url": url_for("ai_job_list_json"),
+            "timeline_artifact_job_url": url_for("queue_ai_timeline_artifact_job"),
+            "compare_artifact_job_url": url_for("queue_ai_compare_artifact_job"),
+            "write_operations_url": url_for("ai_agent_write_operations_json"),
+            "clipboard_preview_url": url_for("ai_agent_clipboard_preview_json"),
+            "stock_note_preview_url": url_for("ai_agent_stock_note_preview_json"),
+            "write_commit_url_template": f"{url_for('ai_agent_write_operation_commit_json', operation_id='__OP_ID__')}",
+            "write_discard_url_template": f"{url_for('ai_agent_write_operation_discard_json', operation_id='__OP_ID__')}",
+            "timeline_analysis_url": url_for("ai_analysis_timeline_json"),
+            "compare_analysis_url": url_for("ai_analysis_compare_json"),
+            "ai_bootstrap_url": url_for("ai_native_bootstrap_json"),
+            "ai_readme_url": url_for("ai_native_readme_markdown"),
+        },
+        "recommended_flows": [
+            {
+                "flow": "open_question",
+                "steps": ["search", "context_pack"],
+                "note": "Use search first, then request a smaller context pack for evidence-heavy answers.",
+            },
+            {
+                "flow": "chronology",
+                "steps": ["timeline"],
+                "note": "Use timeline when the task is about sequence, recency, or date coverage.",
+            },
+            {
+                "flow": "comparison",
+                "steps": ["compare", "context_pack"],
+                "note": "Use compare for cross-symbol deltas, then pull a context pack for the symbols that matter.",
+            },
+            {
+                "flow": "guarded_write",
+                "steps": ["clipboard_preview or stock_note_preview", "review diff", "commit"],
+                "note": "Write operations are admin-only and must go through preview before commit.",
+            },
+            {
+                "flow": "durable_analysis",
+                "steps": ["timeline or compare", "queue artifact job", "poll jobs", "read artifact"],
+                "note": "Use the artifact store when the output should be revisited from the export center or other GPT tools.",
+            },
+        ],
+        "tools": [
+            {
+                "name": "search",
+                "endpoint": url_for("ai_agent_search_tool_json"),
+                "safe_mode": "read_only",
+                "description": "Catalog search over the AI-native index.",
+                "query_params": ["q", "symbols", "kinds", "limit"],
+            },
+            {
+                "name": "context_pack",
+                "endpoint": url_for("ai_agent_context_pack_tool_json"),
+                "safe_mode": "read_only",
+                "description": "Compact evidence pack with ranked full-text chunks.",
+                "query_params": ["query", "symbols", "kinds", "document_limit", "chunk_limit"],
+            },
+            {
+                "name": "timeline",
+                "endpoint": url_for("ai_agent_timeline_tool_json"),
+                "safe_mode": "read_only",
+                "description": "Chronology-first analysis over the filtered AI-native catalog.",
+                "query_params": ["q", "symbols", "kinds", "limit"],
+            },
+            {
+                "name": "compare",
+                "endpoint": url_for("ai_agent_compare_tool_json"),
+                "safe_mode": "read_only",
+                "description": "Cross-symbol comparison with shared context, counts, and top hits.",
+                "query_params": ["symbols", "q", "kinds", "per_symbol_limit"],
+                "requires": ["at least two symbols"],
+            },
+            {
+                "name": "artifact_store",
+                "endpoint": url_for("ai_agent_artifact_tool_json"),
+                "safe_mode": "read_only",
+                "description": "List reusable saved timeline/compare artifacts.",
+                "query_params": ["kinds", "symbols", "q", "limit"],
+            },
+            {
+                "name": "job_queue",
+                "endpoint": url_for("ai_agent_job_tool_json"),
+                "safe_mode": "read_only",
+                "description": "Inspect recent background jobs that build analysis artifacts.",
+                "query_params": ["kinds", "statuses", "limit"],
+            },
+            {
+                "name": "clipboard_item_preview",
+                "endpoint": url_for("ai_agent_clipboard_preview_json"),
+                "safe_mode": "preview_then_commit",
+                "description": "Stage a clipboard text item without mutating the live clipboard yet.",
+                "method": "POST",
+                "json_body": ["text"],
+            },
+            {
+                "name": "stock_note_preview",
+                "endpoint": url_for("ai_agent_stock_note_preview_json"),
+                "safe_mode": "preview_then_commit",
+                "description": "Stage a stock note create or update with diff and conflict checks.",
+                "method": "POST",
+                "json_body": ["symbol", "title", "text", "tags", "note_id?"],
+            },
+        ],
+        "time_schema": build_ai_native_time_schema(),
+        "catalog_counts": native_bootstrap.get("counts", {}),
+        "write_summary": write_summary,
+        "notes": [
+            "Prefer `/api/analysis/*.json` for direct UI integrations.",
+            "Prefer `/api/agent/tools/*.json` for GPT-style tool invocations with a stable envelope.",
+            "Use `/api/artifacts/*.json` and `/api/jobs/*.json` when analysis should be durable and revisitable.",
+            "Use `/api/agent/writes/*.json` for guarded writes with preview, diff, and explicit commit.",
+            "When AI direct access is enabled, anonymous GPT clients may call read-only GET routes under `/api/ai/*`, `/api/analysis/*`, `/api/agent/bootstrap.json`, `/api/agent/tools/*`, `/api/artifacts/*`, and `/api/jobs/*`.",
+            "Guarded writes and artifact/job queue POST routes still require authenticated admin access.",
+            "Blocked API routes return JSON auth errors instead of redirecting models to the HTML password form.",
+            "Write previews are additive and reversible until commit, and destructive actions are not exposed.",
+        ],
+    }
+
+
+def ai_agent_json_error(message: str, status_code: int = 400, *, extra: dict[str, Any] | None = None):
+    payload: dict[str, Any] = {"ok": False, "error": str(message or "request failed")}
+    if isinstance(extra, dict):
+        payload.update(extra)
+    return jsonify(payload), status_code
+
+
+def ensure_ai_agent_admin_access():
+    if current_web_access_role() != WEB_ACCESS_ROLE_ADMIN:
+        return ai_agent_json_error("agent write tools are admin only", 403)
+    return None
+
+
+def normalize_ai_agent_operation(raw_operation: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_operation, dict):
+        return None
+    operation_id = secure_filename(str(raw_operation.get("id") or uuid.uuid4().hex[:12]).strip())[:24] or uuid.uuid4().hex[:12]
+    status = str(raw_operation.get("status") or "preview").strip().lower()
+    if status not in {"preview", "committed", "discarded"}:
+        status = "preview"
+    target_kind = str(raw_operation.get("target_kind") or "").strip().lower()
+    if target_kind not in {"clipboard_item", "stock_note"}:
+        return None
+    operation = str(raw_operation.get("operation") or "create").strip().lower()
+    if operation not in {"create", "update"}:
+        operation = "create"
+    created_at = str(raw_operation.get("created_at") or now_iso())
+    updated_at = str(raw_operation.get("updated_at") or created_at or now_iso())
+    warnings = raw_operation.get("warnings") if isinstance(raw_operation.get("warnings"), list) else []
+    return {
+        "id": operation_id,
+        "target_kind": target_kind,
+        "operation": operation,
+        "status": status,
+        "summary": str(raw_operation.get("summary") or "").strip()[:240],
+        "request": raw_operation.get("request") if isinstance(raw_operation.get("request"), dict) else {},
+        "preview": raw_operation.get("preview") if isinstance(raw_operation.get("preview"), dict) else {},
+        "apply_payload": raw_operation.get("apply_payload") if isinstance(raw_operation.get("apply_payload"), dict) else {},
+        "result": raw_operation.get("result") if isinstance(raw_operation.get("result"), dict) else {},
+        "warnings": [str(item).strip()[:240] for item in warnings if str(item).strip()][:8],
+        "base_fingerprint": str(raw_operation.get("base_fingerprint") or "").strip()[:128],
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "committed_at": str(raw_operation.get("committed_at") or "").strip()[:40],
+        "discarded_at": str(raw_operation.get("discarded_at") or "").strip()[:40],
+    }
+
+
+def normalize_ai_agent_ops_store(raw_store: Any) -> dict[str, Any]:
+    raw_operations = raw_store.get("operations") if isinstance(raw_store, dict) else []
+    operations: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    if isinstance(raw_operations, list):
+        for raw_operation in raw_operations:
+            operation = normalize_ai_agent_operation(raw_operation)
+            if not operation or operation["id"] in seen_ids:
+                continue
+            operations.append(operation)
+            seen_ids.add(operation["id"])
+    operations.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")), reverse=True)
+    preview_operations = [item for item in operations if item.get("status") == "preview"]
+    historical_operations = [item for item in operations if item.get("status") != "preview"][:AI_AGENT_OPS_HISTORY_LIMIT]
+    resolved_operations = preview_operations + historical_operations
+    fallback_updated_at = resolved_operations[0]["updated_at"] if resolved_operations else now_iso()
+    updated_at = str(raw_store.get("updated_at") or fallback_updated_at) if isinstance(raw_store, dict) else fallback_updated_at
+    return {
+        "version": 1,
+        "updated_at": updated_at,
+        "operations": resolved_operations,
+    }
+
+
+def load_ai_agent_ops_store() -> dict[str, Any]:
+    AI_AGENT_OPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return normalize_ai_agent_ops_store(load_json(AI_AGENT_OPS_PATH))
+
+
+def save_ai_agent_ops_store(store: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_ai_agent_ops_store(store)
+    normalized["updated_at"] = str(normalized.get("updated_at") or now_iso())
+    write_json_atomic(AI_AGENT_OPS_PATH, normalized)
+    return normalized
+
+
+def find_ai_agent_operation(store: dict[str, Any], operation_id: str) -> tuple[int, dict[str, Any] | None]:
+    for index, operation in enumerate(store.get("operations", [])):
+        if operation.get("id") == operation_id:
+            return index, operation
+    return -1, None
+
+
+def build_ai_agent_ops_summary(store: dict[str, Any]) -> dict[str, int]:
+    operations = store.get("operations", []) if isinstance(store.get("operations"), list) else []
+    return {
+        "pending_previews": sum(1 for item in operations if item.get("status") == "preview"),
+        "committed": sum(1 for item in operations if item.get("status") == "committed"),
+        "discarded": sum(1 for item in operations if item.get("status") == "discarded"),
+        "total": len(operations),
+    }
+
+
+def build_ai_agent_operation_public_payload(operation: dict[str, Any]) -> dict[str, Any]:
+    preview = operation.get("preview") if isinstance(operation.get("preview"), dict) else {}
+    request_payload = operation.get("request") if isinstance(operation.get("request"), dict) else {}
+    return {
+        "id": str(operation.get("id") or ""),
+        "target_kind": str(operation.get("target_kind") or ""),
+        "operation": str(operation.get("operation") or ""),
+        "status": str(operation.get("status") or ""),
+        "summary": str(operation.get("summary") or ""),
+        "warnings": list(operation.get("warnings") or []),
+        "created_at": str(operation.get("created_at") or ""),
+        "updated_at": str(operation.get("updated_at") or ""),
+        "committed_at": str(operation.get("committed_at") or ""),
+        "discarded_at": str(operation.get("discarded_at") or ""),
+        "display_created_at": format_iso_timestamp(str(operation.get("created_at") or "")),
+        "display_updated_at": format_iso_timestamp(str(operation.get("updated_at") or "")),
+        "display_committed_at": format_iso_timestamp(str(operation.get("committed_at") or "")),
+        "request": request_payload,
+        "preview": preview,
+    }
+
+
+def build_ai_agent_write_operations_payload(*, limit: int = 24) -> dict[str, Any]:
+    store = load_ai_agent_ops_store()
+    operations = store.get("operations", []) if isinstance(store.get("operations"), list) else []
+    resolved_limit = max(1, int(limit or 24))
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "counts": build_ai_agent_ops_summary(store),
+        "operations": [build_ai_agent_operation_public_payload(item) for item in operations[:resolved_limit]],
+    }
+
+
+def require_ai_agent_known_symbol(store: dict[str, Any], symbol_value: Any) -> str:
+    symbol = normalize_stock_symbol(symbol_value)
+    known_symbols = set(list_stock_symbols(store))
+    if not symbol or symbol not in known_symbols:
+        raise ValueError("symbol must already exist in the workspace")
+    return symbol
+
+
+def build_stock_note_agent_payload(symbol: str, note: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": str(symbol or "").strip().upper(),
+        "id": str(note.get("id") or ""),
+        "title": str(note.get("title") or ""),
+        "display_title": str(note.get("title") or "").strip() or "未命名笔记",
+        "content_text": str(note.get("content_text") or ""),
+        "content_html": str(note.get("content_html") or ""),
+        "summary_excerpt": summarize_text_block(str(note.get("content_text") or ""), limit=180),
+        "created_at": str(note.get("created_at") or ""),
+        "updated_at": str(note.get("updated_at") or ""),
+        "record_date": str(note.get("record_date") or ""),
+        "display_created_at": note_display_time(note),
+        "display_updated_at": format_iso_timestamp(str(note.get("updated_at") or "")),
+        "tags": normalize_tag_list(note.get("tags", [])),
+    }
+
+
+def build_stock_note_agent_fingerprint(note: dict[str, Any]) -> str:
+    return sha256_text(
+        serialize_stable_json(
+            {
+                "id": str(note.get("id") or ""),
+                "title": str(note.get("title") or ""),
+                "content_html": str(note.get("content_html") or ""),
+                "content_text": str(note.get("content_text") or ""),
+                "created_at": str(note.get("created_at") or ""),
+                "updated_at": str(note.get("updated_at") or ""),
+                "record_date": str(note.get("record_date") or ""),
+                "tags": normalize_tag_list(note.get("tags", [])),
+            }
+        )
+    )
+
+
+def build_ai_agent_stock_note_preview_operation(request_payload: dict[str, Any]) -> dict[str, Any]:
+    stock_store = load_stock_store()
+    symbol = require_ai_agent_known_symbol(stock_store, request_payload.get("symbol"))
+    entry = ensure_stock_entry(stock_store, symbol)
+    requested_note_id = secure_filename(str(request_payload.get("note_id") or "").strip())[:24]
+    existing_note = next((item for item in entry.get("notes", []) if item.get("id") == requested_note_id), None) if requested_note_id else None
+    if requested_note_id and existing_note is None:
+        raise ValueError("note_id was not found for the selected symbol")
+
+    raw_text = str(request_payload.get("text") or request_payload.get("content_text") or "")
+    raw_html = str(request_payload.get("content_html") or "")
+    content_html, content_text = prepare_note_payload(raw_html, raw_text)
+    if not content_text:
+        raise ValueError("note text is required")
+
+    title = str(request_payload.get("title") or "").strip()[:120]
+    tags = normalize_tag_list(request_payload.get("tags", []))
+    warnings: list[str] = []
+    if existing_note:
+        next_note = deepcopy(existing_note)
+        next_note["title"] = title
+        next_note["content_html"] = content_html
+        next_note["content_text"] = content_text
+        next_note["tags"] = tags
+        next_note["updated_at"] = now_iso()
+        if request_payload.get("record_date"):
+            warnings.append("record_date is ignored when updating an existing note.")
+        operation = "update"
+        before_payload = build_stock_note_agent_payload(symbol, existing_note)
+        base_fingerprint = build_stock_note_agent_fingerprint(existing_note)
+    else:
+        created_at, record_date = build_recorded_timestamp(str(request_payload.get("record_date") or ""))
+        next_note = {
+            "id": uuid.uuid4().hex[:10],
+            "title": title,
+            "content_html": content_html,
+            "content_text": content_text,
+            "created_at": created_at,
+            "record_date": record_date,
+            "source_file_id": "",
+            "source_file_name": "",
+            "source_mode": "manual",
+            "tags": tags,
+        }
+        operation = "create"
+        before_payload = None
+        base_fingerprint = ""
+
+    after_payload = build_stock_note_agent_payload(symbol, next_note)
+    changed_fields = [
+        field
+        for field in ["title", "content_text", "tags"]
+        if (before_payload or {}).get(field) != after_payload.get(field)
+    ]
+    if operation == "create":
+        changed_fields.extend(["created_at", "record_date"])
+    preview_lines = [
+        f"{operation} stock note for {symbol}",
+        f"title: {after_payload.get('display_title') or '未命名笔记'}",
+        f"tags: {', '.join(after_payload.get('tags', [])) or 'none'}",
+        f"content_chars: {len(after_payload.get('content_text') or '')}",
+    ]
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "target_kind": "stock_note",
+        "operation": operation,
+        "status": "preview",
+        "summary": f"{symbol} {operation} note: {after_payload.get('display_title') or '未命名笔记'}",
+        "warnings": warnings,
+        "request": {
+            "symbol": symbol,
+            "note_id": requested_note_id,
+            "title": title,
+            "text": raw_text[:MAX_NOTE_CONTENT_CHARS],
+            "tags": tags,
+            "record_date": str(request_payload.get("record_date") or "").strip(),
+        },
+        "preview": {
+            "before": before_payload,
+            "after": after_payload,
+            "changed_fields": ordered_unique(changed_fields),
+            "preview_lines": preview_lines,
+        },
+        "apply_payload": {
+            "symbol": symbol,
+            "mode": operation,
+            "note": next_note,
+        },
+        "result": {},
+        "base_fingerprint": base_fingerprint,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "committed_at": "",
+        "discarded_at": "",
+    }
+
+
+def build_ai_agent_clipboard_preview_operation(request_payload: dict[str, Any]) -> dict[str, Any]:
+    raw_text = str(request_payload.get("text") or "")
+    text = raw_text[:CLIPBOARD_MAX_TEXT_CHARS].strip()
+    if not text:
+        raise ValueError("clipboard text is required")
+    warnings: list[str] = []
+    if len(raw_text) > CLIPBOARD_MAX_TEXT_CHARS:
+        warnings.append(f"text was truncated to {CLIPBOARD_MAX_TEXT_CHARS} characters")
+    clipboard_store = load_clipboard_store()
+    created_at = now_iso()
+    item = normalize_clipboard_item(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "text": text,
+            "images": [],
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+    )
+    if item is None:
+        raise ValueError("clipboard text is required")
+    after_payload = build_clipboard_item_payload(item)
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "target_kind": "clipboard_item",
+        "operation": "create",
+        "status": "preview",
+        "summary": f"Clipboard item: {summarize_text_block(text, limit=72)}",
+        "warnings": warnings,
+        "request": {
+            "text": text,
+        },
+        "preview": {
+            "before": None,
+            "after": after_payload,
+            "changed_fields": ["text", "created_at"],
+            "preview_lines": [
+                "create clipboard item",
+                f"chars: {len(text)}",
+                f"items: {len(clipboard_store.get('items', []))} -> {len(clipboard_store.get('items', [])) + 1}",
+            ],
+        },
+        "apply_payload": {
+            "item": item,
+        },
+        "result": {},
+        "base_fingerprint": "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "committed_at": "",
+        "discarded_at": "",
+    }
+
+
+def commit_ai_agent_operation(operation: dict[str, Any]) -> dict[str, Any]:
+    target_kind = str(operation.get("target_kind") or "")
+    apply_payload = operation.get("apply_payload") if isinstance(operation.get("apply_payload"), dict) else {}
+    if target_kind == "clipboard_item":
+        clipboard_store = load_clipboard_store()
+        item = normalize_clipboard_item(apply_payload.get("item"))
+        if item is None:
+            return {"ok": False, "status_code": 400, "error": "clipboard preview payload is invalid"}
+        if any(existing.get("id") == item.get("id") for existing in clipboard_store.get("items", [])):
+            return {"ok": False, "status_code": 409, "error": "clipboard item was already committed"}
+        clipboard_store.setdefault("items", []).insert(0, item)
+        saved_store = save_clipboard_store(clipboard_store)
+        saved_item = next((existing for existing in saved_store.get("items", []) if existing.get("id") == item.get("id")), item)
+        return {
+            "ok": True,
+            "result": {
+                "target_kind": "clipboard_item",
+                "item": build_clipboard_item_payload(saved_item),
+                "counts": {
+                    "item_count": len(saved_store.get("items", [])),
+                },
+            },
+        }
+
+    if target_kind == "stock_note":
+        stock_store = load_stock_store()
+        symbol = require_ai_agent_known_symbol(stock_store, apply_payload.get("symbol"))
+        entry = ensure_stock_entry(stock_store, symbol)
+        note_payload = apply_payload.get("note") if isinstance(apply_payload.get("note"), dict) else {}
+        mode = str(apply_payload.get("mode") or "").strip().lower()
+        if mode == "create":
+            if any(existing.get("id") == note_payload.get("id") for existing in entry.get("notes", [])):
+                return {"ok": False, "status_code": 409, "error": "note preview was already committed"}
+            entry.setdefault("notes", []).append(deepcopy(note_payload))
+            touch_stock(stock_store, symbol)
+            save_stock_store(stock_store)
+            saved_entry = ensure_stock_entry(load_stock_store(), symbol)
+            saved_note = next((existing for existing in saved_entry.get("notes", []) if existing.get("id") == note_payload.get("id")), None)
+            if saved_note is None:
+                return {"ok": False, "status_code": 500, "error": "note commit did not persist"}
+            return {
+                "ok": True,
+                "result": {
+                    "target_kind": "stock_note",
+                    "symbol": symbol,
+                    "note": build_stock_note_agent_payload(symbol, saved_note),
+                },
+            }
+        if mode == "update":
+            note_id = str(note_payload.get("id") or "").strip()
+            current_note = next((existing for existing in entry.get("notes", []) if existing.get("id") == note_id), None)
+            if current_note is None:
+                return {"ok": False, "status_code": 409, "error": "the note no longer exists"}
+            base_fingerprint = str(operation.get("base_fingerprint") or "").strip()
+            current_fingerprint = build_stock_note_agent_fingerprint(current_note)
+            if base_fingerprint and current_fingerprint != base_fingerprint:
+                return {
+                    "ok": False,
+                    "status_code": 409,
+                    "error": "the note changed after preview; refresh the preview before committing",
+                    "conflict": {
+                        "current": build_stock_note_agent_payload(symbol, current_note),
+                    },
+                }
+            current_note["title"] = str(note_payload.get("title") or "").strip()[:120]
+            current_note["content_html"] = str(note_payload.get("content_html") or "")
+            current_note["content_text"] = str(note_payload.get("content_text") or "")
+            current_note["tags"] = normalize_tag_list(note_payload.get("tags", []))
+            current_note["updated_at"] = str(note_payload.get("updated_at") or now_iso())
+            touch_stock(stock_store, symbol)
+            save_stock_store(stock_store)
+            saved_entry = ensure_stock_entry(load_stock_store(), symbol)
+            saved_note = next((existing for existing in saved_entry.get("notes", []) if existing.get("id") == note_id), None)
+            if saved_note is None:
+                return {"ok": False, "status_code": 500, "error": "note commit did not persist"}
+            return {
+                "ok": True,
+                "result": {
+                    "target_kind": "stock_note",
+                    "symbol": symbol,
+                    "note": build_stock_note_agent_payload(symbol, saved_note),
+                },
+            }
+        return {"ok": False, "status_code": 400, "error": "unsupported stock note operation"}
+
+    return {"ok": False, "status_code": 400, "error": "unsupported operation target"}
+
+
+def normalize_split_choice_list(raw_values: Any, allowed_values: set[str]) -> list[str]:
+    if isinstance(raw_values, str):
+        values = re.split(r"[\s,;|]+", raw_values.strip())
+    elif isinstance(raw_values, (list, tuple, set)):
+        values = [
+            part
+            for item in raw_values
+            for part in re.split(r"[\s,;|]+", str(item or "").strip())
+            if part
+        ]
+    else:
+        values = []
+    return normalize_choice_list(values, allowed_values)
+
+
+def normalize_ai_artifact_kind_filters(raw_values: Any) -> list[str]:
+    return normalize_split_choice_list(raw_values, set(AI_ARTIFACT_KIND_META))
+
+
+def normalize_ai_job_kind_filters(raw_values: Any) -> list[str]:
+    return normalize_split_choice_list(raw_values, set(AI_JOB_KIND_META))
+
+
+def normalize_ai_job_status_filters(raw_values: Any) -> list[str]:
+    return normalize_split_choice_list(raw_values, set(AI_JOB_STATUS_META))
+
+
+def build_ai_timeline_artifact_markdown(artifact: dict[str, Any]) -> str:
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    timeline = payload.get("timeline", []) if isinstance(payload.get("timeline"), list) else []
+    top_tags = payload.get("top_tags", []) if isinstance(payload.get("top_tags"), list) else []
+    lines = [
+        "# Timeline Artifact",
+        "",
+        f"- title: {artifact.get('title') or ''}",
+        f"- generated_at: {artifact.get('updated_at') or ''}",
+        f"- symbols: {', '.join(artifact.get('symbols', [])) or 'none'}",
+        f"- query: {artifact.get('query') or 'none'}",
+        f"- documents: {len(timeline)}",
+        "",
+        "## Time Context",
+        f"- latest_activity_date: {(payload.get('time_context') or {}).get('latest_activity_date') or ''}",
+        f"- earliest_activity_date: {(payload.get('time_context') or {}).get('earliest_activity_date') or ''}",
+        f"- active_days: {(payload.get('time_context') or {}).get('active_days') or 0}",
+        "",
+        "## Timeline",
+    ]
+    for item in timeline[:20]:
+        lines.append(
+            f"- {item.get('primary_date') or item.get('display_time') or 'undated'} | "
+            f"[{item.get('kind')}] {item.get('title') or ''} | "
+            f"{', '.join(item.get('symbols', [])) or 'none'}"
+        )
+        if item.get("match_excerpt"):
+            lines.append(f"  {item.get('match_excerpt')}")
+    if top_tags:
+        lines.extend(["", "## Top Tags"])
+        for item in top_tags:
+            lines.append(f"- {item.get('tag') or ''}: {item.get('count') or 0}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_ai_compare_artifact_markdown(artifact: dict[str, Any]) -> str:
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    symbol_sections = payload.get("symbols", []) if isinstance(payload.get("symbols"), list) else []
+    comparison_rows = payload.get("comparison_rows", []) if isinstance(payload.get("comparison_rows"), list) else []
+    shared_context = payload.get("shared_context", {}) if isinstance(payload.get("shared_context"), dict) else {}
+    lines = [
+        "# Compare Artifact",
+        "",
+        f"- title: {artifact.get('title') or ''}",
+        f"- generated_at: {artifact.get('updated_at') or ''}",
+        f"- symbols: {', '.join(artifact.get('symbols', [])) or 'none'}",
+        f"- query: {artifact.get('query') or 'none'}",
+        "",
+        "## Comparison Rows",
+    ]
+    for row in comparison_rows:
+        values = row.get("values", {}) if isinstance(row.get("values"), dict) else {}
+        line = ", ".join(f"{symbol}={values.get(symbol, '')}" for symbol in artifact.get("symbols", []))
+        lines.append(f"- {row.get('label') or row.get('metric') or 'metric'}: {line}")
+    lines.extend(
+        [
+            "",
+            "## Shared Context",
+            f"- shared_tags: {', '.join(shared_context.get('shared_tags', [])) or 'none'}",
+            f"- shared_kinds: {', '.join(shared_context.get('shared_kinds', [])) or 'none'}",
+            "",
+            "## Top Documents",
+        ]
+    )
+    for section in symbol_sections:
+        symbol = str(section.get("symbol") or "")
+        lines.append(f"### {symbol}")
+        for item in (section.get("top_documents", []) if isinstance(section.get("top_documents"), list) else [])[:6]:
+            lines.append(f"- [{item.get('kind')}] {item.get('title') or ''}")
+            if item.get("match_excerpt"):
+                lines.append(f"  {item.get('match_excerpt')}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_ai_artifact_default_title(kind: str, *, symbols: list[str], query: str) -> str:
+    symbol_label = ", ".join(symbols[:3]) if symbols else "Workspace"
+    query_label = f" | {query}" if query else ""
+    if kind == "compare_analysis":
+        compare_label = " vs ".join(symbols[:4]) if len(symbols) >= 2 else symbol_label
+        return f"Compare Analysis: {compare_label}{query_label}"[:160]
+    return f"Timeline Analysis: {symbol_label}{query_label}"[:160]
+
+
+def build_ai_artifact_default_summary(kind: str, payload: dict[str, Any]) -> str:
+    if kind == "compare_analysis":
+        symbol_sections = payload.get("symbols", []) if isinstance(payload.get("symbols"), list) else []
+        shared_tags = (payload.get("shared_context") or {}).get("shared_tags", []) if isinstance(payload.get("shared_context"), dict) else []
+        return (
+            f"{len(symbol_sections)} symbols compared. Shared tags: "
+            f"{', '.join(shared_tags[:4]) or 'none'}."
+        )[:280]
+    timeline = payload.get("timeline", []) if isinstance(payload.get("timeline"), list) else []
+    latest_date = (payload.get("time_context") or {}).get("latest_activity_date") if isinstance(payload.get("time_context"), dict) else ""
+    return f"{len(timeline)} timeline items. Latest activity date: {latest_date or 'n/a'}."[:280]
+
+
+def normalize_ai_artifact(raw_artifact: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_artifact, dict):
+        return None
+    artifact_id = secure_filename(str(raw_artifact.get("id") or uuid.uuid4().hex[:12]).strip())[:24] or uuid.uuid4().hex[:12]
+    kind = str(raw_artifact.get("kind") or "").strip()
+    if kind not in AI_ARTIFACT_KIND_META:
+        return None
+    payload = raw_artifact.get("payload") if isinstance(raw_artifact.get("payload"), dict) else {}
+    symbols = normalize_ai_native_symbol_filters(raw_artifact.get("symbols", []))
+    created_at = str(raw_artifact.get("created_at") or now_iso())
+    updated_at = str(raw_artifact.get("updated_at") or created_at or now_iso())
+    item_count = max(
+        0,
+        int(
+            raw_artifact.get("item_count")
+            or (
+                len(payload.get("timeline", []))
+                if kind == "timeline_analysis"
+                else len(payload.get("symbols", []))
+            )
+            or 0
+        ),
+    )
+    return {
+        "id": artifact_id,
+        "kind": kind,
+        "title": str(raw_artifact.get("title") or "").strip()[:160],
+        "summary": str(raw_artifact.get("summary") or "").strip()[:280],
+        "query": str(raw_artifact.get("query") or "").strip()[:240],
+        "symbols": symbols,
+        "filters": raw_artifact.get("filters") if isinstance(raw_artifact.get("filters"), dict) else {},
+        "payload": payload,
+        "markdown": str(raw_artifact.get("markdown") or ""),
+        "item_count": item_count,
+        "source_job_id": secure_filename(str(raw_artifact.get("source_job_id") or "").strip())[:24],
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def normalize_ai_artifact_store(raw_store: Any) -> dict[str, Any]:
+    raw_artifacts = raw_store.get("artifacts") if isinstance(raw_store, dict) else []
+    artifacts: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    if isinstance(raw_artifacts, list):
+        for raw_artifact in raw_artifacts:
+            artifact = normalize_ai_artifact(raw_artifact)
+            if not artifact or artifact["id"] in seen_ids:
+                continue
+            artifacts.append(artifact)
+            seen_ids.add(artifact["id"])
+    artifacts.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")), reverse=True)
+    artifacts = artifacts[:AI_ARTIFACT_HISTORY_LIMIT]
+    fallback_updated_at = artifacts[0]["updated_at"] if artifacts else now_iso()
+    updated_at = str(raw_store.get("updated_at") or fallback_updated_at) if isinstance(raw_store, dict) else fallback_updated_at
+    return {
+        "version": 1,
+        "updated_at": updated_at,
+        "artifacts": artifacts,
+    }
+
+
+def load_ai_artifact_store() -> dict[str, Any]:
+    AI_ARTIFACT_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return normalize_ai_artifact_store(load_json(AI_ARTIFACT_STORE_PATH))
+
+
+def save_ai_artifact_store(store: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_ai_artifact_store(store)
+    normalized["updated_at"] = str(normalized.get("updated_at") or now_iso())
+    write_json_atomic(AI_ARTIFACT_STORE_PATH, normalized)
+    return normalized
+
+
+def find_ai_artifact(store: dict[str, Any], artifact_id: str) -> tuple[int, dict[str, Any] | None]:
+    for index, artifact in enumerate(store.get("artifacts", [])):
+        if artifact.get("id") == artifact_id:
+            return index, artifact
+    return -1, None
+
+
+def build_ai_artifact_public_payload(
+    artifact: dict[str, Any],
+    *,
+    include_payload: bool = False,
+    include_markdown: bool = False,
+) -> dict[str, Any]:
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    public_payload = {
+        "id": str(artifact.get("id") or ""),
+        "kind": str(artifact.get("kind") or ""),
+        "kind_label": AI_ARTIFACT_KIND_META.get(str(artifact.get("kind") or ""), {}).get("label", "分析产物"),
+        "title": str(artifact.get("title") or ""),
+        "summary": str(artifact.get("summary") or ""),
+        "query": str(artifact.get("query") or ""),
+        "symbols": normalize_ai_native_symbol_filters(artifact.get("symbols", [])),
+        "filters": artifact.get("filters") if isinstance(artifact.get("filters"), dict) else {},
+        "item_count": max(0, int(artifact.get("item_count") or 0)),
+        "source_job_id": str(artifact.get("source_job_id") or ""),
+        "created_at": str(artifact.get("created_at") or ""),
+        "updated_at": str(artifact.get("updated_at") or ""),
+        "display_created_at": format_iso_timestamp(str(artifact.get("created_at") or "")),
+        "display_updated_at": format_iso_timestamp(str(artifact.get("updated_at") or "")),
+        "detail_url": url_for("ai_artifact_detail_json", artifact_id=str(artifact.get("id") or "")),
+        "markdown_url": url_for("ai_artifact_markdown", artifact_id=str(artifact.get("id") or "")),
+    }
+    if include_payload:
+        public_payload["payload"] = payload
+    if include_markdown:
+        public_payload["markdown"] = str(artifact.get("markdown") or "")
+    return public_payload
+
+
+def build_ai_artifact_counts(store: dict[str, Any]) -> dict[str, int]:
+    artifacts = store.get("artifacts", []) if isinstance(store.get("artifacts"), list) else []
+    counter = Counter(str(item.get("kind") or "") for item in artifacts)
+    return {
+        "total": len(artifacts),
+        **{kind: int(counter.get(kind, 0)) for kind in AI_ARTIFACT_KIND_META},
+    }
+
+
+def build_ai_artifact_list_payload(
+    *,
+    limit: int = 24,
+    kind_filters: list[str] | None = None,
+    symbol_filters: list[str] | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    store = load_ai_artifact_store()
+    resolved_limit = max(1, int(limit or 24))
+    resolved_kinds = normalize_ai_artifact_kind_filters(kind_filters or [])
+    resolved_symbols = normalize_ai_native_symbol_filters(symbol_filters or [])
+    normalized_query = str(query or "").strip().casefold()
+    artifacts = store.get("artifacts", []) if isinstance(store.get("artifacts"), list) else []
+    filtered: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if resolved_kinds and str(artifact.get("kind") or "") not in set(resolved_kinds):
+            continue
+        if resolved_symbols and not set(normalize_ai_native_symbol_filters(artifact.get("symbols", []))).intersection(resolved_symbols):
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(artifact.get("title") or ""),
+                    str(artifact.get("summary") or ""),
+                    str(artifact.get("query") or ""),
+                    " ".join(artifact.get("symbols", [])),
+                ]
+            ).casefold()
+            if normalized_query not in haystack:
+                continue
+        filtered.append(artifact)
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "filters": {
+            "kinds": resolved_kinds,
+            "symbols": resolved_symbols,
+            "query": str(query or "").strip(),
+            "limit": resolved_limit,
+        },
+        "counts": {
+            "matched_artifacts": len(filtered),
+            "returned_artifacts": min(len(filtered), resolved_limit),
+            **build_ai_artifact_counts(store),
+        },
+        "artifacts": [build_ai_artifact_public_payload(item) for item in filtered[:resolved_limit]],
+    }
+
+
+def build_ai_artifact_bootstrap_payload(*, artifact_limit: int = 8, job_limit: int = 8) -> dict[str, Any]:
+    job_store = load_ai_job_store()
+    if reconcile_stale_ai_job_store(job_store):
+        job_store = save_ai_job_store(job_store)
+    artifact_store = load_ai_artifact_store()
+    can_enqueue = current_web_access_role() == WEB_ACCESS_ROLE_ADMIN
+    recent_artifacts = [build_ai_artifact_public_payload(item) for item in artifact_store.get("artifacts", [])[:artifact_limit]]
+    recent_jobs = [build_ai_job_public_payload(item) for item in job_store.get("jobs", [])[:job_limit]]
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "poll_interval_ms": AI_JOB_POLL_INTERVAL_SECONDS * 1000,
+        "supports": {
+            "read_artifacts": True,
+            "read_jobs": True,
+            "enqueue_jobs": can_enqueue,
+        },
+        "entrypoints": {
+            "bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+            "artifact_list_url": url_for("ai_artifact_list_json"),
+            "artifact_detail_url_template": url_for("ai_artifact_detail_json", artifact_id="__ARTIFACT_ID__"),
+            "artifact_markdown_url_template": url_for("ai_artifact_markdown", artifact_id="__ARTIFACT_ID__"),
+            "job_list_url": url_for("ai_job_list_json"),
+            "job_detail_url_template": url_for("ai_job_detail_json", job_id="__JOB_ID__"),
+            "timeline_job_url": url_for("queue_ai_timeline_artifact_job"),
+            "compare_job_url": url_for("queue_ai_compare_artifact_job"),
+        },
+        "catalog": {
+            "artifact_kinds": [
+                {"kind": kind, "label": meta["label"], "job_kind": meta["job_kind"]}
+                for kind, meta in AI_ARTIFACT_KIND_META.items()
+            ],
+            "job_kinds": [
+                {"kind": kind, "label": meta["label"], "artifact_kind": meta["artifact_kind"]}
+                for kind, meta in AI_JOB_KIND_META.items()
+            ],
+            "job_statuses": [
+                {"status": status, "label": meta["label"], "tone": meta["tone"]}
+                for status, meta in AI_JOB_STATUS_META.items()
+            ],
+        },
+        "counts": {
+            "artifacts": build_ai_artifact_counts(artifact_store),
+            "jobs": build_ai_job_counts(job_store),
+        },
+        "recent_artifacts": recent_artifacts,
+        "recent_jobs": recent_jobs,
+    }
+
+
+def build_ai_analysis_artifact(
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    request_payload: dict[str, Any],
+    source_job_id: str,
+) -> dict[str, Any]:
+    symbols = normalize_ai_native_symbol_filters(request_payload.get("symbols", []))
+    query = str(request_payload.get("query") or "").strip()
+    title = str(request_payload.get("title") or "").strip()[:160] or build_ai_artifact_default_title(
+        kind,
+        symbols=symbols,
+        query=query,
+    )
+    summary = build_ai_artifact_default_summary(kind, payload)
+    artifact = normalize_ai_artifact(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "kind": kind,
+            "title": title,
+            "summary": summary,
+            "query": query,
+            "symbols": symbols,
+            "filters": request_payload,
+            "payload": payload,
+            "item_count": len(payload.get("timeline", [])) if kind == "timeline_analysis" else len(payload.get("symbols", [])),
+            "source_job_id": source_job_id,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+    if artifact is None:
+        raise ValueError("artifact payload is invalid")
+    artifact["markdown"] = (
+        build_ai_timeline_artifact_markdown(artifact)
+        if kind == "timeline_analysis"
+        else build_ai_compare_artifact_markdown(artifact)
+    )
+    with AI_ARTIFACT_LOCK:
+        store = load_ai_artifact_store()
+        store.setdefault("artifacts", []).insert(0, artifact)
+        save_ai_artifact_store(store)
+    return artifact
+
+
+def normalize_ai_job(raw_job: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_job, dict):
+        return None
+    job_id = secure_filename(str(raw_job.get("id") or uuid.uuid4().hex[:12]).strip())[:24] or uuid.uuid4().hex[:12]
+    kind = str(raw_job.get("kind") or "").strip()
+    if kind not in AI_JOB_KIND_META:
+        return None
+    status = str(raw_job.get("status") or "queued").strip().lower()
+    if status not in AI_JOB_STATUS_META:
+        status = "queued"
+    created_at = str(raw_job.get("created_at") or now_iso())
+    updated_at = str(raw_job.get("updated_at") or created_at or now_iso())
+    artifact_id = secure_filename(str(raw_job.get("artifact_id") or "").strip())[:24]
+    return {
+        "id": job_id,
+        "kind": kind,
+        "title": str(raw_job.get("title") or "").strip()[:160],
+        "summary": str(raw_job.get("summary") or "").strip()[:280],
+        "status": status,
+        "request": raw_job.get("request") if isinstance(raw_job.get("request"), dict) else {},
+        "result": raw_job.get("result") if isinstance(raw_job.get("result"), dict) else {},
+        "artifact_id": artifact_id,
+        "error": str(raw_job.get("error") or "").strip()[:600],
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "started_at": str(raw_job.get("started_at") or "").strip()[:40],
+        "completed_at": str(raw_job.get("completed_at") or "").strip()[:40],
+    }
+
+
+def normalize_ai_job_store(raw_store: Any) -> dict[str, Any]:
+    raw_jobs = raw_store.get("jobs") if isinstance(raw_store, dict) else []
+    jobs: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    if isinstance(raw_jobs, list):
+        for raw_job in raw_jobs:
+            job = normalize_ai_job(raw_job)
+            if not job or job["id"] in seen_ids:
+                continue
+            jobs.append(job)
+            seen_ids.add(job["id"])
+    jobs.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")), reverse=True)
+    active_jobs = [item for item in jobs if item.get("status") in {"queued", "running"}]
+    historical_jobs = [item for item in jobs if item.get("status") not in {"queued", "running"}][:AI_JOB_HISTORY_LIMIT]
+    resolved_jobs = active_jobs + historical_jobs
+    fallback_updated_at = resolved_jobs[0]["updated_at"] if resolved_jobs else now_iso()
+    updated_at = str(raw_store.get("updated_at") or fallback_updated_at) if isinstance(raw_store, dict) else fallback_updated_at
+    return {
+        "version": 1,
+        "updated_at": updated_at,
+        "jobs": resolved_jobs,
+    }
+
+
+def load_ai_job_store() -> dict[str, Any]:
+    AI_JOB_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return normalize_ai_job_store(load_json(AI_JOB_STORE_PATH))
+
+
+def save_ai_job_store(store: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_ai_job_store(store)
+    normalized["updated_at"] = str(normalized.get("updated_at") or now_iso())
+    write_json_atomic(AI_JOB_STORE_PATH, normalized)
+    return normalized
+
+
+def find_ai_job(store: dict[str, Any], job_id: str) -> tuple[int, dict[str, Any] | None]:
+    for index, job in enumerate(store.get("jobs", [])):
+        if job.get("id") == job_id:
+            return index, job
+    return -1, None
+
+
+def build_ai_job_counts(store: dict[str, Any]) -> dict[str, int]:
+    jobs = store.get("jobs", []) if isinstance(store.get("jobs"), list) else []
+    counter = Counter(str(item.get("status") or "") for item in jobs)
+    return {
+        "total": len(jobs),
+        **{status: int(counter.get(status, 0)) for status in AI_JOB_STATUS_META},
+    }
+
+
+def build_ai_job_public_payload(job: dict[str, Any], *, include_request: bool = True, include_result: bool = True) -> dict[str, Any]:
+    status = str(job.get("status") or "")
+    artifact_id = str(job.get("artifact_id") or "")
+    public_payload = {
+        "id": str(job.get("id") or ""),
+        "kind": str(job.get("kind") or ""),
+        "kind_label": AI_JOB_KIND_META.get(str(job.get("kind") or ""), {}).get("label", "后台任务"),
+        "status": status,
+        "status_label": AI_JOB_STATUS_META.get(status, AI_JOB_STATUS_META["queued"])["label"],
+        "status_tone": AI_JOB_STATUS_META.get(status, AI_JOB_STATUS_META["queued"])["tone"],
+        "title": str(job.get("title") or ""),
+        "summary": str(job.get("summary") or ""),
+        "error": str(job.get("error") or ""),
+        "artifact_id": artifact_id,
+        "artifact_url": url_for("ai_artifact_detail_json", artifact_id=artifact_id) if artifact_id else "",
+        "created_at": str(job.get("created_at") or ""),
+        "updated_at": str(job.get("updated_at") or ""),
+        "started_at": str(job.get("started_at") or ""),
+        "completed_at": str(job.get("completed_at") or ""),
+        "display_created_at": format_iso_timestamp(str(job.get("created_at") or "")),
+        "display_updated_at": format_iso_timestamp(str(job.get("updated_at") or "")),
+        "display_started_at": format_iso_timestamp(str(job.get("started_at") or "")),
+        "display_completed_at": format_iso_timestamp(str(job.get("completed_at") or "")),
+        "detail_url": url_for("ai_job_detail_json", job_id=str(job.get("id") or "")),
+    }
+    if include_request:
+        public_payload["request"] = job.get("request") if isinstance(job.get("request"), dict) else {}
+    if include_result:
+        public_payload["result"] = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return public_payload
+
+
+def register_ai_job_runtime(job_id: str) -> None:
+    with AI_JOB_RUNTIME_LOCK:
+        AI_ACTIVE_JOB_IDS.add(job_id)
+
+
+def release_ai_job_runtime(job_id: str) -> None:
+    with AI_JOB_RUNTIME_LOCK:
+        AI_ACTIVE_JOB_IDS.discard(job_id)
+
+
+def ai_job_runtime_active(job_id: str) -> bool:
+    with AI_JOB_RUNTIME_LOCK:
+        return job_id in AI_ACTIVE_JOB_IDS
+
+
+def reconcile_stale_ai_job_store(store: dict[str, Any]) -> bool:
+    changed = False
+    stale_cutoff = time.time() - max(AI_JOB_STALE_SECONDS, 60)
+    for job in store.get("jobs", []):
+        if job.get("status") not in {"queued", "running"}:
+            continue
+        if ai_job_runtime_active(str(job.get("id") or "")):
+            continue
+        updated_at = coerce_sort_timestamp(job.get("updated_at"))
+        if updated_at and updated_at > stale_cutoff:
+            continue
+        job["status"] = "failed"
+        job["error"] = "任务已经中断，通常是网页后端重启或后台线程退出导致。请重新发起一次。"
+        job["completed_at"] = job.get("completed_at") or now_iso()
+        job["updated_at"] = now_iso()
+        changed = True
+    return changed
+
+
+def read_ai_job(job_id: str) -> dict[str, Any] | None:
+    with AI_JOB_LOCK:
+        store = load_ai_job_store()
+        if reconcile_stale_ai_job_store(store):
+            store = save_ai_job_store(store)
+        job = next((item for item in store.get("jobs", []) if item.get("id") == job_id), None)
+        return deepcopy(job) if job else None
+
+
+def update_ai_job(job_id: str, **changes: Any) -> None:
+    with AI_JOB_LOCK:
+        store = load_ai_job_store()
+        job = next((item for item in store.get("jobs", []) if item.get("id") == job_id), None)
+        if job is None:
+            return
+        for key, value in changes.items():
+            job[key] = value
+        job["updated_at"] = now_iso()
+        save_ai_job_store(store)
+
+
+def build_ai_job_default_title(job_kind: str, request_payload: dict[str, Any]) -> str:
+    requested_title = str(request_payload.get("title") or "").strip()[:160]
+    if requested_title:
+        return requested_title
+    symbols = normalize_ai_native_symbol_filters(request_payload.get("symbols", []))
+    query = str(request_payload.get("query") or "").strip()
+    artifact_kind = AI_JOB_KIND_META.get(job_kind, {}).get("artifact_kind", "timeline_analysis")
+    return build_ai_artifact_default_title(artifact_kind, symbols=symbols, query=query)
+
+
+def build_ai_job_default_summary(job_kind: str, request_payload: dict[str, Any]) -> str:
+    symbols = normalize_ai_native_symbol_filters(request_payload.get("symbols", []))
+    query = str(request_payload.get("query") or "").strip()
+    if job_kind == "artifact_compare":
+        return f"Queue compare artifact for {', '.join(symbols) or 'workspace'}{f' | {query}' if query else ''}."[:280]
+    return f"Queue timeline artifact for {', '.join(symbols) or 'workspace'}{f' | {query}' if query else ''}."[:280]
+
+
+def enqueue_ai_artifact_job(*, job_kind: str, request_payload: dict[str, Any]) -> dict[str, Any]:
+    job = normalize_ai_job(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "kind": job_kind,
+            "title": build_ai_job_default_title(job_kind, request_payload),
+            "summary": build_ai_job_default_summary(job_kind, request_payload),
+            "status": "queued",
+            "request": request_payload,
+            "result": {},
+            "artifact_id": "",
+            "error": "",
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "started_at": "",
+            "completed_at": "",
+        }
+    )
+    if job is None:
+        raise ValueError("job payload is invalid")
+    with AI_JOB_LOCK:
+        store = load_ai_job_store()
+        store.setdefault("jobs", []).insert(0, job)
+        save_ai_job_store(store)
+    worker = threading.Thread(
+        target=run_ai_artifact_job,
+        args=(job["id"],),
+        daemon=True,
+        name=f"ai-artifact-job-{job['id']}",
+    )
+    worker.start()
+    return job
+
+
+def run_ai_artifact_job(job_id: str) -> None:
+    register_ai_job_runtime(job_id)
+    try:
+        job = read_ai_job(job_id)
+        if not job:
+            return
+        update_ai_job(job_id, status="running", started_at=now_iso(), error="")
+        job = read_ai_job(job_id)
+        if not job:
+            return
+        request_payload = deepcopy(job.get("request", {}))
+        with app.test_request_context("/"):
+            if job.get("kind") == "artifact_timeline":
+                payload = build_ai_timeline_analysis_payload(
+                    query=str(request_payload.get("query") or ""),
+                    symbol_filters=normalize_ai_native_symbol_filters(request_payload.get("symbols", [])),
+                    kind_filters=normalize_ai_native_kind_filters(request_payload.get("kinds", [])),
+                    limit=max(1, int(request_payload.get("limit") or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT)),
+                    force_refresh=bool(request_payload.get("refresh")),
+                )
+                artifact = build_ai_analysis_artifact(
+                    kind="timeline_analysis",
+                    payload=payload,
+                    request_payload=request_payload,
+                    source_job_id=job_id,
+                )
+            elif job.get("kind") == "artifact_compare":
+                payload = build_ai_compare_analysis_payload(
+                    symbol_filters=normalize_ai_native_symbol_filters(request_payload.get("symbols", [])),
+                    kind_filters=normalize_ai_native_kind_filters(request_payload.get("kinds", [])),
+                    query=str(request_payload.get("query") or ""),
+                    per_symbol_limit=max(1, int(request_payload.get("per_symbol_limit") or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT)),
+                    force_refresh=bool(request_payload.get("refresh")),
+                )
+                artifact = build_ai_analysis_artifact(
+                    kind="compare_analysis",
+                    payload=payload,
+                    request_payload=request_payload,
+                    source_job_id=job_id,
+                )
+            else:
+                raise ValueError("unsupported job kind")
+        update_ai_job(
+            job_id,
+            status="completed",
+            completed_at=now_iso(),
+            artifact_id=artifact["id"],
+            result={
+                "artifact_id": artifact["id"],
+                "artifact_kind": artifact["kind"],
+                "artifact_title": artifact["title"],
+            },
+            error="",
+        )
+    except Exception as exc:
+        update_ai_job(
+            job_id,
+            status="failed",
+            completed_at=now_iso(),
+            error=str(exc)[:600],
+        )
+    finally:
+        release_ai_job_runtime(job_id)
+
+
+def build_ai_job_list_payload(
+    *,
+    limit: int = 24,
+    kind_filters: list[str] | None = None,
+    status_filters: list[str] | None = None,
+) -> dict[str, Any]:
+    with AI_JOB_LOCK:
+        store = load_ai_job_store()
+        if reconcile_stale_ai_job_store(store):
+            store = save_ai_job_store(store)
+    resolved_limit = max(1, int(limit or 24))
+    resolved_kinds = normalize_ai_job_kind_filters(kind_filters or [])
+    resolved_statuses = normalize_ai_job_status_filters(status_filters or [])
+    jobs = store.get("jobs", []) if isinstance(store.get("jobs"), list) else []
+    filtered = [
+        item
+        for item in jobs
+        if (not resolved_kinds or str(item.get("kind") or "") in set(resolved_kinds))
+        and (not resolved_statuses or str(item.get("status") or "") in set(resolved_statuses))
+    ]
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "filters": {
+            "kinds": resolved_kinds,
+            "statuses": resolved_statuses,
+            "limit": resolved_limit,
+        },
+        "counts": {
+            "matched_jobs": len(filtered),
+            "returned_jobs": min(len(filtered), resolved_limit),
+            **build_ai_job_counts(store),
+        },
+        "jobs": [build_ai_job_public_payload(item) for item in filtered[:resolved_limit]],
+    }
+
+
+def filter_ai_native_documents(
+    documents: list[dict[str, Any]],
+    *,
+    kind: str = "",
+    symbol: str = "",
+    query: str = "",
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    filtered = documents
+    normalized_kind = str(kind or "").strip()
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    normalized_query = re.sub(r"\s+", " ", str(query or "").strip()).casefold()
+
+    if normalized_kind:
+        filtered = [item for item in filtered if str(item.get("kind") or "") == normalized_kind]
+    if normalized_symbol:
+        filtered = [
+            item
+            for item in filtered
+            if normalized_symbol in set(normalize_stock_symbol_list(item.get("symbols", [])))
+        ]
+    if normalized_query:
+        filtered = [
+            item
+            for item in filtered
+            if normalized_query
+            in " ".join(
+                [
+                    str(item.get("title") or ""),
+                    str(item.get("summary") or ""),
+                    " ".join(item.get("symbols", [])),
+                    " ".join(item.get("tags", [])),
+                    str(item.get("source_name") or ""),
+                    str(item.get("search_text") or ""),
+                ]
+            ).casefold()
+        ]
+
+    if limit > 0:
+        filtered = filtered[:limit]
+    return filtered
+
+
+def build_ai_native_url_templates() -> dict[str, str]:
+    return {
+        "bootstrap_url": url_for("ai_native_bootstrap_json"),
+        "data_manifest_url": url_for("ai_native_data_manifest_json"),
+        "data_search_url": url_for("ai_native_data_search_json"),
+        "readme_markdown_url": url_for("ai_native_readme_markdown"),
+        "readme_json_url": url_for("ai_native_readme_json"),
+        "agent_bootstrap_url": url_for("ai_agent_bootstrap_json"),
+        "artifact_bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+        "artifact_list_url_template": f"{url_for('ai_artifact_list_json')}?kinds=<KIND>&symbols=<SYMBOL>",
+        "artifact_detail_url_template": f"{url_for('ai_artifact_detail_json', artifact_id='__ARTIFACT_ID__')}",
+        "job_list_url_template": f"{url_for('ai_job_list_json')}?statuses=<STATUS>",
+        "job_detail_url_template": f"{url_for('ai_job_detail_json', job_id='__JOB_ID__')}",
+        "timeline_artifact_job_url": url_for("queue_ai_timeline_artifact_job"),
+        "compare_artifact_job_url": url_for("queue_ai_compare_artifact_job"),
+        "search_url_template": f"{url_for('ai_native_search_json')}?q=<QUERY>",
+        "search_path_url_template": "/api/ai/search/<URL_ENCODED_QUERY>.json",
+        "context_pack_url_template": f"{url_for('ai_native_context_pack_json')}?query=<QUERY>",
+        "context_pack_path_url_template": "/api/ai/context-pack/<URL_ENCODED_QUERY>/symbols/<SYMBOLS>.json",
+        "timeline_analysis_url_template": f"{url_for('ai_analysis_timeline_json')}?symbols=<SYMBOL>",
+        "timeline_analysis_path_url_template": "/api/analysis/timeline/<SYMBOLS>.json",
+        "compare_analysis_url_template": f"{url_for('ai_analysis_compare_json')}?symbols=<SYMBOL1,SYMBOL2>",
+        "compare_analysis_path_url_template": "/api/analysis/compare/<SYMBOL1,SYMBOL2>.json",
+        "manifest_url_template": f"{url_for('ai_native_manifest_json')}?symbol=<SYMBOL>",
+        "brief_url_template": f"{url_for('ai_native_brief_json')}?symbol=<SYMBOL>",
+        "brief_path_url_template": "/api/ai/brief/<SYMBOL>.json",
+        "latest_document_url_template": "/api/ai/latest/<SYMBOL>/<KIND>.json",
+        "latest_document_markdown_url_template": "/api/ai/latest/<SYMBOL>/<KIND>.md",
+        "stock_compact_url_template": "/api/ai/stock/<SYMBOL>.json",
+        "stock_compact_markdown_url_template": "/api/ai/stock/<SYMBOL>.md",
+        "experts_url_template": f"{url_for('ai_native_experts_json')}?symbol=<SYMBOL>",
+        "experts_path_url_template": "/api/ai/experts/<SYMBOL>.json",
+        "bundle_markdown_url_template": (
+            f"{url_for('ai_native_scope_bundle_markdown')}?symbols=<SYMBOL>&include_setups=1"
+        ),
+        "data_search_url_template": f"{url_for('ai_native_data_search_json')}?q=<QUERY>&datasets=<DATASET>",
+        "stablecoins_json_url": url_for("ai_native_stablecoin_data_json"),
+        "stablecoins_markdown_url": url_for("ai_native_stablecoin_data_markdown"),
+        "cdn_json_url": url_for("ai_native_cdn_data_json"),
+        "cdn_markdown_url": url_for("ai_native_cdn_data_markdown"),
+        "applovin_json_url": url_for("ai_native_applovin_data_json"),
+        "applovin_markdown_url": url_for("ai_native_applovin_data_markdown"),
+        "gpu_prices_json_url": url_for("ai_native_gpu_price_data_json"),
+        "gpu_prices_markdown_url": url_for("ai_native_gpu_price_data_markdown"),
+    }
+
+
+def build_ai_native_symbol_urls(symbol: str) -> dict[str, str]:
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    return {
+        "search_url": url_for("ai_native_search_json", symbols=normalized_symbol),
+        "context_pack_url": url_for("ai_native_context_pack_json", symbols=normalized_symbol),
+        "timeline_analysis_url": url_for("ai_analysis_timeline_json", symbols=normalized_symbol),
+        "manifest_url": url_for("ai_native_manifest_json", symbol=normalized_symbol),
+        "brief_url": url_for("ai_native_brief_json", symbol=normalized_symbol),
+        "experts_url": url_for("ai_native_experts_json", symbol=normalized_symbol),
+        "bundle_markdown_url": url_for(
+            "ai_native_scope_bundle_markdown",
+            symbols=normalized_symbol,
+            include_setups=1,
+        ),
+    }
+
+
+def build_ai_native_time_schema() -> dict[str, str]:
+    return {
+        "generated_at": "Response generation time.",
+        "activity_date": "Primary event or content date for chronology.",
+        "display_time": "Human-readable time label for the item.",
+        "updated_at": "Source or system update time; use as a fallback chronology anchor.",
+        "sort_value": "Numeric descending sort key used for recent-first ordering.",
+    }
+
+
+def build_ai_native_kind_counts(documents: list[dict[str, Any]]) -> dict[str, int]:
+    counter = Counter(str(item.get("kind") or "") for item in documents)
+    return {key: int(counter.get(key, 0)) for key in AI_NATIVE_DOCUMENT_KIND_META}
+
+
+def build_ai_native_time_context(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    activity_dates = sorted(
+        {
+            str(item.get("activity_date") or "").strip()
+            for item in documents
+            if str(item.get("activity_date") or "").strip()
+        }
+    )
+    latest_updated_at = ""
+    latest_updated_sort = 0.0
+    for item in documents:
+        updated_at = str(item.get("updated_at") or "").strip()
+        sort_value = coerce_sort_timestamp(updated_at)
+        if updated_at and sort_value >= latest_updated_sort:
+            latest_updated_sort = sort_value
+            latest_updated_at = updated_at
+
+    latest_display_time = next(
+        (str(item.get("display_time") or "").strip() for item in documents if str(item.get("display_time") or "").strip()),
+        "",
+    )
+    return {
+        "timeline_order": "Recent first by sort_value. Use activity_date as the primary chronology field.",
+        "latest_activity_date": activity_dates[-1] if activity_dates else "",
+        "earliest_activity_date": activity_dates[0] if activity_dates else "",
+        "active_days": len(activity_dates),
+        "dated_documents": sum(1 for item in documents if str(item.get("activity_date") or "").strip()),
+        "latest_updated_at": latest_updated_at,
+        "latest_display_time": latest_display_time,
+    }
+
+
+def build_ai_native_bootstrap_payload() -> dict[str, Any]:
+    documents = build_ai_native_manifest_documents()
+    url_templates = build_ai_native_url_templates()
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "site_mode": "ai_native_read_only",
+        "entrypoints": {
+            "bootstrap_url": url_templates["bootstrap_url"],
+            "data_manifest_url": url_templates["data_manifest_url"],
+            "data_search_url": url_templates["data_search_url"],
+            "readme_url": url_templates["readme_markdown_url"],
+            "readme_markdown_url": url_templates["readme_markdown_url"],
+            "readme_json_url": url_templates["readme_json_url"],
+            "agent_bootstrap_url": url_templates["agent_bootstrap_url"],
+            "artifact_bootstrap_url": url_templates["artifact_bootstrap_url"],
+            "search_url": url_for("ai_native_search_json"),
+            "context_pack_url": url_for("ai_native_context_pack_json"),
+            "timeline_analysis_url": url_for("ai_analysis_timeline_json"),
+            "compare_analysis_url": url_for("ai_analysis_compare_json"),
+            "timeline_artifact_job_url": url_templates["timeline_artifact_job_url"],
+            "compare_artifact_job_url": url_templates["compare_artifact_job_url"],
+            "manifest_url": url_for("ai_native_manifest_json"),
+            "experts_url": url_for("ai_native_experts_json"),
+            "bundle_markdown_url": url_for("ai_native_scope_bundle_markdown"),
+            "stablecoins_json_url": url_templates["stablecoins_json_url"],
+            "stablecoins_markdown_url": url_templates["stablecoins_markdown_url"],
+            "cdn_json_url": url_templates["cdn_json_url"],
+            "cdn_markdown_url": url_templates["cdn_markdown_url"],
+            "applovin_json_url": url_templates["applovin_json_url"],
+            "applovin_markdown_url": url_templates["applovin_markdown_url"],
+            "artifact_list_url_template": url_templates["artifact_list_url_template"],
+            "artifact_detail_url_template": url_templates["artifact_detail_url_template"],
+            "job_list_url_template": url_templates["job_list_url_template"],
+            "job_detail_url_template": url_templates["job_detail_url_template"],
+            "search_url_template": url_templates["search_url_template"],
+            "search_path_url_template": url_templates["search_path_url_template"],
+            "context_pack_url_template": url_templates["context_pack_url_template"],
+            "context_pack_path_url_template": url_templates["context_pack_path_url_template"],
+            "timeline_analysis_url_template": url_templates["timeline_analysis_url_template"],
+            "timeline_analysis_path_url_template": url_templates["timeline_analysis_path_url_template"],
+            "compare_analysis_url_template": url_templates["compare_analysis_url_template"],
+            "compare_analysis_path_url_template": url_templates["compare_analysis_path_url_template"],
+            "manifest_url_template": url_templates["manifest_url_template"],
+            "brief_url_template": url_templates["brief_url_template"],
+            "brief_path_url_template": url_templates["brief_path_url_template"],
+            "latest_document_url_template": url_templates["latest_document_url_template"],
+            "latest_document_markdown_url_template": url_templates["latest_document_markdown_url_template"],
+            "stock_compact_url_template": url_templates["stock_compact_url_template"],
+            "stock_compact_markdown_url_template": url_templates["stock_compact_markdown_url_template"],
+            "experts_url_template": url_templates["experts_url_template"],
+            "experts_path_url_template": url_templates["experts_path_url_template"],
+            "bundle_markdown_url_template": url_templates["bundle_markdown_url_template"],
+            "data_search_url_template": url_templates["data_search_url_template"],
+        },
+        "recommended_flow": [
+            {
+                "step": 1,
+                "endpoint": url_templates["bootstrap_url"],
+                "purpose": "Read entrypoints, supported kinds, and time semantics.",
+            },
+            {
+                "step": 2,
+                "endpoint": url_templates["data_manifest_url"],
+                "purpose": "Discover data-monitor datasets such as stablecoins and CDN snapshots.",
+            },
+            {
+                "step": 3,
+                "endpoint": url_templates["data_search_url_template"],
+                "purpose": "Search row-level data-monitor entities when you need CDN site or stablecoin coin associations.",
+            },
+            {
+                "step": 4,
+                "endpoint": url_templates["search_url_template"],
+                "purpose": "Search across the AI-native catalog when the question is open-ended.",
+            },
+            {
+                "step": 5,
+                "endpoint": url_templates["brief_url_template"],
+                "purpose": "Fast path for a single symbol with a compact timeline.",
+            },
+            {
+                "step": 6,
+                "endpoint": url_templates["experts_url_template"],
+                "purpose": "Pull expert materials for the same symbol.",
+            },
+            {
+                "step": 7,
+                "endpoint": url_templates["context_pack_url_template"],
+                "purpose": "Request a smaller context pack with ranked full-text chunks.",
+            },
+            {
+                "step": 8,
+                "endpoint": url_templates["bundle_markdown_url_template"],
+                "purpose": "Read the markdown research bundle when more context is needed.",
+            },
+            {
+                "step": 9,
+                "endpoint": url_templates["manifest_url_template"],
+                "purpose": "Fall back to the full filtered index for exhaustive lookup.",
+            },
+            {
+                "step": 10,
+                "endpoint": url_templates["artifact_bootstrap_url"],
+                "purpose": "Browse saved analysis artifacts and recent background jobs.",
+            },
+        ],
+        "time_schema": build_ai_native_time_schema(),
+        "counts": {
+            "all_documents": len(documents),
+            "by_kind": build_ai_native_kind_counts(documents),
+        },
+        "supported_document_kinds": [
+            {"kind": key, "label": label}
+            for key, label in AI_NATIVE_DOCUMENT_KIND_META.items()
+        ],
+        "notes": [
+            "Prefer JSON endpoints first in browser-based GPT tools.",
+            "Use search.json for retrieval and context-pack.json for compact evidence assembly.",
+            "Use /api/ai/data/search.json when the question targets data-monitor rows such as CDN sites or stablecoin coins.",
+            "Use timeline.json and compare.json when the task is explicitly chronological or comparative.",
+            "Use /api/ai/data/manifest.json to discover machine-readable data-monitor datasets.",
+            "Use /api/agent/bootstrap.json when a GPT tool layer needs guarded preview/commit write contracts.",
+            "Use /api/artifacts/bootstrap.json when you want saved analysis artifacts or job queue status.",
+            "For concrete file reading inside the original system, use /api/ai/latest/<SYMBOL>/<KIND>.json or .md to jump straight to the newest full document body for that symbol/kind.",
+            "If a browser-based GPT tool is flaky with query strings, switch to the path aliases such as /api/ai/brief/<SYMBOL>.json, /api/ai/search/<URL_ENCODED_QUERY>.json, /api/ai/context-pack/<URL_ENCODED_QUERY>/symbols/<SYMBOLS>.json, /api/analysis/timeline/<SYMBOLS>.json, and /api/analysis/compare/<SYMBOL1,SYMBOL2>.json.",
+            "If brief/experts still feel too heavy for a browser tool, use /api/ai/stock/<SYMBOL>.json or /api/ai/stock/<SYMBOL>.md for a compact single-stock package.",
+            "With AI direct access enabled, anonymous GPT clients can read GET endpoints under /api/ai/*, /api/analysis/*, /api/agent/bootstrap.json, /api/agent/tools/*, /api/artifacts/*, and /api/jobs/*.",
+            "Artifact/job queue POST routes and /api/agent/writes/* remain authenticated admin-only paths.",
+            "Blocked API routes return JSON auth errors instead of redirecting models to the HTML password page.",
+            "Reason with activity_date first, then use updated_at as a fallback.",
+            "Avoid materialize=1 unless you explicitly need local cache files refreshed.",
+        ],
+    }
+
+
+def build_ai_native_brief_payload(symbol: str) -> dict[str, Any]:
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    documents = filter_ai_native_documents(build_ai_native_manifest_documents(), symbol=normalized_symbol)
+    public_documents = [build_ai_native_public_descriptor(item) for item in documents]
+    symbol_urls = build_ai_native_symbol_urls(normalized_symbol)
+
+    latest_by_kind: dict[str, dict[str, Any]] = {}
+    for item in public_documents:
+        kind = str(item.get("kind") or "")
+        if kind and kind not in latest_by_kind:
+            latest_by_kind[kind] = item
+
+    timeline = public_documents[:18]
+    experts_payload = build_ai_native_expert_directory_payload(symbol=normalized_symbol, limit=6)
+    latest_setup = next((item for item in public_documents if item.get("kind") == "stock_setup"), None)
+
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "symbol": normalized_symbol,
+        "time_schema": build_ai_native_time_schema(),
+        "urls": {
+            "bootstrap_url": url_for("ai_native_bootstrap_json"),
+            **symbol_urls,
+        },
+        "time_context": build_ai_native_time_context(public_documents),
+        "counts": {
+            "documents": len(public_documents),
+            "experts": len(experts_payload.get("experts", [])),
+            "timeline_items": len(timeline),
+            "more_documents_available": max(0, len(public_documents) - len(timeline)),
+            "by_kind": build_ai_native_kind_counts(documents),
+        },
+        "latest_setup": latest_setup,
+        "latest_by_kind": latest_by_kind,
+        "experts": experts_payload.get("experts", []),
+        "timeline": timeline,
+    }
+
+
+def build_ai_native_compact_stock_payload(symbol: str) -> dict[str, Any]:
+    brief_payload = build_ai_native_brief_payload(symbol)
+    normalized_symbol = brief_payload.get("symbol") or ""
+    timeline = brief_payload.get("timeline", []) if isinstance(brief_payload.get("timeline"), list) else []
+    experts = brief_payload.get("experts", []) if isinstance(brief_payload.get("experts"), list) else []
+
+    compact_timeline: list[dict[str, Any]] = []
+    for item in timeline[:8]:
+        if not isinstance(item, dict):
+            continue
+        compact_timeline.append(
+            {
+                "kind": str(item.get("kind") or ""),
+                "title": str(item.get("title") or ""),
+                "activity_date": str(item.get("activity_date") or ""),
+                "display_time": str(item.get("display_time") or ""),
+                "summary": str(item.get("summary") or "")[:280],
+                "json_url": str(item.get("json_url") or ""),
+                "markdown_url": str(item.get("markdown_url") or ""),
+            }
+        )
+
+    compact_experts: list[dict[str, Any]] = []
+    for item in experts[:3]:
+        if not isinstance(item, dict):
+            continue
+        compact_experts.append(
+            {
+                "title": str(item.get("title") or ""),
+                "summary": str(item.get("summary") or "")[:280],
+                "json_url": str(item.get("json_url") or ""),
+                "markdown_url": str(item.get("markdown_url") or ""),
+            }
+        )
+
+    urls = brief_payload.get("urls", {}) if isinstance(brief_payload.get("urls"), dict) else {}
+    compact_url = f"/api/ai/stock/{normalized_symbol}.json" if normalized_symbol else ""
+    compact_markdown_url = f"/api/ai/stock/{normalized_symbol}.md" if normalized_symbol else ""
+    return {
+        "ok": True,
+        "version": 1,
+        "generated_at": now_iso(),
+        "symbol": normalized_symbol,
+        "time_context": brief_payload.get("time_context", {}),
+        "counts": brief_payload.get("counts", {}),
+        "latest_by_kind": brief_payload.get("latest_by_kind", {}),
+        "latest_documents": compact_timeline,
+        "top_experts": compact_experts,
+        "urls": {
+            "bootstrap_url": str(urls.get("bootstrap_url") or url_for("ai_native_bootstrap_json")),
+            "compact_json_url": compact_url,
+            "compact_markdown_url": compact_markdown_url,
+            "brief_url": str(urls.get("brief_url") or ""),
+            "experts_url": str(urls.get("experts_url") or ""),
+            "context_pack_url": str(urls.get("context_pack_url") or ""),
+            "timeline_analysis_url": str(urls.get("timeline_analysis_url") or ""),
+            "bundle_markdown_url": str(urls.get("bundle_markdown_url") or ""),
+        },
+    }
+
+
+def build_ai_native_compact_stock_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AI Stock Compact",
+        "",
+        f"- symbol: {payload.get('symbol') or ''}",
+        f"- generated_at: {payload.get('generated_at') or ''}",
+        f"- documents: {payload.get('counts', {}).get('documents', 0)}",
+        f"- experts: {payload.get('counts', {}).get('experts', 0)}",
+        f"- latest_activity_date: {payload.get('time_context', {}).get('latest_activity_date') or ''}",
+        f"- compact_json_url: {payload.get('urls', {}).get('compact_json_url') or ''}",
+        f"- brief_url: {payload.get('urls', {}).get('brief_url') or ''}",
+        f"- experts_url: {payload.get('urls', {}).get('experts_url') or ''}",
+        f"- context_pack_url: {payload.get('urls', {}).get('context_pack_url') or ''}",
+        f"- timeline_analysis_url: {payload.get('urls', {}).get('timeline_analysis_url') or ''}",
+        "",
+        "## Latest Documents",
+    ]
+    latest_documents = payload.get("latest_documents", []) if isinstance(payload.get("latest_documents"), list) else []
+    if not latest_documents:
+        lines.append("- none")
+    else:
+        for item in latest_documents:
+            if not isinstance(item, dict):
+                continue
+            lines.extend(
+                [
+                    f"### [{item.get('kind') or ''}] {item.get('title') or ''}",
+                    f"- activity_date: {item.get('activity_date') or ''}",
+                    f"- display_time: {item.get('display_time') or ''}",
+                    f"- summary: {item.get('summary') or ''}",
+                    f"- json_url: {item.get('json_url') or ''}",
+                    f"- markdown_url: {item.get('markdown_url') or ''}",
+                    "",
+                ]
+            )
+    lines.append("## Top Experts")
+    top_experts = payload.get("top_experts", []) if isinstance(payload.get("top_experts"), list) else []
+    if not top_experts:
+        lines.append("- none")
+    else:
+        for item in top_experts:
+            if not isinstance(item, dict):
+                continue
+            lines.extend(
+                [
+                    f"### {item.get('title') or ''}",
+                    f"- summary: {item.get('summary') or ''}",
+                    f"- json_url: {item.get('json_url') or ''}",
+                    f"- markdown_url: {item.get('markdown_url') or ''}",
+                    "",
+                ]
+            )
+    return "\n".join(lines).strip() + "\n"
+
+
+def find_latest_ai_native_document_descriptor(symbol: str, kind: str) -> dict[str, Any] | None:
+    normalized_symbol = normalize_stock_symbol(symbol) or ""
+    normalized_kind = str(kind or "").strip().lower()
+    if not normalized_symbol or normalized_kind not in AI_NATIVE_DOCUMENT_KIND_META:
+        return None
+
+    documents = filter_ai_native_documents(
+        build_ai_native_manifest_documents(),
+        kind=normalized_kind,
+        symbol=normalized_symbol,
+        limit=0,
+    )
+    if not documents:
+        return None
+    return resolve_ai_native_document_descriptor(normalized_kind, str(documents[0].get("doc_id") or ""))
+
+
+def build_ai_native_document_response_payload(descriptor: dict[str, Any]) -> dict[str, Any]:
+    kind = str(descriptor.get("kind") or "").strip()
+    doc_id = str(descriptor.get("doc_id") or "").strip()
+    meta = ensure_ai_native_document_asset(descriptor)
+    markdown_path = build_ai_native_asset_dir(kind, doc_id) / "document.md"
+    try:
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        markdown_text = build_ai_native_markdown_document(descriptor)
+    return {
+        "document": {
+            **build_ai_native_public_descriptor(descriptor),
+            "chunk_count": int(meta.get("chunk_count") or 0),
+            "generated_at": str(meta.get("generated_at") or ""),
+            **({"extra": descriptor["extra"]} if isinstance(descriptor.get("extra"), dict) else {}),
+        },
+        "markdown": markdown_text,
+        "chunks": read_ai_native_chunks(kind, doc_id),
+    }
+
+
+def parse_ai_native_symbol_scoped_doc_id(doc_id: str) -> tuple[str, str]:
+    symbol, separator, item_id = str(doc_id or "").partition("--")
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not separator or not normalized_symbol or not item_id.strip():
+        abort(404)
+    return normalized_symbol, item_id.strip()
+
+
+def resolve_ai_native_document_descriptor(kind: str, doc_id: str) -> dict[str, Any]:
+    normalized_kind = str(kind or "").strip()
+    raw_doc_id = str(doc_id or "").strip()
+    if normalized_kind not in AI_NATIVE_DOCUMENT_KIND_META or not raw_doc_id:
+        abort(404)
+
+    stock_store = load_stock_store()
+    known_symbols = sorted(list_stock_symbols(stock_store))
+
+    if normalized_kind == "report":
+        report_path = validate_report_name(raw_doc_id)
+        return build_ai_native_report_descriptor(
+            build_report_catalog_entry(report_path),
+            kind="report",
+            known_symbols=known_symbols,
+            include_body=True,
+        )
+
+    if normalized_kind == "signal_report":
+        report_path = validate_report_name_in_directory(raw_doc_id, SIGNAL_MONITOR_REPORTS_DIR)
+        return build_ai_native_report_descriptor(
+            build_report_catalog_entry(report_path),
+            kind="signal_report",
+            known_symbols=known_symbols,
+            include_body=True,
+        )
+
+    if normalized_kind == "stock_setup":
+        descriptor = build_ai_native_stock_setup_descriptor(raw_doc_id, include_body=True)
+        if descriptor is None:
+            abort(404)
+        return descriptor
+
+    if normalized_kind == "expert":
+        expert = next(
+            (item for item in stock_store.get("experts", []) if str(item.get("id") or "").strip() == raw_doc_id),
+            None,
+        )
+        if not isinstance(expert, dict):
+            abort(404)
+        return build_ai_native_expert_descriptor(expert, stock_store, include_body=True)
+
+    if normalized_kind == "data_snapshot":
+        if raw_doc_id == "stablecoins":
+            return build_ai_native_stablecoin_descriptor(include_body=True)
+        if raw_doc_id == "cdn":
+            return build_ai_native_cdn_descriptor(include_body=True)
+        if raw_doc_id in {"gpu_prices", "gpu-prices"}:
+            return build_ai_native_gpu_price_descriptor(include_body=True)
+        abort(404)
+
+    if normalized_kind in {"note", "file", "earnings_call"}:
+        symbol, item_id = parse_ai_native_symbol_scoped_doc_id(raw_doc_id)
+        entry = ensure_stock_entry(stock_store, symbol)
+        note_lookup = {
+            str(note.get("id") or "").strip(): note
+            for note in entry.get("notes", [])
+            if isinstance(note, dict) and str(note.get("id") or "").strip()
+        }
+
+        if normalized_kind == "note":
+            note = next((item for item in entry.get("notes", []) if str(item.get("id") or "").strip() == item_id), None)
+            if not isinstance(note, dict):
+                abort(404)
+            return build_ai_native_note_descriptor(symbol, note, include_body=True)
+
+        if normalized_kind == "file":
+            file_entry = next(
+                (item for item in entry.get("files", []) if str(item.get("id") or "").strip() == item_id),
+                None,
+            )
+            if not isinstance(file_entry, dict):
+                abort(404)
+            return build_ai_native_file_descriptor(symbol, file_entry, note_lookup, include_body=True)
+
+        call = next(
+            (item for item in entry.get("earnings_calls", []) if str(item.get("id") or "").strip() == item_id),
+            None,
+        )
+        if not isinstance(call, dict):
+            abort(404)
+        return build_ai_native_earnings_call_descriptor(symbol, call, include_body=True)
+
+    if normalized_kind == "transcript":
+        transcript = next(
+            (
+                item
+                for item in stock_store.get("transcripts", [])
+                if str(item.get("id") or "").strip() == raw_doc_id
+            ),
+            None,
+        )
+        if not isinstance(transcript, dict):
+            abort(404)
+        return build_ai_native_transcript_descriptor(transcript, include_body=True)
+
+    abort(404)
+
+
+def build_ai_native_manifest_payload(
+    *,
+    kind: str = "",
+    symbol: str = "",
+    query: str = "",
+    limit: int = 0,
+    materialize_assets: bool = False,
+) -> dict[str, Any]:
+    all_documents = build_ai_native_manifest_documents()
+    filtered_documents = filter_ai_native_documents(
+        all_documents,
+        kind=kind,
+        symbol=symbol,
+        query=query,
+        limit=limit,
+    )
+
+    public_documents: list[dict[str, Any]] = []
+    for descriptor in filtered_documents:
+        if materialize_assets:
+            ensure_ai_native_document_asset(
+                resolve_ai_native_document_descriptor(descriptor["kind"], descriptor["doc_id"])
+            )
+        public_documents.append(build_ai_native_public_descriptor(descriptor))
+
+    url_templates = build_ai_native_url_templates()
+    payload = {
+        "version": 1,
+        "generated_at": now_iso(),
+        "bootstrap_url": url_templates["bootstrap_url"],
+        "agent_bootstrap_url": url_templates["agent_bootstrap_url"],
+        "readme_url": url_for("ai_native_readme_markdown"),
+        "search_url": url_for("ai_native_search_json"),
+        "context_pack_url": url_for("ai_native_context_pack_json"),
+        "timeline_analysis_url": url_for("ai_analysis_timeline_json"),
+        "compare_analysis_url": url_for("ai_analysis_compare_json"),
+        "data_manifest_url": url_for("ai_native_data_manifest_json"),
+        "search_url_template": url_templates["search_url_template"],
+        "context_pack_url_template": url_templates["context_pack_url_template"],
+        "timeline_analysis_url_template": url_templates["timeline_analysis_url_template"],
+        "compare_analysis_url_template": url_templates["compare_analysis_url_template"],
+        "brief_url_template": url_templates["brief_url_template"],
+        "manifest_markdown_url": url_for("ai_native_manifest_markdown"),
+        "experts_json_url": url_for("ai_native_experts_json"),
+        "experts_markdown_url": url_for("ai_native_experts_markdown"),
+        "bundle_markdown_url": url_for("ai_native_scope_bundle_markdown"),
+        "stablecoins_json_url": url_for("ai_native_stablecoin_data_json"),
+        "stablecoins_markdown_url": url_for("ai_native_stablecoin_data_markdown"),
+        "cdn_json_url": url_for("ai_native_cdn_data_json"),
+        "cdn_markdown_url": url_for("ai_native_cdn_data_markdown"),
+        "applovin_json_url": url_for("ai_native_applovin_data_json"),
+        "applovin_markdown_url": url_for("ai_native_applovin_data_markdown"),
+        "gpu_prices_json_url": url_for("ai_native_gpu_price_data_json"),
+        "gpu_prices_markdown_url": url_for("ai_native_gpu_price_data_markdown"),
+        "time_schema": build_ai_native_time_schema(),
+        "filters": {
+            "kind": str(kind or ""),
+            "symbol": normalize_stock_symbol(symbol) or "",
+            "query": str(query or "").strip(),
+            "limit": limit if limit > 0 else 0,
+            "materialize_assets": materialize_assets,
+        },
+        "counts": {
+            "all_documents": len(all_documents),
+            "filtered_documents": len(filtered_documents),
+            "by_kind": build_ai_native_kind_counts(filtered_documents),
+        },
+        "documents": public_documents,
+    }
+    materialize_ai_native_support_files(payload)
+    return payload
+
+
+def build_ai_native_manifest_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# AI Native Manifest",
+        "",
+        f"- generated_at: {payload.get('generated_at') or ''}",
+        f"- filtered_documents: {payload.get('counts', {}).get('filtered_documents', 0)}",
+        f"- all_documents: {payload.get('counts', {}).get('all_documents', 0)}",
+        f"- bootstrap_url: {payload.get('bootstrap_url') or ''}",
+        f"- readme_url: {payload.get('readme_url') or ''}",
+        f"- brief_url_template: {payload.get('brief_url_template') or ''}",
+        f"- experts_json_url: {payload.get('experts_json_url') or ''}",
+        f"- bundle_markdown_url: {payload.get('bundle_markdown_url') or ''}",
+        "",
+        "## Filters",
+        f"- kind: {payload.get('filters', {}).get('kind') or 'all'}",
+        f"- symbol: {payload.get('filters', {}).get('symbol') or 'all'}",
+        f"- query: {payload.get('filters', {}).get('query') or 'none'}",
+        "",
+        "## Documents",
+    ]
+
+    documents = payload.get("documents", []) if isinstance(payload.get("documents"), list) else []
+    if not documents:
+        lines.extend(["- No documents matched the current filters.", ""])
+        return "\n".join(lines).strip() + "\n"
+
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        lines.extend(
+            [
+                f"### [{item.get('kind')}] {item.get('title') or ''}",
+                f"- doc_id: {item.get('doc_id') or ''}",
+                f"- symbols: {'；'.join(item.get('symbols', [])) or 'none'}",
+                f"- tags: {', '.join(item.get('tags', [])) or 'none'}",
+                f"- activity_date: {item.get('activity_date') or ''}",
+                f"- display_time: {item.get('display_time') or ''}",
+                f"- updated_at: {item.get('updated_at') or ''}",
+                f"- markdown_url: {item.get('markdown_url') or ''}",
+                f"- json_url: {item.get('json_url') or ''}",
+                f"- detail_url: {item.get('detail_url') or ''}",
+                f"- summary: {item.get('summary') or ''}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_ai_native_expert_directory_payload(
+    *,
+    symbol: str = "",
+    query: str = "",
+    limit: int = 0,
+    materialize_assets: bool = False,
+) -> dict[str, Any]:
+    stock_store = load_stock_store()
+    documents = [
+        build_ai_native_expert_descriptor(expert, stock_store, include_body=False)
+        for expert in stock_store.get("experts", [])
+        if isinstance(expert, dict)
+    ]
+    documents.sort(
+        key=lambda item: (float(item.get("sort_value") or 0.0), str(item.get("title") or "")),
+        reverse=True,
+    )
+    filtered = filter_ai_native_documents(documents, kind="expert", symbol=symbol, query=query, limit=limit)
+    public_experts: list[dict[str, Any]] = []
+    for descriptor in filtered:
+        if materialize_assets:
+            ensure_ai_native_document_asset(resolve_ai_native_document_descriptor("expert", descriptor["doc_id"]))
+        public_experts.append(build_ai_native_public_descriptor(descriptor))
+
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "bootstrap_url": url_for("ai_native_bootstrap_json"),
+        "readme_url": url_for("ai_native_readme_markdown"),
+        "brief_url_template": build_ai_native_url_templates()["brief_url_template"],
+        "manifest_url": url_for("ai_native_manifest_json"),
+        "manifest_markdown_url": url_for("ai_native_manifest_markdown"),
+        "time_schema": build_ai_native_time_schema(),
+        "filters": {
+            "symbol": normalize_stock_symbol(symbol) or "",
+            "query": str(query or "").strip(),
+            "limit": limit if limit > 0 else 0,
+            "materialize_assets": materialize_assets,
+        },
+        "counts": {
+            "all_experts": len(documents),
+            "filtered_experts": len(filtered),
+        },
+        "experts": public_experts,
+    }
+
+
+def build_ai_native_expert_directory_markdown(payload: dict[str, Any]) -> str:
+    filters = payload.get("filters", {}) if isinstance(payload.get("filters"), dict) else {}
+    experts = payload.get("experts", []) if isinstance(payload.get("experts"), list) else []
+    lines = [
+        "# AI Expert Directory",
+        "",
+        f"- generated_at: {payload.get('generated_at') or ''}",
+        f"- symbol: {filters.get('symbol') or 'all'}",
+        f"- query: {filters.get('query') or 'none'}",
+        f"- filtered_experts: {payload.get('counts', {}).get('filtered_experts', 0)}",
+        f"- all_experts: {payload.get('counts', {}).get('all_experts', 0)}",
+        f"- bootstrap_url: {payload.get('bootstrap_url') or ''}",
+        f"- readme_url: {payload.get('readme_url') or ''}",
+        f"- brief_url_template: {payload.get('brief_url_template') or ''}",
+        f"- manifest_url: {payload.get('manifest_url') or ''}",
+        "",
+        "## Usage",
+        "- 先按 symbol 或 query 缩小专家范围。",
+        "- 再读取某个 expert 的 markdown_url 或 json_url。",
+        "- 如果需要继续追到原始资料，优先读取 expert 文档 JSON 里的 `document.extra.related_resources`。",
+        "",
+        "## Experts",
+    ]
+
+    if not experts:
+        lines.extend(["- No expert matched the current filters.", ""])
+        return "\n".join(lines).strip() + "\n"
+
+    for item in experts:
+        if not isinstance(item, dict):
+            continue
+        lines.extend(
+            [
+                f"### {item.get('title') or item.get('doc_id') or 'Expert'}",
+                f"- doc_id: {item.get('doc_id') or ''}",
+                f"- symbols: {'；'.join(item.get('symbols', [])) or 'none'}",
+                f"- tags: {', '.join(item.get('tags', [])) or 'none'}",
+                f"- activity_date: {item.get('activity_date') or ''}",
+                f"- display_time: {item.get('display_time') or ''}",
+                f"- updated_at: {item.get('updated_at') or ''}",
+                f"- markdown_url: {item.get('markdown_url') or ''}",
+                f"- json_url: {item.get('json_url') or ''}",
+                f"- detail_url: {item.get('detail_url') or ''}",
+                f"- summary: {item.get('summary') or ''}",
+                "",
+            ]
+        )
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def parse_ai_native_scope_request() -> tuple[dict[str, Any], bool]:
+    stock_store = load_stock_store()
+    raw_symbols = str(request.args.get("symbols") or request.args.get("symbol") or "").strip()
+    raw_content_kinds = str(request.args.get("content_kinds") or "").strip()
+    start_date = str(request.args.get("start_date") or "").strip()
+    end_date = str(request.args.get("end_date") or "").strip()
+    include_setups = is_truthy_flag(request.args.get("include_setups")) or bool(raw_symbols)
+
+    scope_settings = normalize_ai_scope_settings(
+        {
+            "use_stock_scope": bool(raw_symbols),
+            "symbols_text": raw_symbols,
+            "use_date_scope": bool(start_date or end_date),
+            "start_date": start_date,
+            "end_date": end_date,
+            "content_kinds": raw_content_kinds or list(AI_NATIVE_SCOPE_SUPPORTED_KINDS),
+        },
+        known_symbols=set(list_stock_symbols(stock_store)),
+    )
+    return scope_settings, include_setups
+
+
+def render_ai_native_scope_bundle_markdown(
+    scope_settings: dict[str, Any],
+    *,
+    include_setups: bool = False,
+    per_kind_limit: int = AI_NATIVE_DEFAULT_SCOPE_LIMIT,
+) -> str:
+    reports = collect_reports()
+    stock_store = load_stock_store()
+    materials = collect_ai_scope_materials(stock_store, reports, scope_settings=scope_settings)
+    scope_summary = build_ai_scope_summary(scope_settings, materials)
+    per_kind_limit = min(max(int(per_kind_limit or AI_NATIVE_DEFAULT_SCOPE_LIMIT), 1), 50)
+
+    lines = [
+        "# AI Scope Bundle",
+        "",
+        f"- generated_at: {now_iso()}",
+        f"- {scope_summary['stock_label']}",
+        f"- {scope_summary['time_label']}",
+        f"- {scope_summary['content_label']}",
+        f"- report_count: {materials['report_count']}",
+        f"- note_count: {materials['note_count']}",
+        f"- file_count: {materials['file_count']}",
+        f"- earnings_call_count: {materials['earnings_call_count']}",
+        f"- transcript_count: {materials['transcript_count']}",
+        "",
+    ]
+
+    if include_setups:
+        scoped_symbols = materials.get("included_symbols", []) or normalize_stock_symbol_list(scope_settings.get("symbols"))
+        lines.append("## Stock Setups")
+        if scoped_symbols:
+            for symbol in scoped_symbols[:per_kind_limit]:
+                descriptor = build_ai_native_stock_setup_descriptor(symbol, include_body=True)
+                if descriptor is None:
+                    continue
+                lines.extend(
+                    [
+                        f"### {symbol}",
+                        f"- markdown_url: {build_ai_native_document_urls('stock_setup', symbol)['markdown_url']}",
+                        "",
+                        trim_note_content(str(descriptor.get('body_markdown') or '')[:12000]),
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(["- No stock setup matched the current scope.", ""])
+
+    section_specs = [
+        ("Reports", "report", materials["reports"], lambda item: item["filename"], lambda item: read_report_text(REPORTS_DIR / item["filename"]).strip()),
+        ("Notes", "note", materials["notes"], lambda item: f"{item['symbol']}--{item['id']}", lambda item: str(item.get("content_text") or "").strip()),
+        ("Files", "file", materials["files"], lambda item: f"{item['symbol']}--{item['id']}", lambda item: str(item.get("content_text") or item.get("description") or "").strip()),
+        ("Earnings Calls", "earnings_call", materials["earnings_calls"], lambda item: f"{item['symbol']}--{item['id']}", lambda item: str(item.get("transcript_text") or item.get("summary") or "").strip()),
+        ("Transcripts", "transcript", materials["transcripts"], lambda item: str(item.get("id") or ""), lambda item: str(item.get("transcript_text") or item.get("summary") or "").strip()),
+    ]
+
+    for heading, kind_name, items, doc_id_builder, text_builder in section_specs:
+        lines.append(f"## {heading}")
+        if not items:
+            lines.extend(["- No items matched the current scope.", ""])
+            continue
+
+        for item in items[:per_kind_limit]:
+            doc_id = doc_id_builder(item)
+            urls = build_ai_native_document_urls(kind_name, doc_id)
+            raw_text = text_builder(item)
+            text_block = trim_note_content(raw_text[:12000]) if raw_text else ""
+            symbol_label = (
+                "；".join(item.get("matched_symbols", []))
+                if kind_name == "report"
+                else "；".join(item.get("linked_symbols", []))
+                if kind_name == "transcript"
+                else item.get("symbol") or ""
+            )
+            lines.extend(
+                [
+                    f"### {item.get('title') or doc_id}",
+                    f"- kind: {kind_name}",
+                    f"- doc_id: {doc_id}",
+                    f"- detail_url: {item.get('detail_url') or ''}",
+                    f"- markdown_url: {urls['markdown_url']}",
+                    f"- json_url: {urls['json_url']}",
+                    f"- symbols: {symbol_label or 'none'}",
+                    f"- summary: {item.get('summary') or ''}",
+                    "",
+                    text_block or "No正文 available for this item.",
+                    "",
+                ]
+            )
+
+    return "\n".join(lines).strip() + "\n"
+
+
 def build_ai_recent_history(session: dict[str, Any], limit: int = 8) -> str:
     messages = session["messages"][-limit:]
     history_lines: list[str] = []
@@ -10609,6 +22564,33 @@ def build_mindmap_similarity_tokens(value: str) -> set[str]:
         for index in range(min(len(compact) - 2, 360))
         if compact[index : index + 3]
     }
+
+
+def build_mindmap_focus_state(value: str) -> dict[str, Any]:
+    normalized = normalize_mindmap_generation_brief_text(value, limit=MINDMAP_BRIEF_PROMPT_CHAR_LIMIT)
+    keywords = ordered_unique(
+        keyword.casefold()
+        for keyword in re.findall(r"[A-Za-z][A-Za-z0-9.+-]{2,}|[\u4e00-\u9fff]{2,8}", normalized)
+        if keyword.strip()
+    )[:24]
+    return {
+        "text": normalized,
+        "tokens": build_mindmap_similarity_tokens(normalized),
+        "keywords": keywords,
+    }
+
+
+def compute_mindmap_focus_relevance(value: str, *, focus_state: dict[str, Any]) -> tuple[float, int]:
+    focus_tokens = focus_state.get("tokens") or set()
+    if not focus_tokens:
+        return 0.0, 0
+
+    item_tokens = build_mindmap_similarity_tokens(value)
+    overlap_ratio = len(item_tokens & focus_tokens) / max(len(focus_tokens), 1)
+    lowered_value = str(value or "").casefold()
+    keyword_hits = sum(1 for keyword in focus_state.get("keywords", []) if keyword and keyword in lowered_value)
+    score = min(0.96, (overlap_ratio * 1.8) + (min(keyword_hits, 5) * 0.11))
+    return round(score, 4), keyword_hits
 
 
 def detect_mindmap_material_density(value: str) -> float:
@@ -10739,7 +22721,7 @@ def build_mindmap_material_items(materials: dict[str, Any]) -> list[dict[str, An
     return items
 
 
-def score_mindmap_material(item: dict[str, Any], *, latest_sort_value: float) -> dict[str, Any]:
+def score_mindmap_material(item: dict[str, Any], *, latest_sort_value: float, focus_state: dict[str, Any] | None = None) -> dict[str, Any]:
     combined_text = " ".join(
         value
         for value in [
@@ -10760,10 +22742,14 @@ def score_mindmap_material(item: dict[str, Any], *, latest_sort_value: float) ->
         recency_boost = max(0.0, 1 - (age_days / max(MINDMAP_RECENT_WINDOW_DAYS, 1))) * 0.42
     evidence_boost = min(evidence_hits, 4) * 0.18
     conflict_boost = min(conflict_hits, 3) * 0.22
+    focus_score = 0.0
+    focus_keyword_hits = 0
+    if isinstance(focus_state, dict) and focus_state.get("text"):
+        focus_score, focus_keyword_hits = compute_mindmap_focus_relevance(normalized_text, focus_state=focus_state)
     base_priority = float(MINDMAP_KIND_PRIORITY.get(str(item.get("kind") or ""), 0.8))
     low_signal_penalty = 0.38 if density_score < 0.16 and evidence_hits == 0 and conflict_hits == 0 else 0.0
     priority_score = round(
-        base_priority + density_score + recency_boost + evidence_boost + conflict_boost - low_signal_penalty,
+        base_priority + density_score + recency_boost + evidence_boost + conflict_boost + focus_score - low_signal_penalty,
         4,
     )
     return {
@@ -10777,6 +22763,8 @@ def score_mindmap_material(item: dict[str, Any], *, latest_sort_value: float) ->
         "recency_boost": round(recency_boost, 4),
         "evidence_boost": round(evidence_boost, 4),
         "conflict_boost": round(conflict_boost, 4),
+        "focus_score": focus_score,
+        "focus_keyword_hits": int(focus_keyword_hits),
         "priority_score": priority_score,
     }
 
@@ -10820,11 +22808,12 @@ def mindmap_material_duplicate_reason(candidate: dict[str, Any], keeper: dict[st
     return None
 
 
-def curate_mindmap_materials(materials: dict[str, Any]) -> dict[str, Any]:
+def curate_mindmap_materials(materials: dict[str, Any], *, focus_text: str = "") -> dict[str, Any]:
     raw_items = build_mindmap_material_items(materials)
     latest_sort_value = max((float(item.get("sort_value") or 0) for item in raw_items), default=0.0)
+    focus_state = build_mindmap_focus_state(focus_text)
     scored_items = [
-        score_mindmap_material(item, latest_sort_value=latest_sort_value)
+        score_mindmap_material(item, latest_sort_value=latest_sort_value, focus_state=focus_state)
         for item in raw_items
     ]
     scored_items.sort(
@@ -10888,6 +22877,8 @@ def curate_mindmap_materials(materials: dict[str, Any]) -> dict[str, Any]:
             flags.append("strong_evidence")
         if float(item.get("conflict_boost") or 0) >= 0.22:
             flags.append("conflict")
+        if float(item.get("focus_score") or 0) >= 0.2:
+            flags.append("focus")
         if float(item.get("density_score") or 0) >= 0.55:
             flags.append("dense")
         item["weight_flags"] = flags
@@ -10933,6 +22924,7 @@ def curate_mindmap_materials(materials: dict[str, Any]) -> dict[str, Any]:
             "recent_boosted_count": sum(1 for item in selected if "recent" in item.get("weight_flags", [])),
             "strong_evidence_boosted_count": sum(1 for item in selected if "strong_evidence" in item.get("weight_flags", [])),
             "conflict_boosted_count": sum(1 for item in selected if "conflict" in item.get("weight_flags", [])),
+            "focus_boosted_count": sum(1 for item in selected if "focus" in item.get("weight_flags", [])),
         },
     }
 
@@ -10951,6 +22943,7 @@ def build_mindmap_research_bundle(
     record_id: str,
     *,
     scope_summary: dict[str, Any],
+    generation_prompt: str,
     materials: dict[str, Any],
     curated: dict[str, Any],
 ) -> Path:
@@ -10983,6 +22976,9 @@ def build_mindmap_research_bundle(
         "- 如果范围里包含电话会议，要把它视作管理层原话/最新口径，与日报、笔记和其他转录交叉验证。",
         "- 已对重复观点、重复电话会议/转录和低信息密度资料做过压缩；模型应优先参考入选资料，不要把重复内容当成额外证据。",
         "- 已提高近期资料、强证据资料、存在冲突/对冲资料的权重；最终结论仍需按证据强弱决定。",
+        "",
+        "## 用户额外要求",
+        generation_prompt or "（本次未额外填写归纳方向，按默认研究导图逻辑整理。）",
         "",
     ]
 
@@ -11045,6 +23041,7 @@ def build_mindmap_reproducibility_fingerprint(
     *,
     scope_settings: dict[str, Any],
     scope_summary: dict[str, Any],
+    generation_prompt: str,
     materials: dict[str, Any],
     curated: dict[str, Any],
     knowledge_text: str,
@@ -11060,6 +23057,8 @@ def build_mindmap_reproducibility_fingerprint(
         "bundle_name": bundle_path.name,
         "scope_digest": sha256_text(serialize_stable_json(scope_settings)),
         "scope_summary_digest": sha256_text(serialize_stable_json(scope_summary)),
+        "generation_prompt": generation_prompt,
+        "generation_prompt_digest": sha256_text(generation_prompt),
         "material_digest": sha256_text(serialize_stable_json(curated.get("raw_manifest", []))),
         "knowledge_digest": sha256_text(knowledge_text),
         "raw_material_count": int(stats.get("raw_material_count") or 0),
@@ -11100,6 +23099,20 @@ def build_mindmap_selected_source_roster_lines(selected_sources: list[dict[str, 
             f"标签: {'/'.join(source.get('weight_flags', [])) or '常规'}"
         )
         for source in selected_sources
+    )
+
+def build_mindmap_generation_prompt_block(generation_prompt: str) -> str:
+    normalized_prompt = normalize_mindmap_generation_prompt(generation_prompt)
+    if not normalized_prompt:
+        return ""
+
+    return (
+        "用户额外要求（优先归纳方向）：\n"
+        f"{normalized_prompt}\n\n"
+        "处理要求：\n"
+        "1. 在不违背资料正文和既有硬性约束的前提下，优先围绕这项要求组织结构、比较轴、时间线和待验证项。\n"
+        "2. 如果资料不足以支撑这项要求，必须明确写出证据不足、缺口位置或待验证问题，不能强行下结论。\n"
+        "3. 这项要求是聚焦方向，不会覆盖来源引用、保留冲突、时间顺序和 JSON schema 等硬约束。\n\n"
     )
 
 
@@ -11437,6 +23450,20 @@ def build_ai_page_context(
         "ai_scope_settings": active_scope_settings,
         "ai_scope_summary": scope_summary,
         "ai_scope_preview": scope_preview,
+        "ai_agent_write_summary": build_ai_agent_ops_summary(load_ai_agent_ops_store()),
+        "ai_agent_endpoints": {
+            "bootstrap_url": url_for("ai_agent_bootstrap_json"),
+            "search_url": url_for("ai_agent_search_tool_json"),
+            "context_pack_url": url_for("ai_agent_context_pack_tool_json"),
+            "timeline_url": url_for("ai_analysis_timeline_json"),
+            "compare_url": url_for("ai_analysis_compare_json"),
+            "artifact_bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+            "artifact_list_url": url_for("ai_artifact_list_json"),
+            "job_list_url": url_for("ai_job_list_json"),
+            "operations_url": url_for("ai_agent_write_operations_json"),
+            "clipboard_preview_url": url_for("ai_agent_clipboard_preview_json"),
+            "stock_note_preview_url": url_for("ai_agent_stock_note_preview_json"),
+        },
         "default_export_symbol": stock_options[0]["symbol"] if stock_options else "",
         "current_ai_url": url_for("ai_workspace", session=active_session["id"]) if active_session else url_for("ai_workspace"),
     }
@@ -11506,6 +23533,28 @@ def normalize_mindmap_confidence(raw_value: Any) -> str:
     return "medium"
 
 
+def normalize_mindmap_structure_kind(value: Any, *, fallback: str = "theme_bundle") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in MINDMAP_STRUCTURE_KIND_META:
+        return candidate
+    return fallback
+
+
+def normalize_mindmap_text_item_list(
+    raw_items: Any,
+    *,
+    limit: int = 6,
+    item_limit: int = 180,
+) -> list[str]:
+    values = raw_items if isinstance(raw_items, list) else []
+    items: list[str] = []
+    for raw_item in values:
+        item = re.sub(r"\s+", " ", str(raw_item or "").strip())[:item_limit]
+        if item:
+            items.append(item)
+    return items[:limit]
+
+
 def normalize_mindmap_node(
     raw_node: Any,
     *,
@@ -11513,7 +23562,7 @@ def normalize_mindmap_node(
     depth: int = 0,
     valid_source_refs: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(raw_node, dict) or depth > 4:
+    if not isinstance(raw_node, dict) or depth > max(MINDMAP_MAX_NODE_DEPTH - 1, 1):
         return None
 
     label = re.sub(r"\s+", " ", str(raw_node.get("label") or "").strip())[:80]
@@ -11802,18 +23851,11 @@ def normalize_mindmap_payload(
         return None
 
     node_ids = collect_mindmap_node_ids(root)
-    structure_kind = str(raw_payload.get("structure_kind") or "").strip().lower()
-    if structure_kind not in MINDMAP_STRUCTURE_KIND_META:
-        structure_kind = "theme_bundle"
+    structure_kind = normalize_mindmap_structure_kind(raw_payload.get("structure_kind"))
 
     title = re.sub(r"\s+", " ", str(raw_payload.get("title") or "").strip())[:120] or root["label"]
     summary = re.sub(r"\s+", " ", str(raw_payload.get("summary") or "").strip())[:600]
-    raw_insights = raw_payload.get("insights", [])
-    insights = [
-        item
-        for raw_item in raw_insights if isinstance(raw_insights, list)
-        if (item := re.sub(r"\s+", " ", str(raw_item or "").strip())[:180])
-    ][:6]
+    insights = normalize_mindmap_text_item_list(raw_payload.get("insights"), limit=6, item_limit=180)
     timeline = normalize_mindmap_timeline(
         raw_payload.get("timeline_highlights"),
         valid_source_refs=valid_source_refs,
@@ -11903,6 +23945,10 @@ def normalize_mindmap_fingerprint(raw_fingerprint: Any) -> dict[str, Any]:
         "prompt_version": str(source.get("prompt_version") or "").strip()[:80],
         "schema_version": str(source.get("schema_version") or "").strip()[:80],
         "bundle_name": str(source.get("bundle_name") or "").strip()[:160],
+        "generation_prompt": normalize_mindmap_generation_prompt(source.get("generation_prompt")),
+        "generation_prompt_digest": str(source.get("generation_prompt_digest") or "").strip()[:80],
+        "generation_brief": normalize_mindmap_generation_brief(source.get("generation_brief")),
+        "generation_brief_digest": str(source.get("generation_brief_digest") or "").strip()[:80],
         "scope_digest": str(source.get("scope_digest") or "").strip()[:80],
         "scope_summary_digest": str(source.get("scope_summary_digest") or "").strip()[:80],
         "material_digest": str(source.get("material_digest") or "").strip()[:80],
@@ -11917,6 +23963,7 @@ def normalize_mindmap_fingerprint(raw_fingerprint: Any) -> dict[str, Any]:
         "recent_boosted_count": max(0, int(source.get("recent_boosted_count") or 0)),
         "strong_evidence_boosted_count": max(0, int(source.get("strong_evidence_boosted_count") or 0)),
         "conflict_boosted_count": max(0, int(source.get("conflict_boosted_count") or 0)),
+        "focus_boosted_count": max(0, int(source.get("focus_boosted_count") or 0)),
         "selected_sources": selected_sources,
         "validation": validation,
         "material_mix": {
@@ -11953,6 +24000,12 @@ def normalize_mindmap_record(raw_record: Any) -> dict[str, Any] | None:
 
     scope_summary = normalize_mindmap_scope_summary(raw_record.get("scope_summary"))
     fingerprint = normalize_mindmap_fingerprint(raw_record.get("fingerprint"))
+    generation_prompt = normalize_mindmap_generation_prompt(
+        raw_record.get("generation_prompt") or fingerprint.get("generation_prompt") or ""
+    )
+    generation_brief = normalize_mindmap_generation_brief(
+        raw_record.get("generation_brief") or fingerprint.get("generation_brief") or {}
+    )
     summary = re.sub(r"\s+", " ", str(raw_record.get("summary") or "").strip())[:600]
     if not summary and map_payload:
         summary = map_payload["summary"]
@@ -11968,6 +24021,8 @@ def normalize_mindmap_record(raw_record: Any) -> dict[str, Any] | None:
         "reasoning_effort": str(raw_record.get("reasoning_effort") or "").strip()[:20],
         "scope_settings": scope_settings,
         "scope_summary": scope_summary,
+        "generation_prompt": generation_prompt,
+        "generation_brief": generation_brief,
         "fingerprint": fingerprint,
         "summary": summary,
         "map_payload": map_payload,
@@ -12003,10 +24058,7 @@ def load_mindmap_store() -> dict[str, Any]:
 
 def save_mindmap_store(store: dict[str, Any]) -> None:
     normalized = normalize_mindmap_store(store)
-    MINDMAP_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = MINDMAP_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(MINDMAP_STORE_PATH)
+    write_json_atomic(MINDMAP_STORE_PATH, normalized)
 
 
 def get_mindmap_record(store: dict[str, Any], record_id: str) -> dict[str, Any]:
@@ -12341,10 +24393,12 @@ def validate_mindmap_research_payload(
 def build_mindmap_plan_prompt(
     *,
     scope_summary: dict[str, Any],
+    generation_prompt: str,
     knowledge_text: str,
     fingerprint: dict[str, Any],
 ) -> str:
     source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
     return (
         "你现在在做研究导图的第一步：先梳理结构，再决定成图骨架。\n"
         "目标：基于资料先抽出主题主线、比较维度、时间主线、冲突点和待验证问题，形成一张可复用的骨架图。\n"
@@ -12384,12 +24438,14 @@ def build_mindmap_plan_prompt(
 def build_mindmap_finalize_prompt(
     *,
     scope_summary: dict[str, Any],
+    generation_prompt: str,
     knowledge_text: str,
     plan_payload: dict[str, Any],
     fingerprint: dict[str, Any],
 ) -> str:
     source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
     plan_text = json.dumps(plan_payload, ensure_ascii=False, indent=2)
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
     return (
         "你现在在做研究导图的第二步：在既有骨架上补齐研究合法的成图结果。\n"
         "目标：把骨架图补成一张可用于研究回看、横向比较和后续验证的正式导图。\n"
@@ -12420,6 +24476,7 @@ def build_mindmap_finalize_prompt(
 
 def build_mindmap_repair_prompt(
     *,
+    generation_prompt: str,
     knowledge_text: str,
     current_payload: dict[str, Any],
     validation: dict[str, list[str]],
@@ -12427,6 +24484,7 @@ def build_mindmap_repair_prompt(
 ) -> str:
     source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
     payload_text = json.dumps(current_payload, ensure_ascii=False, indent=2)
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
     error_lines = "\n".join(f"- {item}" for item in validation.get("errors", [])) or "- 没有明确错误说明"
     warning_lines = "\n".join(f"- {item}" for item in validation.get("warnings", [])) or "- 无"
     return (
@@ -12439,6 +24497,330 @@ def build_mindmap_repair_prompt(
         "4. 如果缺少 comparison_axes 或 verification_targets，要优先补齐能通过校验的最小可用版本。\n"
         "5. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n\n"
         f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"必须修复的问题：\n{error_lines}\n\n"
+        f"可顺手优化的问题：\n{warning_lines}\n\n"
+        f"当前 JSON：\n{payload_text}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空。）'}\n"
+    )
+
+
+def build_mindmap_weight_flag_labels(flags: list[str]) -> list[str]:
+    mapping = {
+        "recent": "近期资料",
+        "strong_evidence": "强证据",
+        "conflict": "存在冲突/对冲",
+        "focus": "贴近摘要主线",
+        "dense": "信息密度高",
+    }
+    return [mapping[item] for item in flags if item in mapping]
+
+
+def build_mindmap_generation_brief_block(generation_brief: dict[str, Any] | None) -> str:
+    brief = normalize_mindmap_generation_brief(generation_brief or {})
+    if not brief.get("text"):
+        return ""
+
+    source_name = brief.get("original_name") or brief.get("stored_name") or "未命名摘要文件"
+    return (
+        "用户上传的摘要/周报片段（这是本次导图的主叙事底稿）：\n"
+        f"- 文件：{source_name}\n"
+        f"- 摘要：{brief.get('summary') or '无'}\n\n"
+        f"{normalize_mindmap_generation_brief_text(brief.get('text'), limit=MINDMAP_BRIEF_PROMPT_CHAR_LIMIT)}\n\n"
+        "处理要求：\n"
+        "1. 先把这份摘要拆成多条逻辑链，再判断每条链的层数和节点关系；不同链条允许深度不一样，不要强行压成统一三层。\n"
+        "2. 对每条逻辑链，优先识别：起点前提、关键变化、传导环节、中间约束、结果落点、待验证跳跃。\n"
+        "3. 如果某条链更适合 2 层、3 层、4 层或 5 层，就按真实逻辑展开；不要为了美观把不同长度的链条硬拉齐。\n"
+        "4. 再回到资料库里，为这些链条补支撑、修正、反例、时间线和交叉关联；缺证据的部分要保留为 question/risk/verification_targets。\n"
+        "5. 最终导图应尽量体现用户原始思考链，而不是只复述资料库摘要。\n\n"
+    )
+
+
+def build_mindmap_research_bundle(
+    record_id: str,
+    *,
+    scope_summary: dict[str, Any],
+    generation_prompt: str,
+    generation_brief: dict[str, Any] | None = None,
+    materials: dict[str, Any],
+    curated: dict[str, Any],
+) -> Path:
+    bundle_path = MINDMAP_CONTEXT_DIR / f"{record_id}-research-bundle.md"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    stats = curated.get("stats", {})
+    selected_items = curated.get("items", [])
+    timeline_items = sorted(
+        selected_items,
+        key=lambda item: (str(item.get("activity_date") or ""), float(item.get("sort_value") or 0)),
+    )
+    brief = normalize_mindmap_generation_brief(generation_brief or {})
+
+    lines = [
+        "# 研究导图知识包",
+        "",
+        "这份文件由网页后端自动生成，供研究导图的两步式结构化整理使用。",
+        "",
+        "## 当前范围",
+        f"- 生成时间: {now_iso()}",
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}",
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}",
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}",
+        f"- 原始资料数: {stats.get('raw_material_count', 0)}",
+        f"- 入选资料数: {stats.get('selected_material_count', 0)}",
+        f"- 压缩重复资料: {stats.get('duplicate_compressed_count', 0)}",
+        f"- 丢弃低信息资料: {stats.get('low_signal_dropped_count', 0)}",
+        "",
+        "## 生成侧重点",
+        "- 导图必须同时表达主题结构、资料互补/冲突关系和时间演化。",
+        "- 如果范围里包含电话会议，要把它视作管理层原话/最新口径，与日报、笔记和其他转录交叉验证。",
+        "- 已对重复观点、重复电话会议/转录和低信息密度资料做过压缩；模型应优先参考入选资料，不要把重复内容当成额外证据。",
+        "- 已提高近期资料、强证据资料、存在冲突/对冲资料以及贴近摘要主线资料的权重；最终结论仍需按证据强弱决定。",
+        "",
+        "## 用户额外要求",
+        generation_prompt or "（本次未额外填写归纳方向，按默认研究导图逻辑整理。）",
+        "",
+    ]
+
+    if brief.get("text"):
+        lines.extend(
+            [
+                "## 用户上传的摘要底稿",
+                f"- 文件: {brief.get('original_name') or brief.get('stored_name') or '未命名摘要文件'}",
+                f"- 摘要: {brief.get('summary') or '无'}",
+                "",
+                brief.get("text") or "",
+                "",
+            ]
+        )
+
+    if timeline_items:
+        lines.append("## 按时间排序的入选资料")
+        for item in timeline_items:
+            symbol_label = " / ".join(item.get("symbols", [])) or "未限定股票"
+            lines.extend(
+                [
+                    f"- {item.get('activity_date') or '无日期'} | {item['source_ref']} | {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'}",
+                    f"  股票: {symbol_label}",
+                ]
+            )
+        lines.append("")
+
+    if selected_items:
+        lines.append("## 入选资料正文")
+        for item in selected_items:
+            flag_labels = build_mindmap_weight_flag_labels(item.get("weight_flags", []))
+            excerpt = trim_note_content(str(item.get("normalized_text") or ""), limit=1_300)
+            lines.extend(
+                [
+                    f"### {item['source_ref']} | {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'}",
+                    f"- source_key: {item.get('source_key') or ''}",
+                    f"- 日期: {item.get('activity_date') or item.get('display_time') or '无'}",
+                    f"- 股票: {' / '.join(item.get('symbols', [])) or '未限定'}",
+                    f"- 权重标签: {'；'.join(flag_labels) or '常规'}",
+                    f"- 摘要: {item.get('summary') or '无'}",
+                    "",
+                    excerpt or "（正文为空）",
+                    "",
+                ]
+            )
+            duplicates = item.get("compressed_duplicates", [])
+            if duplicates:
+                lines.append("合并的近似资料：")
+                for duplicate in duplicates[:6]:
+                    lines.append(
+                        f"- {duplicate.get('kind_label') or '资料'} | {duplicate.get('title') or '未命名'} | "
+                        f"{duplicate.get('activity_date') or '无日期'} | 原因: {duplicate.get('reason') or '近似重复'}"
+                    )
+                lines.append("")
+    else:
+        lines.extend(["## 入选资料正文", "- 当前没有足够资料进入导图生成。", ""])
+
+    if curated.get("dropped_low_signal"):
+        lines.append("## 已压缩的低信息资料")
+        for item in curated.get("dropped_low_signal", [])[:12]:
+            lines.append(
+                f"- {item.get('kind_label') or '资料'} | {item.get('title') or '未命名'} | "
+                f"{item.get('activity_date') or '无日期'}"
+            )
+        lines.append("")
+
+    bundle_path.write_text("\n".join(lines), encoding="utf-8")
+    return bundle_path
+
+
+def build_mindmap_reproducibility_fingerprint(
+    *,
+    scope_settings: dict[str, Any],
+    scope_summary: dict[str, Any],
+    generation_prompt: str,
+    generation_brief: dict[str, Any] | None = None,
+    materials: dict[str, Any],
+    curated: dict[str, Any],
+    knowledge_text: str,
+    bundle_path: Path,
+) -> dict[str, Any]:
+    stats = curated.get("stats", {})
+    selected_sources = curated.get("selected_manifest", [])[:36]
+    brief = normalize_mindmap_generation_brief(generation_brief or {})
+    return {
+        "generated_at": now_iso(),
+        "pipeline_version": MINDMAP_PIPELINE_VERSION,
+        "prompt_version": MINDMAP_PROMPT_VERSION,
+        "schema_version": MINDMAP_SCHEMA_VERSION,
+        "bundle_name": bundle_path.name,
+        "scope_digest": sha256_text(serialize_stable_json(scope_settings)),
+        "scope_summary_digest": sha256_text(serialize_stable_json(scope_summary)),
+        "generation_prompt": generation_prompt,
+        "generation_prompt_digest": sha256_text(generation_prompt),
+        "generation_brief": brief,
+        "generation_brief_digest": sha256_text(brief.get("text") or ""),
+        "material_digest": sha256_text(serialize_stable_json(curated.get("raw_manifest", []))),
+        "knowledge_digest": sha256_text(knowledge_text),
+        "raw_material_count": int(stats.get("raw_material_count") or 0),
+        "selected_material_count": int(stats.get("selected_material_count") or 0),
+        "duplicate_compressed_count": int(stats.get("duplicate_compressed_count") or 0),
+        "low_signal_dropped_count": int(stats.get("low_signal_dropped_count") or 0),
+        "recent_boosted_count": int(stats.get("recent_boosted_count") or 0),
+        "strong_evidence_boosted_count": int(stats.get("strong_evidence_boosted_count") or 0),
+        "conflict_boosted_count": int(stats.get("conflict_boosted_count") or 0),
+        "focus_boosted_count": int(stats.get("focus_boosted_count") or 0),
+        "selected_sources": selected_sources,
+        "validation": {
+            "warnings": [],
+            "errors": [],
+            "repair_attempted": False,
+        },
+        "plan_digest": "",
+        "final_digest": "",
+        "material_selection_digest": sha256_text(serialize_stable_json(selected_sources)),
+        "material_mix": {
+            "report_count": int(materials.get("report_count") or 0),
+            "note_count": int(materials.get("note_count") or 0),
+            "file_count": int(materials.get("file_count") or 0),
+            "earnings_call_count": int(materials.get("earnings_call_count") or 0),
+            "transcript_count": int(materials.get("transcript_count") or 0),
+        },
+    }
+
+
+def build_mindmap_plan_prompt(
+    *,
+    scope_summary: dict[str, Any],
+    generation_prompt: str,
+    generation_brief: dict[str, Any] | None = None,
+    knowledge_text: str,
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
+    brief_block = build_mindmap_generation_brief_block(generation_brief)
+    return (
+        "你现在在做研究导图的第一步：先梳理结构，再决定成图骨架。\n"
+        "目标：基于资料先抽出主题主线、比较维度、时间主线、冲突点和待验证问题，形成一张可复用的骨架图。\n"
+        "重要约束：\n"
+        "1. 只能基于下方资料正文，不得补外部事实。\n"
+        "2. 这是第一步，重点是结构判断，不需要把证据写满，但必须先把分叉逻辑、比较维度、时间轴和冲突关系梳理清楚。\n"
+        "3. 结构模式只能四选一：single_stock / peer_group / value_chain / theme_bundle。\n"
+        "4. 时间轴必须区分最早信号、中段验证/修正、最新状态；date_type 要区分 event / published / meeting / inferred。\n"
+        f"5. 节点深度可以按逻辑需要变化，不同分支允许 2 到 {max(MINDMAP_MAX_NODE_DEPTH - 1, 2)} 层，不要机械统一成三层。\n"
+        "6. 资料若存在冲突、修正、对冲，必须明确留下 risk 或 question 分支，不能强行消解成单边结论。\n"
+        "7. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
+        "8. 顶层分支控制在 4 到 6 个，总节点控制在 12 到 32 个。\n"
+        "9. 根节点不能写成“资料整理”“研究导图”之类的泛称，要直接写研究主题。\n"
+        "10. 如果资料里包含电话会议，要优先识别管理层最新口径、指引、问答争议点，并和日报、笔记、专家材料互相验证。\n"
+        "11. 在内部先把资料拆成判断卡片：比较维度、时间位置、来源角色、立场方向；不要输出中间过程，只把它体现在 comparison_axes、source_relations 和 root/children 结构里。\n"
+        "12. verification_targets 不是泛泛提问，而是高杠杆验证清单：要写清 why_it_matters、evidence_gap、next_check、priority。\n"
+        "13. 如果官方最新口径与渠道/笔记不同，要明确写成修正、冲突或待验证，不能拉成平均结论。\n"
+        "14. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "这一步的输出要求：\n"
+        "- 使用最终 schema，但 evidence / time_signals / source_notes 可以先写最必要的 0 到 2 条。\n"
+        "- comparison_axes 要尽量先搭出 2 到 5 个；如果是同行/多标的导图，至少给出 3 个统一比较轴。\n"
+        "- timeline_highlights 至少给出 3 个节点；如果资料不足，再明确说明不足原因。\n"
+        "- 如果资料冲突明显或资料密度较高，verification_targets 至少给出 2 个高价值验证点。\n"
+        "- 每个关键节点、比较轴和验证点都尽量带 source_refs 和 confidence/priority。\n\n"
+        "当前资料范围：\n"
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}\n"
+        f"- pipeline_version: {fingerprint.get('pipeline_version') or MINDMAP_PIPELINE_VERSION}\n"
+        f"- prompt_version: {fingerprint.get('prompt_version') or MINDMAP_PROMPT_VERSION}\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"{direction_block}"
+        f"{brief_block}"
+        f"JSON schema：\n{build_mindmap_json_schema_prompt()}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空，请把导图收敛到资料不足与待验证问题。）'}\n"
+    )
+
+
+def build_mindmap_finalize_prompt(
+    *,
+    scope_summary: dict[str, Any],
+    generation_prompt: str,
+    generation_brief: dict[str, Any] | None = None,
+    knowledge_text: str,
+    plan_payload: dict[str, Any],
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    plan_text = json.dumps(plan_payload, ensure_ascii=False, indent=2)
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
+    brief_block = build_mindmap_generation_brief_block(generation_brief)
+    return (
+        "你现在在做研究导图的第二步：在既有骨架上补齐正式成图结果。\n"
+        "目标：把骨架图补成一张可用于研究回看、横向比较和后续验证的正式导图。\n"
+        "重要约束：\n"
+        "1. 只能基于下方资料正文和骨架 JSON，不得补外部事实。\n"
+        "2. 尽量保留骨架里的 structure_kind、节点 id、主要分支和时间主线；可以小幅修正，但不要推翻结构。\n"
+        "3. 除 question / risk 外，关键节点尽量都要有 evidence 或 source_refs 支撑。\n"
+        "4. timeline_highlights 必须按从早到晚排序，并保留 earliest / mid / latest 三种 phase 的主线意识。\n"
+        "5. 不同分支允许不同深度，哪里逻辑链更长就继续展开，不要为了统一样式压扁成三层。\n"
+        "6. 对于仍未解开的冲突，要留在 risk / question / source_notes 里，不要硬写成确定结论。\n"
+        "7. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n"
+        "8. summary、evidence、time_signals、source_notes 都要短、可扫读。\n"
+        "9. comparison_axes 必须是统一比较维度，不是公司摘要列表；每个轴都要尽量把相关标的放到同一维度下对位比较。\n"
+        "10. verification_targets 必须是可执行的验证账本：写清 why_it_matters、evidence_gap、next_check、priority。\n"
+        "11. 如果资料里包含电话会议，要优先保留管理层最新口径、指引变化和问答争议，不要把它埋进泛泛摘要里。\n"
+        "12. 如果官方口径和渠道反馈都存在，要明确指出谁在验证谁、谁在修正谁，不能只做表面折中。\n"
+        "13. 最终只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。\n\n"
+        "当前资料范围：\n"
+        f"- {scope_summary.get('stock_label') or '股票范围：全站'}\n"
+        f"- {scope_summary.get('time_label') or '时间窗口：不限'}\n"
+        f"- {scope_summary.get('content_label') or '资料类型：日报；笔记；文件；电话会议；转录'}\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"{direction_block}"
+        f"{brief_block}"
+        f"必须遵守的 JSON schema：\n{build_mindmap_json_schema_prompt()}\n\n"
+        f"第一步骨架 JSON：\n{plan_text}\n\n"
+        f"资料正文：\n{knowledge_text or '（当前资料正文为空，请把导图收敛到资料不足与待验证问题。）'}\n"
+    )
+
+
+def build_mindmap_repair_prompt(
+    *,
+    generation_prompt: str,
+    generation_brief: dict[str, Any] | None = None,
+    knowledge_text: str,
+    current_payload: dict[str, Any],
+    validation: dict[str, list[str]],
+    fingerprint: dict[str, Any],
+) -> str:
+    source_roster = build_mindmap_selected_source_roster_lines(fingerprint.get("selected_sources", []))
+    payload_text = json.dumps(current_payload, ensure_ascii=False, indent=2)
+    direction_block = build_mindmap_generation_prompt_block(generation_prompt)
+    brief_block = build_mindmap_generation_brief_block(generation_brief)
+    error_lines = "\n".join(f"- {item}" for item in validation.get("errors", [])) or "- 没有明确错误说明"
+    warning_lines = "\n".join(f"- {item}" for item in validation.get("warnings", [])) or "- 暂无"
+    return (
+        "你现在是研究导图结果修复器。\n"
+        "目标：在尽量少改动的前提下，修正当前 JSON，使其通过研究导图校验。\n"
+        "要求：\n"
+        "1. 只能输出一个修复后的 JSON 对象，不要解释。\n"
+        "2. 优先修复 errors，warnings 能顺手优化就优化。\n"
+        "3. 保留已有 structure_kind、节点 id、主分支和时间轴主线，不要大改主题。\n"
+        "4. 不要为了修错把不同长度的逻辑链硬压平；允许分支深度不一致。\n"
+        "5. 只允许使用给定的来源引用 source_refs（例如 M01、M02）。\n\n"
+        f"允许引用的来源列表：\n{source_roster}\n\n"
+        f"{direction_block}"
+        f"{brief_block}"
         f"必须修复的问题：\n{error_lines}\n\n"
         f"可顺手优化的问题：\n{warning_lines}\n\n"
         f"当前 JSON：\n{payload_text}\n\n"
@@ -12534,6 +24916,8 @@ def run_mindmap_generation(
     reasoning_effort: str,
 ) -> None:
     fingerprint: dict[str, Any] = {}
+    generation_prompt = ""
+    generation_brief: dict[str, Any] = {}
     register_mindmap_task(record_id)
     try:
         reports = collect_reports()
@@ -12547,19 +24931,31 @@ def run_mindmap_generation(
             save_mindmap_store(store)
             scope_settings = deepcopy(record["scope_settings"])
             scope_summary = deepcopy(record["scope_summary"])
+            generation_prompt = normalize_mindmap_generation_prompt(record.get("generation_prompt"))
+            generation_brief = normalize_mindmap_generation_brief(record.get("generation_brief"))
 
         with app.test_request_context("/"):
             materials = collect_ai_scope_materials(stock_store, reports, scope_settings=scope_settings)
         if not scope_summary.get("headline"):
             scope_summary = build_ai_scope_summary(scope_settings, materials)
 
-        curated = curate_mindmap_materials(materials)
+        focus_text = "\n\n".join(
+            part
+            for part in [
+                normalize_mindmap_generation_brief_text(generation_brief.get("text")),
+                generation_prompt,
+            ]
+            if part
+        )
+        curated = curate_mindmap_materials(materials, focus_text=focus_text)
         if not curated.get("items"):
             raise RuntimeError("当前范围里的资料经过压缩后仍然不足以生成研究导图，请放宽范围或补充更有信息密度的资料。")
 
         bundle_path = build_mindmap_research_bundle(
             record_id,
             scope_summary=scope_summary,
+            generation_prompt=generation_prompt,
+            generation_brief=generation_brief,
             materials=materials,
             curated=curated,
         )
@@ -12567,6 +24963,8 @@ def run_mindmap_generation(
         fingerprint = build_mindmap_reproducibility_fingerprint(
             scope_settings=scope_settings,
             scope_summary=scope_summary,
+            generation_prompt=generation_prompt,
+            generation_brief=generation_brief,
             materials=materials,
             curated=curated,
             knowledge_text=knowledge_text,
@@ -12581,6 +24979,8 @@ def run_mindmap_generation(
         plan_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="plan")
         plan_prompt = build_mindmap_plan_prompt(
             scope_summary=scope_summary,
+            generation_prompt=generation_prompt,
+            generation_brief=generation_brief,
             knowledge_text=plan_knowledge_text,
             fingerprint=fingerprint,
         )
@@ -12605,6 +25005,8 @@ def run_mindmap_generation(
         final_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="mindmap")
         final_prompt = build_mindmap_finalize_prompt(
             scope_summary=scope_summary,
+            generation_prompt=generation_prompt,
+            generation_brief=generation_brief,
             knowledge_text=final_knowledge_text,
             plan_payload=plan_payload,
             fingerprint=fingerprint,
@@ -12631,6 +25033,8 @@ def run_mindmap_generation(
             repair_attempted = True
             repair_knowledge_text = mindmap_knowledge_text_for_step(knowledge_text, step_slug="repair")
             repair_prompt = build_mindmap_repair_prompt(
+                generation_prompt=generation_prompt,
+                generation_brief=generation_brief,
                 knowledge_text=repair_knowledge_text,
                 current_payload=payload,
                 validation=validation,
@@ -12756,6 +25160,12 @@ def build_mindmap_page_context(
     active_reasoning = str((active_record or {}).get("reasoning_effort") or selected_model_meta["default_reasoning"])
     if active_reasoning not in (selected_model_meta.get("reasoning_levels") or ["medium"]):
         active_reasoning = selected_model_meta.get("default_reasoning") or "medium"
+    draft_generation_prompt = load_mindmap_generation_prompt_draft()
+    active_generation_prompt = (
+        normalize_mindmap_generation_prompt((active_record or {}).get("generation_prompt"))
+        if active_record and record_id
+        else draft_generation_prompt or normalize_mindmap_generation_prompt((active_record or {}).get("generation_prompt"))
+    )
 
     return {
         "mindmap_records": build_mindmap_record_cards(store),
@@ -12772,6 +25182,7 @@ def build_mindmap_page_context(
         "selected_model_slug": active_model_slug,
         "selected_model_reasoning_levels": selected_model_meta.get("reasoning_levels") or ["medium"],
         "selected_reasoning_effort": active_reasoning,
+        "mindmap_generation_prompt": active_generation_prompt,
         "current_mindmap_url": url_for("mindmap_workspace", map=active_record["id"]) if active_record else url_for("mindmap_workspace"),
     }
 
@@ -13059,9 +25470,12 @@ def build_mindmap_studio_document(*, template_key: str = "blank", title: str | N
     root_id = nodes[0]["id"]
     return {
         "id": uuid.uuid4().hex[:12],
+        "schema_version": MINDMAP_STUDIO_SCHEMA_VERSION,
         "source_record_id": "",
+        "summary": "",
         "title": re.sub(r"\s+", " ", str(title or template_meta["label"]).strip())[:120] or "新导图",
         "template_key": template_key,
+        "structure_kind": "theme_bundle",
         "theme_key": "graphite",
         "surface_key": "embedded",
         "density_key": "roomy",
@@ -13069,6 +25483,12 @@ def build_mindmap_studio_document(*, template_key: str = "blank", title: str | N
         "active_node_id": root_id,
         "root_id": root_id,
         "reference_document_ids": [],
+        "insights": [],
+        "comparison_axes": [],
+        "verification_targets": [],
+        "timeline_highlights": [],
+        "source_relations": [],
+        "fingerprint": normalize_mindmap_fingerprint({}),
         "generated_snapshot": None,
         "nodes": nodes,
         "relationships": [],
@@ -13101,7 +25521,12 @@ def normalize_mindmap_studio_node(raw_node: Any) -> dict[str, Any] | None:
         "kind": normalize_mindmap_studio_node_kind(raw_node.get("kind")),
         "origin_mode": normalize_mindmap_studio_origin_mode(raw_node.get("origin_mode")),
         "verify_state": normalize_mindmap_studio_verify_state(raw_node.get("verify_state")),
+        "confidence": normalize_mindmap_confidence(raw_node.get("confidence")),
         "origin_snapshot_node_id": str(raw_node.get("origin_snapshot_node_id") or "").strip()[:24],
+        "source_refs": normalize_mindmap_source_refs(raw_node.get("source_refs"), limit=10),
+        "evidence_items": normalize_mindmap_text_item_list(raw_node.get("evidence_items"), limit=8, item_limit=220),
+        "source_note_items": normalize_mindmap_text_item_list(raw_node.get("source_note_items"), limit=8, item_limit=220),
+        "time_signal_items": normalize_mindmap_text_item_list(raw_node.get("time_signal_items"), limit=8, item_limit=180),
         "symbols": normalize_stock_symbol_list(raw_node.get("symbols", []))[:10],
         "tags": normalize_tag_list(raw_node.get("tags", []))[:12],
         "time_hint": re.sub(r"\s+", " ", str(raw_node.get("time_hint") or "").strip())[:120],
@@ -13153,6 +25578,15 @@ def normalize_mindmap_studio_snapshot(raw_snapshot: Any) -> dict[str, Any] | Non
     return {
         "generated_at": str(raw_snapshot.get("generated_at") or now_iso()),
         "reference_document_ids": normalize_identifier_list(raw_snapshot.get("reference_document_ids", []), max_items=16),
+        "title": re.sub(r"\s+", " ", str(raw_snapshot.get("title") or "").strip())[:120],
+        "summary": re.sub(r"\s+", " ", str(raw_snapshot.get("summary") or "").strip())[:600],
+        "structure_kind": normalize_mindmap_structure_kind(raw_snapshot.get("structure_kind")),
+        "insights": normalize_mindmap_text_item_list(raw_snapshot.get("insights"), limit=12, item_limit=180),
+        "comparison_axes": normalize_mindmap_comparison_axes(raw_snapshot.get("comparison_axes")),
+        "verification_targets": normalize_mindmap_verification_targets(raw_snapshot.get("verification_targets")),
+        "timeline_highlights": normalize_mindmap_timeline(raw_snapshot.get("timeline_highlights")),
+        "source_relations": normalize_mindmap_source_relations(raw_snapshot.get("source_relations")),
+        "fingerprint": normalize_mindmap_fingerprint(raw_snapshot.get("fingerprint")),
         "nodes": nodes,
         "relationships": relationships,
     }
@@ -13190,6 +25624,8 @@ def normalize_mindmap_studio_document(raw_document: Any) -> dict[str, Any]:
 
     title = re.sub(r"\s+", " ", str(raw_document.get("title") or "").strip())[:120] or "新导图"
     template_key = normalize_mindmap_studio_template_key(raw_document.get("template_key"))
+    summary = re.sub(r"\s+", " ", str(raw_document.get("summary") or "").strip())[:600]
+    structure_kind = normalize_mindmap_structure_kind(raw_document.get("structure_kind"))
 
     nodes = [
         node
@@ -13270,11 +25706,19 @@ def normalize_mindmap_studio_document(raw_document: Any) -> dict[str, Any]:
     if active_node_id not in node_ids:
         active_node_id = root_id
 
-    return {
+    try:
+        revision = max(int(raw_document.get("revision") or 1), 1)
+    except (TypeError, ValueError):
+        revision = 1
+
+    document = {
         "id": str(raw_document.get("id") or uuid.uuid4().hex[:12]).strip()[:12] or uuid.uuid4().hex[:12],
+        "schema_version": MINDMAP_STUDIO_SCHEMA_VERSION,
         "title": title,
+        "summary": summary,
         "source_record_id": str(raw_document.get("source_record_id") or "").strip()[:24],
         "template_key": template_key,
+        "structure_kind": structure_kind,
         "theme_key": normalize_mindmap_studio_theme_key(raw_document.get("theme_key")),
         "surface_key": normalize_mindmap_studio_surface_key(raw_document.get("surface_key")),
         "density_key": normalize_mindmap_studio_density_key(raw_document.get("density_key")),
@@ -13282,11 +25726,234 @@ def normalize_mindmap_studio_document(raw_document: Any) -> dict[str, Any]:
         "active_node_id": active_node_id,
         "root_id": root_id,
         "reference_document_ids": normalize_identifier_list(raw_document.get("reference_document_ids", []), max_items=16),
+        "insights": normalize_mindmap_text_item_list(raw_document.get("insights"), limit=12, item_limit=180),
+        "comparison_axes": normalize_mindmap_comparison_axes(raw_document.get("comparison_axes")),
+        "verification_targets": normalize_mindmap_verification_targets(raw_document.get("verification_targets")),
+        "timeline_highlights": normalize_mindmap_timeline(raw_document.get("timeline_highlights")),
+        "source_relations": normalize_mindmap_source_relations(raw_document.get("source_relations")),
+        "fingerprint": normalize_mindmap_fingerprint(raw_document.get("fingerprint")),
         "generated_snapshot": normalize_mindmap_studio_snapshot(raw_document.get("generated_snapshot")),
         "nodes": normalized_nodes,
         "relationships": relationships[:48],
         "created_at": str(raw_document.get("created_at") or now_iso()),
         "updated_at": str(raw_document.get("updated_at") or now_iso()),
+    }
+    document["revision"] = revision
+
+    history = [
+        entry
+        for raw_entry in raw_document.get("history", []) if isinstance(raw_document.get("history"), list)
+        if (entry := normalize_mindmap_studio_history_entry(raw_entry, document_id=document["id"])) is not None
+    ][: MINDMAP_STUDIO_HISTORY_LIMIT]
+    current_digest = build_mindmap_studio_document_digest(document)
+    if not history or str(history[0].get("document_digest") or "").strip() != current_digest:
+        history.insert(0, build_mindmap_studio_history_entry(document, reason="current", label="Current"))
+    document["history"] = history[: MINDMAP_STUDIO_HISTORY_LIMIT]
+    return document
+
+
+def build_mindmap_studio_snapshot_payload(document: dict[str, Any], *, document_id: str | None = None) -> dict[str, Any]:
+    return {
+        "id": str(document_id or document.get("id") or "").strip()[:12] or uuid.uuid4().hex[:12],
+        "schema_version": MINDMAP_STUDIO_SCHEMA_VERSION,
+        "title": re.sub(r"\s+", " ", str(document.get("title") or "").strip())[:120],
+        "summary": re.sub(r"\s+", " ", str(document.get("summary") or "").strip())[:600],
+        "source_record_id": str(document.get("source_record_id") or "").strip()[:24],
+        "template_key": normalize_mindmap_studio_template_key(document.get("template_key")),
+        "structure_kind": normalize_mindmap_structure_kind(document.get("structure_kind")),
+        "theme_key": normalize_mindmap_studio_theme_key(document.get("theme_key")),
+        "surface_key": normalize_mindmap_studio_surface_key(document.get("surface_key")),
+        "density_key": normalize_mindmap_studio_density_key(document.get("density_key")),
+        "layout_key": normalize_mindmap_studio_layout_key(document.get("layout_key")),
+        "active_node_id": str(document.get("active_node_id") or "").strip()[:24],
+        "root_id": str(document.get("root_id") or "").strip()[:24],
+        "reference_document_ids": normalize_identifier_list(document.get("reference_document_ids", []), max_items=16),
+        "insights": normalize_mindmap_text_item_list(document.get("insights"), limit=12, item_limit=180),
+        "comparison_axes": normalize_mindmap_comparison_axes(document.get("comparison_axes")),
+        "verification_targets": normalize_mindmap_verification_targets(document.get("verification_targets")),
+        "timeline_highlights": normalize_mindmap_timeline(document.get("timeline_highlights")),
+        "source_relations": normalize_mindmap_source_relations(document.get("source_relations")),
+        "fingerprint": normalize_mindmap_fingerprint(document.get("fingerprint")),
+        "generated_snapshot": normalize_mindmap_studio_snapshot(document.get("generated_snapshot")),
+        "nodes": deepcopy(document.get("nodes", [])) if isinstance(document.get("nodes"), list) else [],
+        "relationships": deepcopy(document.get("relationships", [])) if isinstance(document.get("relationships"), list) else [],
+        "created_at": str(document.get("created_at") or now_iso()),
+        "updated_at": str(document.get("updated_at") or now_iso()),
+        "revision": max(1, int(document.get("revision") or 1)),
+    }
+
+
+def build_mindmap_studio_document_digest(document: dict[str, Any]) -> str:
+    return sha256_text(serialize_stable_json(build_mindmap_studio_snapshot_payload(document, document_id=document.get("id"))))
+
+
+def normalize_mindmap_studio_snapshot_document(
+    raw_snapshot: Any,
+    *,
+    document_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(raw_snapshot, dict):
+        return None
+
+    nodes = [
+        node
+        for raw_node in raw_snapshot.get("nodes", []) if isinstance(raw_snapshot.get("nodes"), list)
+        if (node := normalize_mindmap_studio_node(raw_node)) is not None
+    ][:240]
+    if not nodes:
+        return None
+
+    root_candidates = [node for node in nodes if not node.get("parent_id")]
+    root = root_candidates[0] if root_candidates else nodes[0]
+    root["parent_id"] = None
+    root["side"] = "center"
+
+    node_lookup = {node["id"]: node for node in nodes}
+    root_id = root["id"]
+    for node in nodes:
+        if node["id"] == root_id:
+            continue
+        if not node.get("parent_id") or node["parent_id"] not in node_lookup or node["parent_id"] == node["id"]:
+            node["parent_id"] = root_id
+
+    node_lookup = {node["id"]: node for node in nodes}
+    children = group_mindmap_studio_children({"nodes": nodes})
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in seen or node_id not in node_lookup:
+            return
+        seen.add(node_id)
+        ordered_ids.append(node_id)
+        for child in children.get(node_id, []):
+            visit(child["id"])
+
+    visit(root_id)
+    for node in nodes:
+        if node["id"] not in seen:
+            node["parent_id"] = root_id
+    node_lookup = {node["id"]: node for node in nodes}
+    children = group_mindmap_studio_children({"nodes": nodes})
+    ordered_ids = []
+    seen = set()
+    visit(root_id)
+    normalized_nodes = [node_lookup[node_id] for node_id in ordered_ids]
+
+    node_lookup = {node["id"]: node for node in normalized_nodes}
+    for node in normalized_nodes:
+        if node["id"] == root_id:
+            node["side"] = "center"
+            continue
+        parent = node_lookup.get(node.get("parent_id") or "")
+        if parent and parent["id"] == root_id:
+            node["side"] = normalize_mindmap_studio_side(node.get("side"), fallback="right")
+        else:
+            node["side"] = parent["side"] if parent else "right"
+
+    node_ids = {node["id"] for node in normalized_nodes}
+    relationships: list[dict[str, Any]] = []
+    seen_relationships: set[tuple[str, str, str]] = set()
+    for raw_relationship in raw_snapshot.get("relationships", []) if isinstance(raw_snapshot.get("relationships"), list) else []:
+        relationship = normalize_mindmap_studio_relationship(raw_relationship, node_ids=node_ids)
+        if relationship is None:
+            continue
+        dedupe_key = (
+            relationship["from_node_id"],
+            relationship["to_node_id"],
+            relationship["label"].casefold(),
+        )
+        if dedupe_key in seen_relationships:
+            continue
+        seen_relationships.add(dedupe_key)
+        relationships.append(relationship)
+
+    active_node_id = str(raw_snapshot.get("active_node_id") or "").strip()
+    if active_node_id not in node_ids:
+        active_node_id = root_id
+
+    try:
+        revision = max(int(raw_snapshot.get("revision") or 1), 1)
+    except (TypeError, ValueError):
+        revision = 1
+
+    return {
+        "id": str(document_id or uuid.uuid4().hex[:12]).strip()[:12] or uuid.uuid4().hex[:12],
+        "schema_version": MINDMAP_STUDIO_SCHEMA_VERSION,
+        "title": re.sub(r"\s+", " ", str(raw_snapshot.get("title") or "").strip())[:120] or "Snapshot",
+        "summary": re.sub(r"\s+", " ", str(raw_snapshot.get("summary") or "").strip())[:600],
+        "source_record_id": str(raw_snapshot.get("source_record_id") or "").strip()[:24],
+        "template_key": normalize_mindmap_studio_template_key(raw_snapshot.get("template_key")),
+        "structure_kind": normalize_mindmap_structure_kind(raw_snapshot.get("structure_kind")),
+        "theme_key": normalize_mindmap_studio_theme_key(raw_snapshot.get("theme_key")),
+        "surface_key": normalize_mindmap_studio_surface_key(raw_snapshot.get("surface_key")),
+        "density_key": normalize_mindmap_studio_density_key(raw_snapshot.get("density_key")),
+        "layout_key": normalize_mindmap_studio_layout_key(raw_snapshot.get("layout_key")),
+        "active_node_id": active_node_id,
+        "root_id": root_id,
+        "reference_document_ids": normalize_identifier_list(raw_snapshot.get("reference_document_ids", []), max_items=16),
+        "insights": normalize_mindmap_text_item_list(raw_snapshot.get("insights"), limit=12, item_limit=180),
+        "comparison_axes": normalize_mindmap_comparison_axes(raw_snapshot.get("comparison_axes")),
+        "verification_targets": normalize_mindmap_verification_targets(raw_snapshot.get("verification_targets")),
+        "timeline_highlights": normalize_mindmap_timeline(raw_snapshot.get("timeline_highlights")),
+        "source_relations": normalize_mindmap_source_relations(raw_snapshot.get("source_relations")),
+        "fingerprint": normalize_mindmap_fingerprint(raw_snapshot.get("fingerprint")),
+        "generated_snapshot": normalize_mindmap_studio_snapshot(raw_snapshot.get("generated_snapshot")),
+        "nodes": normalized_nodes,
+        "relationships": relationships[:48],
+        "created_at": str(raw_snapshot.get("created_at") or now_iso()),
+        "updated_at": str(raw_snapshot.get("updated_at") or now_iso()),
+        "revision": revision,
+        "history": [],
+    }
+
+
+def build_mindmap_studio_history_entry(
+    document: dict[str, Any],
+    *,
+    reason: str,
+    label: str = "",
+) -> dict[str, Any]:
+    snapshot = build_mindmap_studio_snapshot_payload(document, document_id=document.get("id"))
+    stats = build_mindmap_studio_document_stats(document)
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "created_at": now_iso(),
+        "reason": re.sub(r"[^a-z0-9._:-]+", "-", str(reason or "snapshot").strip().lower())[:32] or "snapshot",
+        "label": re.sub(r"\s+", " ", str(label or "").strip())[:80],
+        "revision": max(1, int(document.get("revision") or 1)),
+        "document_digest": build_mindmap_studio_document_digest(document),
+        "node_count": stats["node_count"],
+        "relationship_count": stats["relationship_count"],
+        "snapshot": snapshot,
+    }
+
+
+def normalize_mindmap_studio_history_entry(raw_entry: Any, *, document_id: str) -> dict[str, Any] | None:
+    if not isinstance(raw_entry, dict):
+        return None
+
+    snapshot = normalize_mindmap_studio_snapshot_document(raw_entry.get("snapshot"), document_id=document_id)
+    if snapshot is None:
+        return None
+
+    try:
+        revision = max(int(raw_entry.get("revision") or snapshot.get("revision") or 1), 1)
+    except (TypeError, ValueError):
+        revision = max(int(snapshot.get("revision") or 1), 1)
+
+    stats = build_mindmap_studio_document_stats(snapshot)
+    digest = str(raw_entry.get("document_digest") or "").strip() or build_mindmap_studio_document_digest(snapshot)
+    return {
+        "id": str(raw_entry.get("id") or uuid.uuid4().hex[:12]).strip()[:12] or uuid.uuid4().hex[:12],
+        "created_at": str(raw_entry.get("created_at") or snapshot.get("updated_at") or now_iso()),
+        "reason": re.sub(r"[^a-z0-9._:-]+", "-", str(raw_entry.get("reason") or "snapshot").strip().lower())[:32] or "snapshot",
+        "label": re.sub(r"\s+", " ", str(raw_entry.get("label") or "").strip())[:80],
+        "revision": revision,
+        "document_digest": digest,
+        "node_count": max(0, int(raw_entry.get("node_count") or stats["node_count"])),
+        "relationship_count": max(0, int(raw_entry.get("relationship_count") or stats["relationship_count"])),
+        "snapshot": snapshot,
     }
 
 
@@ -13363,6 +26030,8 @@ def build_mindmap_studio_document_card(document: dict[str, Any]) -> dict[str, An
         "layout_label": MINDMAP_STUDIO_LAYOUT_META[document["layout_key"]]["label"],
         "updated_at": document["updated_at"],
         "updated_label": format_iso_timestamp(document["updated_at"]),
+        "revision": max(1, int(document.get("revision") or 1)),
+        "history_count": len(document.get("history", [])) if isinstance(document.get("history"), list) else 0,
         "node_count": stats["node_count"],
         "relationship_count": stats["relationship_count"],
         "max_depth": stats["max_depth"],
@@ -13370,9 +26039,481 @@ def build_mindmap_studio_document_card(document: dict[str, Any]) -> dict[str, An
     }
 
 
-def serialize_mindmap_studio_document(document: dict[str, Any]) -> dict[str, Any]:
+def build_mindmap_studio_count_rows(
+    counter: Counter[str],
+    *,
+    labels: dict[str, str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    items = [
+        (str(key or "").strip(), int(count))
+        for key, count in counter.items()
+        if str(key or "").strip() and int(count) > 0
+    ]
+    items.sort(key=lambda item: (-item[1], item[0].casefold()))
+    if limit is not None:
+        items = items[:limit]
+    return [
+        {
+            "key": key,
+            "label": (labels or {}).get(key, key),
+            "count": count,
+        }
+        for key, count in items
+    ]
+
+
+def build_mindmap_studio_node_signature(node: dict[str, Any]) -> str:
+    return serialize_stable_json(
+        {
+            "parent_id": node.get("parent_id"),
+            "side": node.get("side"),
+            "order": int(node.get("order") or 0),
+            "label": str(node.get("label") or "").strip(),
+            "summary": str(node.get("summary") or "").strip(),
+            "note": str(node.get("note") or "").strip(),
+            "kind": str(node.get("kind") or "").strip(),
+            "origin_mode": str(node.get("origin_mode") or "").strip(),
+            "verify_state": str(node.get("verify_state") or "").strip(),
+            "confidence": str(node.get("confidence") or "").strip(),
+            "origin_snapshot_node_id": str(node.get("origin_snapshot_node_id") or "").strip(),
+            "source_refs": normalize_identifier_list(node.get("source_refs", []), max_items=16, max_length=24),
+            "evidence_items": normalize_mindmap_text_item_list(node.get("evidence_items"), limit=8, item_limit=220),
+            "source_note_items": normalize_mindmap_text_item_list(node.get("source_note_items"), limit=8, item_limit=220),
+            "time_signal_items": normalize_mindmap_text_item_list(node.get("time_signal_items"), limit=8, item_limit=180),
+            "symbols": normalize_stock_symbol_list(node.get("symbols", []))[:10],
+            "tags": normalize_tag_list(node.get("tags", []))[:12],
+            "time_hint": str(node.get("time_hint") or "").strip(),
+            "collapsed": bool(node.get("collapsed")),
+        }
+    )
+
+
+def build_mindmap_studio_document_analysis(document: dict[str, Any]) -> dict[str, Any]:
     stats = build_mindmap_studio_document_stats(document)
+    nodes = document.get("nodes", []) if isinstance(document.get("nodes"), list) else []
+    content_nodes = [node for node in nodes if node.get("id") != document.get("root_id")] or nodes
+
+    verify_counter: Counter[str] = Counter(
+        str(node.get("verify_state") or "").strip()
+        for node in nodes
+        if str(node.get("verify_state") or "").strip()
+    )
+    origin_counter: Counter[str] = Counter(
+        str(node.get("origin_mode") or "").strip()
+        for node in nodes
+        if str(node.get("origin_mode") or "").strip()
+    )
+    kind_counter: Counter[str] = Counter(
+        str(node.get("kind") or "").strip()
+        for node in nodes
+        if str(node.get("kind") or "").strip()
+    )
+    symbol_counter: Counter[str] = Counter(
+        symbol
+        for node in nodes
+        for symbol in normalize_stock_symbol_list(node.get("symbols", []))[:10]
+    )
+    tag_counter: Counter[str] = Counter(
+        tag
+        for node in nodes
+        for tag in normalize_tag_list(node.get("tags", []))[:12]
+    )
+
+    with_source_refs = sum(1 for node in content_nodes if normalize_identifier_list(node.get("source_refs", []), max_items=16, max_length=24))
+    with_evidence = sum(1 for node in content_nodes if normalize_mindmap_text_item_list(node.get("evidence_items"), limit=8, item_limit=220))
+    with_time_signals = sum(1 for node in content_nodes if normalize_mindmap_text_item_list(node.get("time_signal_items"), limit=8, item_limit=180))
+    with_structured_support = sum(
+        1
+        for node in content_nodes
+        if (
+            normalize_identifier_list(node.get("source_refs", []), max_items=16, max_length=24)
+            or normalize_mindmap_text_item_list(node.get("evidence_items"), limit=8, item_limit=220)
+            or normalize_mindmap_text_item_list(node.get("source_note_items"), limit=8, item_limit=220)
+            or normalize_mindmap_text_item_list(node.get("time_signal_items"), limit=8, item_limit=180)
+        )
+    )
+    coverage_base = max(len(content_nodes), 1)
+
+    label_examples: dict[str, str] = {}
+    label_counter: Counter[str] = Counter()
+    for node in nodes:
+        key = str(node.get("label") or "").strip().casefold()
+        if not key:
+            continue
+        label_counter[key] += 1
+        label_examples.setdefault(key, str(node.get("label") or "").strip())
+    duplicate_labels = [
+        {"label": label_examples[key], "count": count}
+        for key, count in sorted(label_counter.items(), key=lambda item: (-item[1], item[0]))
+        if count > 1
+    ][:10]
+
+    timeline = document.get("timeline_highlights", []) if isinstance(document.get("timeline_highlights"), list) else []
+    sortable_keys = [
+        mindmap_timeline_sort_key(item.get("date") or "")
+        for item in timeline
+        if isinstance(item, dict) and mindmap_timeline_sort_key(item.get("date") or "")[0] == 0
+    ]
+    timeline_phases = {
+        str(item.get("phase") or "").strip()
+        for item in timeline
+        if isinstance(item, dict) and str(item.get("phase") or "").strip()
+    }
+
+    attention_nodes = sorted(
+        (
+            node
+            for node in nodes
+            if str(node.get("kind") or "") in {"question", "risk"}
+            or str(node.get("verify_state") or "") in {"needs_verify", "draft"}
+        ),
+        key=lambda node: (
+            0 if str(node.get("kind") or "") in {"question", "risk"} else 1,
+            0 if str(node.get("verify_state") or "") == "needs_verify" else 1,
+            0 if normalize_identifier_list(node.get("source_refs", []), max_items=16, max_length=24) else 1,
+            str(node.get("label") or "").casefold(),
+        ),
+    )[:12]
+
+    snapshot = document.get("generated_snapshot") if isinstance(document.get("generated_snapshot"), dict) else None
+    snapshot_lookup: dict[str, dict[str, Any]] = {}
+    if snapshot:
+        for raw_node in snapshot.get("nodes", []) if isinstance(snapshot.get("nodes"), list) else []:
+            node = normalize_mindmap_studio_node(raw_node)
+            if node is None:
+                continue
+            lookup_key = str(node.get("origin_snapshot_node_id") or node.get("id") or "").strip()
+            if lookup_key and lookup_key not in snapshot_lookup:
+                snapshot_lookup[lookup_key] = node
+
+    matched_snapshot_ids: set[str] = set()
+    changed_node_count = 0
+    added_node_count = 0
+    for node in nodes:
+        lookup_key = str(node.get("origin_snapshot_node_id") or node.get("id") or "").strip()
+        baseline_node = snapshot_lookup.get(lookup_key)
+        if baseline_node is None:
+            added_node_count += 1
+            continue
+        matched_snapshot_ids.add(lookup_key)
+        if build_mindmap_studio_node_signature(node) != build_mindmap_studio_node_signature(baseline_node):
+            changed_node_count += 1
+    removed_node_count = sum(1 for key in snapshot_lookup if key not in matched_snapshot_ids)
+
+    selected_source_count = len((document.get("fingerprint") or {}).get("selected_sources", []))
     return {
+        "schema_version": MINDMAP_STUDIO_SCHEMA_VERSION,
+        "revision": max(1, int(document.get("revision") or 1)),
+        "history_count": len(document.get("history", [])) if isinstance(document.get("history"), list) else 0,
+        "node_count": stats["node_count"],
+        "relationship_count": stats["relationship_count"],
+        "leaf_count": stats["leaf_count"],
+        "max_depth": stats["max_depth"],
+        "verify_state_counts": build_mindmap_studio_count_rows(verify_counter, labels=MINDMAP_STUDIO_VERIFY_META),
+        "origin_mode_counts": build_mindmap_studio_count_rows(origin_counter, labels=MINDMAP_STUDIO_ORIGIN_META),
+        "kind_counts": build_mindmap_studio_count_rows(kind_counter, labels=MINDMAP_STUDIO_NODE_KIND_META),
+        "top_symbols": build_mindmap_studio_count_rows(symbol_counter, limit=12),
+        "top_tags": build_mindmap_studio_count_rows(tag_counter, limit=12),
+        "coverage": {
+            "content_node_count": len(content_nodes),
+            "with_source_refs": with_source_refs,
+            "with_evidence_items": with_evidence,
+            "with_time_signal_items": with_time_signals,
+            "with_structured_support": with_structured_support,
+            "structured_support_ratio": round(with_structured_support / coverage_base, 4),
+        },
+        "timeline": {
+            "item_count": len(timeline),
+            "is_sorted": sortable_keys == sorted(sortable_keys),
+            "missing_earliest": bool(timeline) and "earliest" not in timeline_phases,
+            "missing_latest": bool(timeline) and "latest" not in timeline_phases,
+        },
+        "attention_nodes": [
+            {
+                "id": node["id"],
+                "label": node["label"],
+                "kind": node["kind"],
+                "kind_label": MINDMAP_STUDIO_NODE_KIND_META.get(node["kind"], node["kind"]),
+                "verify_state": node["verify_state"],
+                "verify_label": MINDMAP_STUDIO_VERIFY_META.get(node["verify_state"], node["verify_state"]),
+                "summary": node.get("summary", ""),
+                "time_hint": node.get("time_hint", ""),
+                "symbols": normalize_stock_symbol_list(node.get("symbols", []))[:10],
+                "source_ref_count": len(normalize_identifier_list(node.get("source_refs", []), max_items=16, max_length=24)),
+            }
+            for node in attention_nodes
+        ],
+        "duplicate_labels": duplicate_labels,
+        "reference_summary": {
+            "source_record_id": str(document.get("source_record_id") or "").strip(),
+            "reference_document_count": len(normalize_identifier_list(document.get("reference_document_ids", []), max_items=16)),
+            "selected_source_count": selected_source_count,
+        },
+        "baseline_diff": {
+            "has_snapshot": bool(snapshot),
+            "matched_node_count": len(matched_snapshot_ids),
+            "changed_node_count": changed_node_count,
+            "added_node_count": added_node_count,
+            "removed_node_count": removed_node_count,
+        },
+    }
+
+
+def build_mindmap_studio_node_compare_key(node: dict[str, Any]) -> str:
+    return str(node.get("origin_snapshot_node_id") or node.get("id") or "").strip()[:24] or str(node.get("id") or "").strip()[:24]
+
+
+def build_mindmap_studio_relationship_compare_key(relationship: dict[str, Any]) -> str:
+    relationship_id = str(relationship.get("id") or "").strip()[:24]
+    if relationship_id:
+        return relationship_id
+    return serialize_stable_json(
+        {
+            "from": str(relationship.get("from_node_id") or "").strip(),
+            "to": str(relationship.get("to_node_id") or "").strip(),
+            "label": str(relationship.get("label") or "").strip(),
+            "tone": str(relationship.get("tone") or "").strip(),
+        }
+    )
+
+
+def build_mindmap_studio_relationship_signature(relationship: dict[str, Any]) -> str:
+    return serialize_stable_json(
+        {
+            "from_node_id": str(relationship.get("from_node_id") or "").strip(),
+            "to_node_id": str(relationship.get("to_node_id") or "").strip(),
+            "label": str(relationship.get("label") or "").strip(),
+            "tone": str(relationship.get("tone") or "").strip(),
+        }
+    )
+
+
+def build_mindmap_studio_relationship_label(relationship: dict[str, Any]) -> str:
+    from_id = str(relationship.get("from_node_id") or "").strip()
+    to_id = str(relationship.get("to_node_id") or "").strip()
+    label = str(relationship.get("label") or "").strip()
+    tone = str(relationship.get("tone") or "").strip()
+    parts = [part for part in [tone, label, f"{from_id}->{to_id}"] if part]
+    return " / ".join(parts) or "relationship"
+
+
+def build_mindmap_studio_baseline_document(document: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = document.get("generated_snapshot") if isinstance(document.get("generated_snapshot"), dict) else None
+    if snapshot is None:
+        return None
+    raw_snapshot = {
+        "id": document["id"],
+        "title": snapshot.get("title") or document.get("title") or "",
+        "summary": snapshot.get("summary") or document.get("summary") or "",
+        "source_record_id": document.get("source_record_id") or "",
+        "template_key": document.get("template_key") or "blank",
+        "structure_kind": snapshot.get("structure_kind") or document.get("structure_kind") or "theme_bundle",
+        "theme_key": document.get("theme_key") or "graphite",
+        "surface_key": document.get("surface_key") or "embedded",
+        "density_key": document.get("density_key") or "roomy",
+        "layout_key": document.get("layout_key") or "mindmap",
+        "active_node_id": document.get("active_node_id") or "",
+        "root_id": document.get("root_id") or "",
+        "reference_document_ids": snapshot.get("reference_document_ids") or [],
+        "insights": snapshot.get("insights") or [],
+        "comparison_axes": snapshot.get("comparison_axes") or [],
+        "verification_targets": snapshot.get("verification_targets") or [],
+        "timeline_highlights": snapshot.get("timeline_highlights") or [],
+        "source_relations": snapshot.get("source_relations") or [],
+        "fingerprint": snapshot.get("fingerprint") or {},
+        "generated_snapshot": None,
+        "nodes": snapshot.get("nodes") or [],
+        "relationships": snapshot.get("relationships") or [],
+        "created_at": document.get("created_at") or now_iso(),
+        "updated_at": snapshot.get("generated_at") or document.get("updated_at") or now_iso(),
+        "revision": max(1, int(document.get("revision") or 1)),
+    }
+    return normalize_mindmap_studio_snapshot_document(raw_snapshot, document_id=document["id"])
+
+
+def resolve_mindmap_studio_document_reference(
+    document: dict[str, Any],
+    ref: str | None,
+) -> tuple[str, dict[str, Any]]:
+    normalized_ref = str(ref or "current").strip()
+    if not normalized_ref or normalized_ref == "current":
+        return "Current", deepcopy(document)
+
+    if normalized_ref == "baseline":
+        baseline_document = build_mindmap_studio_baseline_document(document)
+        if baseline_document is None:
+            raise KeyError("baseline")
+        return "Baseline", baseline_document
+
+    target_id = normalized_ref
+    if normalized_ref.lower().startswith("history:"):
+        target_id = normalized_ref.split(":", 1)[1].strip()
+    for entry in document.get("history", []) if isinstance(document.get("history"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("id") or "").strip() != target_id:
+            continue
+        label = str(entry.get("label") or "").strip() or f"Revision {entry.get('revision') or '?'}"
+        snapshot = entry.get("snapshot")
+        if isinstance(snapshot, dict):
+            return label, deepcopy(snapshot)
+        break
+
+    raise KeyError(normalized_ref)
+
+
+def build_mindmap_studio_document_diff(left_document: dict[str, Any], right_document: dict[str, Any]) -> dict[str, Any]:
+    metadata_fields = (
+        "title",
+        "summary",
+        "source_record_id",
+        "template_key",
+        "structure_kind",
+        "theme_key",
+        "surface_key",
+        "density_key",
+        "layout_key",
+    )
+    structured_fields = (
+        "insights",
+        "comparison_axes",
+        "verification_targets",
+        "timeline_highlights",
+        "source_relations",
+        "fingerprint",
+    )
+
+    metadata_changes = [
+        {
+            "field": field,
+            "left": deepcopy(left_document.get(field)),
+            "right": deepcopy(right_document.get(field)),
+        }
+        for field in metadata_fields
+        if serialize_stable_json(left_document.get(field)) != serialize_stable_json(right_document.get(field))
+    ]
+    structured_changes = []
+    for field in structured_fields:
+        left_value = deepcopy(left_document.get(field))
+        right_value = deepcopy(right_document.get(field))
+        if serialize_stable_json(left_value) == serialize_stable_json(right_value):
+            continue
+        left_count = len(left_value) if isinstance(left_value, list) else (len(left_value) if isinstance(left_value, dict) else (1 if left_value else 0))
+        right_count = len(right_value) if isinstance(right_value, list) else (len(right_value) if isinstance(right_value, dict) else (1 if right_value else 0))
+        structured_changes.append(
+            {
+                "field": field,
+                "left_count": left_count,
+                "right_count": right_count,
+            }
+        )
+
+    left_node_map = {
+        build_mindmap_studio_node_compare_key(node): node
+        for node in left_document.get("nodes", []) if isinstance(left_document.get("nodes"), list)
+        if isinstance(node, dict) and build_mindmap_studio_node_compare_key(node)
+    }
+    right_node_map = {
+        build_mindmap_studio_node_compare_key(node): node
+        for node in right_document.get("nodes", []) if isinstance(right_document.get("nodes"), list)
+        if isinstance(node, dict) and build_mindmap_studio_node_compare_key(node)
+    }
+    left_node_keys = set(left_node_map)
+    right_node_keys = set(right_node_map)
+    common_node_keys = sorted(left_node_keys & right_node_keys)
+    changed_node_keys = [
+        key
+        for key in common_node_keys
+        if build_mindmap_studio_node_signature(left_node_map[key]) != build_mindmap_studio_node_signature(right_node_map[key])
+    ]
+
+    left_relationship_map = {
+        build_mindmap_studio_relationship_compare_key(relationship): relationship
+        for relationship in left_document.get("relationships", []) if isinstance(left_document.get("relationships"), list)
+        if isinstance(relationship, dict)
+    }
+    right_relationship_map = {
+        build_mindmap_studio_relationship_compare_key(relationship): relationship
+        for relationship in right_document.get("relationships", []) if isinstance(right_document.get("relationships"), list)
+        if isinstance(relationship, dict)
+    }
+    left_relationship_keys = set(left_relationship_map)
+    right_relationship_keys = set(right_relationship_map)
+    common_relationship_keys = sorted(left_relationship_keys & right_relationship_keys)
+    changed_relationship_keys = [
+        key
+        for key in common_relationship_keys
+        if build_mindmap_studio_relationship_signature(left_relationship_map[key]) != build_mindmap_studio_relationship_signature(right_relationship_map[key])
+    ]
+
+    return {
+        "left": {
+            "title": left_document.get("title") or "",
+            "revision": int(left_document.get("revision") or 1),
+            "updated_at": str(left_document.get("updated_at") or ""),
+            "node_count": len(left_document.get("nodes", [])) if isinstance(left_document.get("nodes"), list) else 0,
+            "relationship_count": len(left_document.get("relationships", [])) if isinstance(left_document.get("relationships"), list) else 0,
+        },
+        "right": {
+            "title": right_document.get("title") or "",
+            "revision": int(right_document.get("revision") or 1),
+            "updated_at": str(right_document.get("updated_at") or ""),
+            "node_count": len(right_document.get("nodes", [])) if isinstance(right_document.get("nodes"), list) else 0,
+            "relationship_count": len(right_document.get("relationships", [])) if isinstance(right_document.get("relationships"), list) else 0,
+        },
+        "metadata_changes": metadata_changes,
+        "structured_changes": structured_changes,
+        "node_changes": {
+            "added_count": len(right_node_keys - left_node_keys),
+            "removed_count": len(left_node_keys - right_node_keys),
+            "changed_count": len(changed_node_keys),
+            "added": [
+                {
+                    "id": right_node_map[key]["id"],
+                    "label": right_node_map[key]["label"],
+                }
+                for key in sorted(right_node_keys - left_node_keys)[:12]
+            ],
+            "removed": [
+                {
+                    "id": left_node_map[key]["id"],
+                    "label": left_node_map[key]["label"],
+                }
+                for key in sorted(left_node_keys - right_node_keys)[:12]
+            ],
+            "changed": [
+                {
+                    "id": right_node_map[key]["id"],
+                    "label": right_node_map[key]["label"],
+                }
+                for key in changed_node_keys[:12]
+            ],
+        },
+        "relationship_changes": {
+            "added_count": len(right_relationship_keys - left_relationship_keys),
+            "removed_count": len(left_relationship_keys - right_relationship_keys),
+            "changed_count": len(changed_relationship_keys),
+            "added": [
+                build_mindmap_studio_relationship_label(right_relationship_map[key])
+                for key in sorted(right_relationship_keys - left_relationship_keys)[:12]
+            ],
+            "removed": [
+                build_mindmap_studio_relationship_label(left_relationship_map[key])
+                for key in sorted(left_relationship_keys - right_relationship_keys)[:12]
+            ],
+            "changed": [
+                build_mindmap_studio_relationship_label(right_relationship_map[key])
+                for key in changed_relationship_keys[:12]
+            ],
+        },
+        "document_digest_changed": build_mindmap_studio_document_digest(left_document) != build_mindmap_studio_document_digest(right_document),
+    }
+
+
+def serialize_mindmap_studio_document(document: dict[str, Any], *, include_analysis: bool = False) -> dict[str, Any]:
+    stats = build_mindmap_studio_document_stats(document)
+    payload = {
         **deepcopy(document),
         "theme_label": MINDMAP_STUDIO_THEME_META[document["theme_key"]]["label"],
         "surface_label": MINDMAP_STUDIO_SURFACE_META[document["surface_key"]]["label"],
@@ -13387,6 +26528,9 @@ def serialize_mindmap_studio_document(document: dict[str, Any]) -> dict[str, Any
         "outline_markdown": stats["outline_markdown"],
         "tree": stats["tree"],
     }
+    if include_analysis:
+        payload["analysis"] = build_mindmap_studio_document_analysis(document)
+    return payload
 
 
 def normalize_mindmap_studio_store(data: Any) -> dict[str, Any]:
@@ -13416,10 +26560,7 @@ def load_mindmap_studio_store() -> dict[str, Any]:
 def save_mindmap_studio_store(store: dict[str, Any]) -> None:
     normalized = normalize_mindmap_studio_store(store)
     normalized["updated_at"] = now_iso()
-    MINDMAP_STUDIO_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = MINDMAP_STUDIO_STORE_PATH.with_suffix(MINDMAP_STUDIO_STORE_PATH.suffix + ".tmp")
-    temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(MINDMAP_STUDIO_STORE_PATH)
+    write_json_atomic(MINDMAP_STUDIO_STORE_PATH, normalized)
 
 
 def ensure_mindmap_studio_seeded(store: dict[str, Any]) -> dict[str, Any]:
@@ -13493,22 +26634,22 @@ def build_mindmap_studio_bootstrap_payload(store: dict[str, Any], *, document_id
 def build_mindmap_studio_note_from_generated_node(node: dict[str, Any]) -> str:
     sections: list[str] = []
     confidence = normalize_mindmap_confidence(node.get("confidence"))
-    source_refs = [str(item).strip() for item in node.get("source_refs", []) if str(item).strip()]
+    source_refs = normalize_mindmap_source_refs(node.get("source_refs"), limit=8)
     if source_refs:
         sections.append("来源引用\n" + "\n".join(f"- {item}" for item in source_refs[:8]))
     if confidence:
         sections.append(f"置信度\n- {confidence}")
 
-    evidence = [str(item).strip() for item in node.get("evidence", []) if str(item).strip()]
+    evidence = normalize_mindmap_text_item_list(node.get("evidence"), limit=6, item_limit=220)
     if evidence:
         sections.append("证据\n" + "\n".join(f"- {item}" for item in evidence[:6]))
 
-    source_notes = [str(item).strip() for item in node.get("source_notes", []) if str(item).strip()]
+    source_notes = normalize_mindmap_text_item_list(node.get("source_notes"), limit=6, item_limit=220)
     if source_notes:
         sections.append("资料关系\n" + "\n".join(f"- {item}" for item in source_notes[:6]))
 
-    time_signals = [str(item).strip() for item in node.get("time_signals", []) if str(item).strip()]
-    if len(time_signals) > 1:
+    time_signals = normalize_mindmap_text_item_list(node.get("time_signals"), limit=6, item_limit=180)
+    if time_signals:
         sections.append("时间信号\n" + "\n".join(f"- {item}" for item in time_signals[:6]))
 
     return trim_note_content("\n\n".join(sections).strip(), limit=5000)
@@ -13517,7 +26658,7 @@ def build_mindmap_studio_note_from_generated_node(node: dict[str, Any]) -> str:
 def mindmap_confidence_to_verify_state(confidence: str | None) -> str:
     normalized = normalize_mindmap_confidence(confidence)
     if normalized == "high":
-        return "verified"
+        return "stable"
     if normalized == "low":
         return "needs_verify"
     return "draft"
@@ -13540,7 +26681,7 @@ def convert_generated_mindmap_to_studio_document(record: dict[str, Any]) -> dict
     if not isinstance(root, dict):
         raise ValueError("导图结果里缺少可用的根节点。")
 
-    structure_kind = str(payload.get("structure_kind") or "").strip().lower()
+    structure_kind = normalize_mindmap_structure_kind(payload.get("structure_kind"))
     template_key = {
         "single_stock": "thesis",
         "peer_group": "thesis",
@@ -13556,11 +26697,19 @@ def convert_generated_mindmap_to_studio_document(record: dict[str, Any]) -> dict
 
     document = build_mindmap_studio_document(template_key=template_key, title=payload.get("title") or record.get("title"))
     document["source_record_id"] = record["id"]
+    document["summary"] = re.sub(r"\s+", " ", str(payload.get("summary") or record.get("summary") or "").strip())[:600]
     document["template_key"] = template_key
+    document["structure_kind"] = structure_kind
     document["layout_key"] = layout_key
     document["theme_key"] = "graphite"
     document["surface_key"] = "embedded"
     document["density_key"] = "roomy"
+    document["insights"] = normalize_mindmap_text_item_list(payload.get("insights"), limit=12, item_limit=180)
+    document["comparison_axes"] = normalize_mindmap_comparison_axes(payload.get("comparison_axes"))
+    document["verification_targets"] = normalize_mindmap_verification_targets(payload.get("verification_targets"))
+    document["timeline_highlights"] = normalize_mindmap_timeline(payload.get("timeline_highlights"))
+    document["source_relations"] = normalize_mindmap_source_relations(payload.get("source_relations"))
+    document["fingerprint"] = normalize_mindmap_fingerprint(record.get("fingerprint"))
 
     nodes: list[dict[str, Any]] = []
     node_ids: set[str] = set()
@@ -13594,7 +26743,12 @@ def convert_generated_mindmap_to_studio_document(record: dict[str, Any]) -> dict
             }.get(str(raw_node.get("kind") or "").strip().lower(), "topic"),
             "origin_mode": "generated",
             "verify_state": mindmap_confidence_to_verify_state(raw_node.get("confidence")),
+            "confidence": normalize_mindmap_confidence(raw_node.get("confidence")),
             "origin_snapshot_node_id": node_id,
+            "source_refs": normalize_mindmap_source_refs(raw_node.get("source_refs"), limit=10),
+            "evidence_items": normalize_mindmap_text_item_list(raw_node.get("evidence"), limit=8, item_limit=220),
+            "source_note_items": normalize_mindmap_text_item_list(raw_node.get("source_notes"), limit=8, item_limit=220),
+            "time_signal_items": normalize_mindmap_text_item_list(raw_node.get("time_signals"), limit=8, item_limit=180),
             "symbols": normalize_stock_symbol_list(raw_node.get("symbols", []))[:10],
             "tags": [],
             "time_hint": time_signals[0] if time_signals else "",
@@ -13645,6 +26799,15 @@ def convert_generated_mindmap_to_studio_document(record: dict[str, Any]) -> dict
     document["generated_snapshot"] = {
         "generated_at": now_iso(),
         "reference_document_ids": [],
+        "title": document["title"],
+        "summary": document["summary"],
+        "structure_kind": document["structure_kind"],
+        "insights": deepcopy(document["insights"]),
+        "comparison_axes": deepcopy(document["comparison_axes"]),
+        "verification_targets": deepcopy(document["verification_targets"]),
+        "timeline_highlights": deepcopy(document["timeline_highlights"]),
+        "source_relations": deepcopy(document["source_relations"]),
+        "fingerprint": deepcopy(document["fingerprint"]),
         "nodes": deepcopy(document["nodes"]),
         "relationships": deepcopy(document["relationships"]),
     }
@@ -13672,16 +26835,293 @@ def sync_generated_mindmap_to_studio(record_id: str) -> str | None:
     return document["id"]
 
 
+def build_mindmap_studio_markdown_export(document: dict[str, Any]) -> str:
+    serialized = serialize_mindmap_studio_document(document, include_analysis=True)
+    analysis = serialized.get("analysis") if isinstance(serialized.get("analysis"), dict) else {}
+
+    def bullet_lines(items: list[str]) -> list[str]:
+        return [f"- {item}" for item in items if str(item or "").strip()]
+
+    lines = [f"# {document['title']}", ""]
+    summary = str(document.get("summary") or "").strip()
+    if summary:
+        lines.extend([summary, ""])
+
+    lines.extend(
+        [
+            "## Meta",
+            f"- Schema version: {document.get('schema_version') or MINDMAP_STUDIO_SCHEMA_VERSION}",
+            f"- Structure kind: {document.get('structure_kind') or 'theme_bundle'}",
+            f"- Layout: {document.get('layout_key') or 'mindmap'}",
+            f"- Nodes: {serialized['stats']['node_count']}",
+            f"- Relationships: {serialized['stats']['relationship_count']}",
+            f"- Depth: {serialized['stats']['max_depth']}",
+            f"- Source record: {document.get('source_record_id') or '(none)'}",
+            "",
+            "## Outline",
+            serialized.get("outline_markdown") or "- (empty)",
+            "",
+        ]
+    )
+
+    insights = bullet_lines(normalize_mindmap_text_item_list(document.get("insights"), limit=12, item_limit=180))
+    if insights:
+        lines.extend(["## Insights", *insights, ""])
+
+    timeline = document.get("timeline_highlights", []) if isinstance(document.get("timeline_highlights"), list) else []
+    if timeline:
+        lines.append("## Timeline")
+        for item in timeline:
+            if not isinstance(item, dict):
+                continue
+            prefix_parts = [str(item.get("date") or "").strip(), str(item.get("phase") or "").strip(), str(item.get("date_type") or "").strip()]
+            prefix = " | ".join(part for part in prefix_parts if part)
+            label = str(item.get("label") or "").strip()
+            summary_text = str(item.get("summary") or "").strip()
+            line = f"- {prefix}: {label}" if prefix else f"- {label}"
+            if summary_text:
+                line += f" - {summary_text}"
+            refs = normalize_mindmap_source_refs(item.get("source_refs"), limit=10)
+            if refs:
+                line += f" [{', '.join(refs)}]"
+            lines.append(line)
+        lines.append("")
+
+    comparison_axes = document.get("comparison_axes", []) if isinstance(document.get("comparison_axes"), list) else []
+    if comparison_axes:
+        lines.append("## Comparison Axes")
+        for axis in comparison_axes:
+            if not isinstance(axis, dict):
+                continue
+            axis_title = str(axis.get("axis") or "").strip()
+            takeaway = str(axis.get("takeaway") or "").strip()
+            lines.append(f"- {axis_title}" + (f": {takeaway}" if takeaway else ""))
+            for view in axis.get("views", []) if isinstance(axis.get("views"), list) else []:
+                if not isinstance(view, dict):
+                    continue
+                view_text = " / ".join(
+                    part
+                    for part in [
+                        str(view.get("symbol") or "").strip(),
+                        str(view.get("stance") or "").strip(),
+                        str(view.get("summary") or "").strip(),
+                    ]
+                    if part
+                )
+                if view_text:
+                    lines.append(f"  - {view_text}")
+        lines.append("")
+
+    verification_targets = document.get("verification_targets", []) if isinstance(document.get("verification_targets"), list) else []
+    if verification_targets:
+        lines.append("## Verification Targets")
+        for item in verification_targets:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            priority = str(item.get("priority") or "").strip().lower() or "medium"
+            why = str(item.get("why_it_matters") or "").strip()
+            gap = str(item.get("evidence_gap") or "").strip()
+            next_check = str(item.get("next_check") or "").strip()
+            lines.append(f"- [{priority}] {question}")
+            if why:
+                lines.append(f"  - Why it matters: {why}")
+            if gap:
+                lines.append(f"  - Evidence gap: {gap}")
+            if next_check:
+                lines.append(f"  - Next check: {next_check}")
+        lines.append("")
+
+    source_relations = document.get("source_relations", []) if isinstance(document.get("source_relations"), list) else []
+    if source_relations:
+        lines.append("## Source Relations")
+        for item in source_relations:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            source_from = str(item.get("from") or "").strip()
+            source_to = str(item.get("to") or "").strip()
+            summary_text = str(item.get("summary") or "").strip()
+            line = f"- {label}: {source_from} -> {source_to}"
+            if summary_text:
+                line += f" - {summary_text}"
+            lines.append(line)
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Analysis",
+            f"- Structured support coverage: {(analysis.get('coverage') or {}).get('with_structured_support', 0)}/{(analysis.get('coverage') or {}).get('content_node_count', 0)}",
+            f"- Duplicate labels: {len(analysis.get('duplicate_labels') or [])}",
+            f"- Attention nodes: {len(analysis.get('attention_nodes') or [])}",
+            f"- Baseline changed nodes: {(analysis.get('baseline_diff') or {}).get('changed_node_count', 0)}",
+            "",
+        ]
+    )
+
+    attention_nodes = analysis.get("attention_nodes") if isinstance(analysis.get("attention_nodes"), list) else []
+    if attention_nodes:
+        lines.append("## Attention Queue")
+        for item in attention_nodes:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            kind = str(item.get("kind_label") or item.get("kind") or "").strip()
+            verify_label = str(item.get("verify_label") or item.get("verify_state") or "").strip()
+            summary_text = str(item.get("summary") or "").strip()
+            line = f"- {label} ({kind} / {verify_label})"
+            if summary_text:
+                line += f": {summary_text}"
+            lines.append(line)
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def sanitize_mindmap_studio_mermaid_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = text.replace('"', "'").replace("|", "/")
+    text = re.sub(r"[\[\]{}()<>`]+", " ", text)
+    return text.strip() or "Untitled"
+
+
+def build_mindmap_studio_mermaid_export(document: dict[str, Any]) -> str:
+    nodes = document.get("nodes", []) if isinstance(document.get("nodes"), list) else []
+    relationships = document.get("relationships", []) if isinstance(document.get("relationships"), list) else []
+    node_aliases = {
+        node["id"]: f"N{index + 1}"
+        for index, node in enumerate(nodes)
+        if isinstance(node, dict) and str(node.get("id") or "").strip()
+    }
+    direction = "LR" if str(document.get("layout_key") or "").strip() in {"logic", "lanes"} else "TB"
+    lines = [
+        f"flowchart {direction}",
+        f"    %% {sanitize_mindmap_studio_mermaid_text(document.get('title') or '')}",
+    ]
+
+    class_members: defaultdict[str, list[str]] = defaultdict(list)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        alias = node_aliases.get(node.get("id"))
+        if not alias:
+            continue
+        label = sanitize_mindmap_studio_mermaid_text(node.get("label") or "")
+        lines.append(f'    {alias}["{label}"]')
+        class_members[str(node.get("kind") or "topic").strip().lower() or "topic"].append(alias)
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        parent_id = str(node.get("parent_id") or "").strip()
+        alias = node_aliases.get(node.get("id"))
+        parent_alias = node_aliases.get(parent_id)
+        if not alias or not parent_alias:
+            continue
+        lines.append(f"    {parent_alias} --> {alias}")
+
+    for relationship in relationships:
+        if not isinstance(relationship, dict):
+            continue
+        from_alias = node_aliases.get(str(relationship.get("from_node_id") or "").strip())
+        to_alias = node_aliases.get(str(relationship.get("to_node_id") or "").strip())
+        if not from_alias or not to_alias:
+            continue
+        tone = str(relationship.get("tone") or "").strip().lower() or "compare"
+        label = sanitize_mindmap_studio_mermaid_text(f"{tone}: {relationship.get('label') or ''}")
+        lines.append(f"    {from_alias} -->|{label}| {to_alias}")
+
+    lines.extend(
+        [
+            "",
+            "    classDef topic fill:#eef4ff,stroke:#4a67a1,color:#1c2640;",
+            "    classDef thesis fill:#f9f1d8,stroke:#8a6b1f,color:#372b10;",
+            "    classDef evidence fill:#eaf7ee,stroke:#4c8a61,color:#173221;",
+            "    classDef question fill:#fff4da,stroke:#b78528,color:#4a340d;",
+            "    classDef risk fill:#fde8e8,stroke:#b04b4b,color:#541b1b;",
+            "    classDef catalyst fill:#e8f7f5,stroke:#2b8a83,color:#123633;",
+            "    classDef timeline fill:#f3eaff,stroke:#6b5ca5,color:#281c4a;",
+        ]
+    )
+    for kind, aliases in class_members.items():
+        if aliases:
+            lines.append(f"    class {','.join(aliases)} {kind};")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def parse_mindmap_studio_import_payload() -> dict[str, Any]:
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload.get("document"), dict):
+            return payload["document"]
+        if isinstance(payload, dict):
+            return payload
+        raise ValueError("缺少可导入的导图 JSON。")
+
+    upload = request.files.get("file")
+    if upload is None:
+        raise ValueError("请先上传一个导图 JSON 文件。")
+
+    raw_bytes = upload.read(MINDMAP_STUDIO_IMPORT_MAX_BYTES + 1)
+    if len(raw_bytes) > MINDMAP_STUDIO_IMPORT_MAX_BYTES:
+        raise ValueError(f"导入文件过大，当前上限是 {MINDMAP_STUDIO_IMPORT_MAX_BYTES // 1024} KB。")
+    if not raw_bytes:
+        raise ValueError("导入文件为空。")
+
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"导入文件不是有效的 UTF-8 JSON：{exc}") from exc
+
+    if isinstance(payload, dict) and isinstance(payload.get("document"), dict):
+        return payload["document"]
+    if isinstance(payload, dict):
+        return payload
+    raise ValueError("导入文件缺少可识别的导图对象。")
+
+
+def build_mindmap_studio_imported_document(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    normalized_document = normalize_mindmap_studio_document(raw_payload)
+    imported_document = deepcopy(normalized_document)
+    imported_document["id"] = uuid.uuid4().hex[:12]
+    imported_document["created_at"] = now_iso()
+    imported_document["updated_at"] = now_iso()
+    imported_document["revision"] = 1
+    imported_document["history"] = []
+    imported_document["source_record_id"] = str(imported_document.get("source_record_id") or "").strip()[:24]
+    return normalize_mindmap_studio_document(imported_document)
+
+
+def build_mindmap_studio_restored_document(
+    existing_document: dict[str, Any],
+    restored_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    merged_document = {
+        **build_mindmap_studio_snapshot_payload(restored_snapshot, document_id=existing_document["id"]),
+        "id": existing_document["id"],
+        "schema_version": existing_document.get("schema_version") or MINDMAP_STUDIO_SCHEMA_VERSION,
+        "created_at": existing_document.get("created_at") or now_iso(),
+        "updated_at": now_iso(),
+        "revision": max(1, int(existing_document.get("revision") or 1)) + 1,
+        "history": deepcopy(existing_document.get("history", [])) if isinstance(existing_document.get("history"), list) else [],
+    }
+    return normalize_mindmap_studio_document(merged_document)
+
+
 def build_export_center_context() -> dict[str, Any]:
     store = load_stock_store()
     stock_options = build_stock_selector_options(store)
     today = datetime.now().date()
+    artifact_bootstrap = build_ai_artifact_bootstrap_payload(artifact_limit=6, job_limit=6)
     return {
         "stock_options": stock_options,
         "default_export_symbol": stock_options[0]["symbol"] if stock_options else "",
         "current_export_url": url_for("export_center_page"),
         "default_export_end_date": today.isoformat(),
         "default_export_start_date": (today - timedelta(days=6)).isoformat(),
+        "ai_artifact_bootstrap": artifact_bootstrap,
+        "ai_artifact_endpoints": artifact_bootstrap.get("entrypoints", {}),
     }
 
 
@@ -15071,6 +28511,9 @@ def generate_mindmap():
     reports = collect_reports()
     known_symbols = {item["symbol"] for item in build_stock_selector_options(stock_store)}
     submitted_scope = extract_mindmap_scope_request_payload(request.form)
+    generation_prompt = normalize_mindmap_generation_prompt(request.form.get("generation_prompt"))
+    brief_upload = request.files.get("generation_brief_file")
+    save_mindmap_generation_prompt_draft(generation_prompt)
     draft_scope_settings = load_mindmap_scope_draft(known_symbols=known_symbols)
     try:
         scope_settings = normalize_ai_scope_settings(
@@ -15127,9 +28570,18 @@ def generate_mindmap():
         return redirect(url_for("mindmap_workspace"))
 
     scope_summary = build_ai_scope_summary(scope_settings, materials)
+    record_id = uuid.uuid4().hex[:12]
+    generation_brief: dict[str, Any] = {}
+    if brief_upload and str(getattr(brief_upload, "filename", "") or "").strip():
+        try:
+            generation_brief = store_mindmap_generation_brief(brief_upload, record_id=record_id)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("mindmap_workspace"))
+
     record = normalize_mindmap_record(
         {
-            "id": uuid.uuid4().hex[:12],
+            "id": record_id,
             "title": build_mindmap_seed_title(scope_settings),
             "created_at": now_iso(),
             "updated_at": now_iso(),
@@ -15138,6 +28590,8 @@ def generate_mindmap():
             "reasoning_effort": reasoning_effort,
             "scope_settings": scope_settings,
             "scope_summary": scope_summary,
+            "generation_prompt": generation_prompt,
+            "generation_brief": generation_brief,
             "summary": "",
             "map_payload": None,
             "fingerprint": {
@@ -15145,6 +28599,10 @@ def generate_mindmap():
                 "pipeline_version": MINDMAP_PIPELINE_VERSION,
                 "prompt_version": MINDMAP_PROMPT_VERSION,
                 "schema_version": MINDMAP_SCHEMA_VERSION,
+                "generation_prompt": generation_prompt,
+                "generation_prompt_digest": sha256_text(generation_prompt),
+                "generation_brief": generation_brief,
+                "generation_brief_digest": sha256_text((generation_brief or {}).get("text") or ""),
                 "validation": {
                     "warnings": [],
                     "errors": [],
@@ -15154,6 +28612,7 @@ def generate_mindmap():
         }
     )
     if record is None:
+        delete_mindmap_generation_brief(generation_brief, record_id=record_id)
         abort(500)
 
     with MINDMAP_LOCK:
@@ -15180,10 +28639,12 @@ def generate_mindmap():
 def delete_mindmap(record_id: str):
     redirect_id = ""
     running = False
+    generation_brief: dict[str, Any] = {}
     with MINDMAP_LOCK:
         store = load_mindmap_store()
         record = get_mindmap_record(store, record_id)
         running = record["status"] in {"pending", "running"}
+        generation_brief = deepcopy(record.get("generation_brief") or {})
         store["records"] = [item for item in store.get("records", []) if item["id"] != record_id]
         if store["records"]:
             redirect_id = store["records"][0]["id"]
@@ -15196,6 +28657,8 @@ def delete_mindmap(record_id: str):
                 process.terminate()
             except OSError:
                 pass
+
+    delete_mindmap_generation_brief(generation_brief, record_id=record_id)
 
     if redirect_id:
         return redirect(url_for("mindmap_workspace", map=redirect_id))
@@ -15281,15 +28744,34 @@ def create_mindmap_studio_document():
     return jsonify({"ok": True, **response_payload})
 
 
+@app.post("/labs/mindmap-studio/import")
+def import_mindmap_studio_document():
+    try:
+        raw_payload = parse_mindmap_studio_import_payload()
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = build_mindmap_studio_imported_document(raw_payload)
+        store.setdefault("documents", []).insert(0, document)
+        save_mindmap_studio_store(store)
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=document["id"])
+
+    return jsonify({"ok": True, "imported_document_id": document["id"], **response_payload})
+
+
 @app.post("/labs/mindmap-studio/documents/<document_id>/duplicate")
 def duplicate_mindmap_studio_document(document_id: str):
     with MINDMAP_STUDIO_LOCK:
         store = load_mindmap_studio_store()
         source_document = deepcopy(get_mindmap_studio_document(store, document_id))
         source_document["id"] = uuid.uuid4().hex[:12]
+        source_document["revision"] = 1
         source_document["title"] = (source_document["title"] + " 副本")[:120]
         source_document["created_at"] = now_iso()
         source_document["updated_at"] = now_iso()
+        source_document["history"] = []
         store.setdefault("documents", []).insert(0, normalize_mindmap_studio_document(source_document))
         save_mindmap_studio_store(store)
         response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=source_document["id"])
@@ -15312,6 +28794,39 @@ def delete_mindmap_studio_document(document_id: str):
     return jsonify({"ok": True, **response_payload})
 
 
+@app.get("/labs/mindmap-studio/documents/<document_id>/history.json")
+def mindmap_studio_document_history(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+
+    history_items = [
+        {
+            "id": str(entry.get("id") or "").strip(),
+            "created_at": str(entry.get("created_at") or ""),
+            "created_label": format_iso_timestamp(str(entry.get("created_at") or "")),
+            "reason": str(entry.get("reason") or "").strip(),
+            "label": str(entry.get("label") or "").strip(),
+            "revision": max(1, int(entry.get("revision") or 1)),
+            "node_count": max(0, int(entry.get("node_count") or 0)),
+            "relationship_count": max(0, int(entry.get("relationship_count") or 0)),
+            "title": str(((entry.get("snapshot") or {}) if isinstance(entry.get("snapshot"), dict) else {}).get("title") or "").strip(),
+            "summary": str(((entry.get("snapshot") or {}) if isinstance(entry.get("snapshot"), dict) else {}).get("summary") or "").strip(),
+        }
+        for entry in document.get("history", []) if isinstance(document.get("history"), list)
+        if isinstance(entry, dict)
+    ]
+    return jsonify(
+        {
+            "ok": True,
+            "document_id": document["id"],
+            "title": document["title"],
+            "revision": max(1, int(document.get("revision") or 1)),
+            "history": history_items,
+        }
+    )
+
+
 @app.post("/labs/mindmap-studio/documents/<document_id>/save")
 def save_mindmap_studio_document(document_id: str):
     payload = request.get_json(silent=True) or {}
@@ -15325,8 +28840,25 @@ def save_mindmap_studio_document(document_id: str):
         merged_document = {
             **raw_document,
             "id": existing_document["id"],
+            "schema_version": existing_document.get("schema_version") or MINDMAP_STUDIO_SCHEMA_VERSION,
+            "source_record_id": (
+                raw_document.get("source_record_id")
+                if "source_record_id" in raw_document
+                else existing_document.get("source_record_id", "")
+            ),
             "created_at": existing_document["created_at"],
             "updated_at": now_iso(),
+            "revision": max(1, int(existing_document.get("revision") or 1)) + 1,
+            "summary": (
+                raw_document.get("summary")
+                if "summary" in raw_document
+                else existing_document.get("summary", "")
+            ),
+            "structure_kind": (
+                raw_document.get("structure_kind")
+                if "structure_kind" in raw_document
+                else existing_document.get("structure_kind", "theme_bundle")
+            ),
             "generated_snapshot": (
                 raw_document.get("generated_snapshot")
                 if "generated_snapshot" in raw_document
@@ -15336,6 +28868,41 @@ def save_mindmap_studio_document(document_id: str):
                 raw_document.get("reference_document_ids")
                 if "reference_document_ids" in raw_document
                 else existing_document.get("reference_document_ids", [])
+            ),
+            "history": (
+                raw_document.get("history")
+                if "history" in raw_document
+                else existing_document.get("history", [])
+            ),
+            "insights": (
+                raw_document.get("insights")
+                if "insights" in raw_document
+                else existing_document.get("insights", [])
+            ),
+            "comparison_axes": (
+                raw_document.get("comparison_axes")
+                if "comparison_axes" in raw_document
+                else existing_document.get("comparison_axes", [])
+            ),
+            "verification_targets": (
+                raw_document.get("verification_targets")
+                if "verification_targets" in raw_document
+                else existing_document.get("verification_targets", [])
+            ),
+            "timeline_highlights": (
+                raw_document.get("timeline_highlights")
+                if "timeline_highlights" in raw_document
+                else existing_document.get("timeline_highlights", [])
+            ),
+            "source_relations": (
+                raw_document.get("source_relations")
+                if "source_relations" in raw_document
+                else existing_document.get("source_relations", [])
+            ),
+            "fingerprint": (
+                raw_document.get("fingerprint")
+                if "fingerprint" in raw_document
+                else existing_document.get("fingerprint", {})
             ),
         }
         normalized_document = normalize_mindmap_studio_document(merged_document)
@@ -15350,12 +28917,64 @@ def save_mindmap_studio_document(document_id: str):
     return jsonify({"ok": True, **response_payload})
 
 
+@app.get("/labs/mindmap-studio/documents/<document_id>/diff.json")
+def diff_mindmap_studio_document(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+
+    default_left_ref = "baseline" if document.get("generated_snapshot") else "current"
+    left_ref = request.args.get("left", default_left_ref)
+    right_ref = request.args.get("right", "current")
+    try:
+        left_label, left_document = resolve_mindmap_studio_document_reference(document, left_ref)
+        right_label, right_document = resolve_mindmap_studio_document_reference(document, right_ref)
+    except KeyError as exc:
+        return jsonify({"ok": False, "message": f"找不到要对比的版本：{exc}"}), 404
+
+    return jsonify(
+        {
+            "ok": True,
+            "document_id": document["id"],
+            "left_ref": str(left_ref or "current"),
+            "left_label": left_label,
+            "right_ref": str(right_ref or "current"),
+            "right_label": right_label,
+            "diff": build_mindmap_studio_document_diff(left_document, right_document),
+        }
+    )
+
+
+@app.post("/labs/mindmap-studio/documents/<document_id>/restore")
+def restore_mindmap_studio_document(document_id: str):
+    payload = request.get_json(silent=True) or {}
+    source_ref = str((payload.get("source") if isinstance(payload, dict) else "") or "baseline").strip() or "baseline"
+
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        existing_document = deepcopy(get_mindmap_studio_document(store, document_id))
+        try:
+            source_label, restored_snapshot = resolve_mindmap_studio_document_reference(existing_document, source_ref)
+        except KeyError as exc:
+            return jsonify({"ok": False, "message": f"找不到要恢复的版本：{exc}"}), 404
+
+        restored_document = build_mindmap_studio_restored_document(existing_document, restored_snapshot)
+        store["documents"] = [
+            restored_document if item["id"] == document_id else item
+            for item in store.get("documents", [])
+        ]
+        save_mindmap_studio_store(store)
+        response_payload = build_mindmap_studio_bootstrap_payload(store, document_id=document_id)
+
+    return jsonify({"ok": True, "restored_from": source_label, **response_payload})
+
+
 @app.get("/labs/mindmap-studio/documents/<document_id>/export.json")
 def export_mindmap_studio_document(document_id: str):
     with MINDMAP_STUDIO_LOCK:
         store = load_mindmap_studio_store()
         document = deepcopy(get_mindmap_studio_document(store, document_id))
-    export_payload = serialize_mindmap_studio_document(document)
+    export_payload = serialize_mindmap_studio_document(document, include_analysis=True)
     buffer = io.BytesIO(json.dumps(export_payload, ensure_ascii=False, indent=2).encode("utf-8"))
     filename = secure_filename(document["title"]) or f"mindmap-{document['id']}"
     return send_file(
@@ -15363,6 +28982,53 @@ def export_mindmap_studio_document(document_id: str):
         mimetype="application/json",
         as_attachment=True,
         download_name=f"{filename}.json",
+    )
+
+
+@app.get("/labs/mindmap-studio/documents/<document_id>/analysis.json")
+def analyze_mindmap_studio_document(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+    return jsonify(
+        {
+            "ok": True,
+            "document_id": document["id"],
+            "title": document["title"],
+            "analysis": build_mindmap_studio_document_analysis(document),
+        }
+    )
+
+
+@app.get("/labs/mindmap-studio/documents/<document_id>/export.md")
+def export_mindmap_studio_document_markdown(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+    markdown_text = build_mindmap_studio_markdown_export(document)
+    buffer = io.BytesIO(markdown_text.encode("utf-8"))
+    filename = secure_filename(document["title"]) or f"mindmap-{document['id']}"
+    return send_file(
+        buffer,
+        mimetype="text/markdown",
+        as_attachment=True,
+        download_name=f"{filename}.md",
+    )
+
+
+@app.get("/labs/mindmap-studio/documents/<document_id>/export.mmd")
+def export_mindmap_studio_document_mermaid(document_id: str):
+    with MINDMAP_STUDIO_LOCK:
+        store = load_mindmap_studio_store()
+        document = deepcopy(get_mindmap_studio_document(store, document_id))
+    mermaid_text = build_mindmap_studio_mermaid_export(document)
+    buffer = io.BytesIO(mermaid_text.encode("utf-8"))
+    filename = secure_filename(document["title"]) or f"mindmap-{document['id']}"
+    return send_file(
+        buffer,
+        mimetype="text/plain",
+        as_attachment=True,
+        download_name=f"{filename}.mmd",
     )
 
 
@@ -15399,12 +29065,1149 @@ def data_monitor_page() -> str:
     reports = collect_reports()
     stock_store = load_stock_store()
     active_tab = normalize_data_monitor_tab(request.args.get("tab"))
+    export_json_url = ""
+    export_markdown_url = ""
+    if active_tab == "cdn":
+        monitor_context = build_cdn_data_monitor_context()
+        export_json_url = url_for("ai_native_cdn_data_json")
+        export_markdown_url = url_for("ai_native_cdn_data_markdown")
+    elif active_tab == "gpu_prices":
+        monitor_context = build_gpu_price_data_monitor_context()
+        export_json_url = url_for("ai_native_gpu_price_data_json")
+        export_markdown_url = url_for("ai_native_gpu_price_data_markdown")
+    elif active_tab == "applovin":
+        selected_platform_id = str(request.args.get("platform") or "").strip()
+        selected_category_id = str(request.args.get("category") or "").strip()
+        monitor_context = build_applovin_data_monitor_context(
+            platform_id=selected_platform_id,
+            category_id=selected_category_id,
+        )
+        export_json_url = url_for(
+            "ai_native_applovin_data_json",
+            platform=monitor_context.get("applovin_selected_platform_id") or selected_platform_id,
+            category=monitor_context.get("applovin_selected_category_id") or selected_category_id,
+        )
+        export_markdown_url = url_for(
+            "ai_native_applovin_data_markdown",
+            platform=monitor_context.get("applovin_selected_platform_id") or selected_platform_id,
+            category=monitor_context.get("applovin_selected_category_id") or selected_category_id,
+        )
+    else:
+        monitor_context = build_stablecoin_data_monitor_context()
+        export_json_url = url_for("ai_native_stablecoin_data_json")
+        export_markdown_url = url_for("ai_native_stablecoin_data_markdown")
     return render_template(
         "data_monitor.html",
         data_monitor_active_tab=active_tab,
-        **build_stablecoin_data_monitor_context(),
+        data_monitor_export_json_url=export_json_url,
+        data_monitor_export_markdown_url=export_markdown_url,
+        **monitor_context,
         **build_navigation_context(active_page="data_monitor", reports=reports, stock_store=stock_store),
     )
+
+
+@app.get("/api/ai/bootstrap.json")
+def ai_native_bootstrap_json():
+    return jsonify(build_ai_native_bootstrap_payload())
+
+
+@app.get("/api/ai/readme.md")
+def ai_native_readme_markdown():
+    readme_text = materialize_ai_native_readme_text()
+    return readme_text, 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/readme.json")
+def ai_native_readme_json():
+    return jsonify(build_ai_native_readme_payload())
+
+
+@app.get("/api/ai/manifest.json")
+def ai_native_manifest_json():
+    kind = str(request.args.get("kind") or "").strip()
+    symbol = str(request.args.get("symbol") or "").strip()
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(0, int(request.args.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    materialize_assets = is_truthy_flag(request.args.get("materialize")) or is_truthy_flag(
+        request.args.get("materialize_assets")
+    )
+    payload = build_ai_native_manifest_payload(
+        kind=kind,
+        symbol=symbol,
+        query=query,
+        limit=limit,
+        materialize_assets=materialize_assets,
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/manifest.md")
+def ai_native_manifest_markdown():
+    kind = str(request.args.get("kind") or "").strip()
+    symbol = str(request.args.get("symbol") or "").strip()
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(0, int(request.args.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    payload = build_ai_native_manifest_payload(kind=kind, symbol=symbol, query=query, limit=limit)
+    return build_ai_native_manifest_markdown(payload), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/search.json")
+def ai_native_search_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_NATIVE_SEARCH_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_NATIVE_SEARCH_DEFAULT_LIMIT
+    payload = search_ai_native_index(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/search/<path:path_query>.json")
+def ai_native_search_path_json(path_query: str):
+    query = str(path_query or request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_NATIVE_SEARCH_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_NATIVE_SEARCH_DEFAULT_LIMIT
+    payload = search_ai_native_index(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/context-pack.json")
+def ai_native_context_pack_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        document_limit = max(1, int(request.args.get("document_limit") or request.args.get("doc_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT))
+    except (TypeError, ValueError):
+        document_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT
+    try:
+        chunk_limit = max(1, int(request.args.get("chunk_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT))
+    except (TypeError, ValueError):
+        chunk_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT
+    try:
+        per_document_chunk_limit = max(
+            1,
+            int(request.args.get("per_document_chunk_limit") or request.args.get("per_doc_chunk_limit") or AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT),
+        )
+    except (TypeError, ValueError):
+        per_document_chunk_limit = AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT
+    payload = build_ai_native_context_pack_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        document_limit=document_limit,
+        chunk_limit=chunk_limit,
+        per_document_chunk_limit=per_document_chunk_limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/context-pack/<path:path_query>/symbols/<path:path_symbols>.json")
+def ai_native_context_pack_path_json(path_query: str, path_symbols: str):
+    query = str(path_query or request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = [path_symbols]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        document_limit = max(
+            1,
+            int(request.args.get("document_limit") or request.args.get("doc_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT),
+        )
+    except (TypeError, ValueError):
+        document_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT
+    try:
+        chunk_limit = max(1, int(request.args.get("chunk_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT))
+    except (TypeError, ValueError):
+        chunk_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT
+    try:
+        per_document_chunk_limit = max(
+            1,
+            int(request.args.get("per_document_chunk_limit") or request.args.get("per_doc_chunk_limit") or AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT),
+        )
+    except (TypeError, ValueError):
+        per_document_chunk_limit = AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT
+    payload = build_ai_native_context_pack_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        document_limit=document_limit,
+        chunk_limit=chunk_limit,
+        per_document_chunk_limit=per_document_chunk_limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/analysis/timeline.json")
+def ai_analysis_timeline_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT
+    payload = build_ai_timeline_analysis_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/analysis/timeline/<path:path_symbols>.json")
+def ai_analysis_timeline_path_json(path_symbols: str):
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = [path_symbols]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT
+    payload = build_ai_timeline_analysis_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/analysis/compare.json")
+def ai_analysis_compare_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    resolved_symbols = normalize_ai_native_symbol_filters(raw_symbols)
+    if len(resolved_symbols) < 2:
+        return jsonify({"ok": False, "error": "at least two symbols are required"}), 400
+    try:
+        per_symbol_limit = max(
+            1,
+            int(request.args.get("per_symbol_limit") or request.args.get("limit") or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT),
+        )
+    except (TypeError, ValueError):
+        per_symbol_limit = AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT
+    payload = build_ai_compare_analysis_payload(
+        symbol_filters=resolved_symbols,
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        query=query,
+        per_symbol_limit=per_symbol_limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/analysis/compare/<path:path_symbols>.json")
+def ai_analysis_compare_path_json(path_symbols: str):
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = [path_symbols]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    resolved_symbols = normalize_ai_native_symbol_filters(raw_symbols)
+    if len(resolved_symbols) < 2:
+        return jsonify({"ok": False, "error": "at least two symbols are required"}), 400
+    try:
+        per_symbol_limit = max(
+            1,
+            int(request.args.get("per_symbol_limit") or request.args.get("limit") or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT),
+        )
+    except (TypeError, ValueError):
+        per_symbol_limit = AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT
+    payload = build_ai_compare_analysis_payload(
+        symbol_filters=resolved_symbols,
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        query=query,
+        per_symbol_limit=per_symbol_limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/agent/bootstrap.json")
+def ai_agent_bootstrap_json():
+    return jsonify(build_ai_agent_bootstrap_payload())
+
+
+@app.get("/api/agent/tools/search.json")
+def ai_agent_search_tool_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_NATIVE_SEARCH_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_NATIVE_SEARCH_DEFAULT_LIMIT
+    payload = search_ai_native_index(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(
+        build_ai_agent_tool_response(
+            "search",
+            payload,
+            request_payload={
+                "query": query,
+                "symbols": normalize_ai_native_symbol_filters(raw_symbols),
+                "kinds": normalize_ai_native_kind_filters(raw_kinds),
+                "limit": limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/tools/context-pack.json")
+def ai_agent_context_pack_tool_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        document_limit = max(
+            1,
+            int(request.args.get("document_limit") or request.args.get("doc_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT),
+        )
+    except (TypeError, ValueError):
+        document_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_DOC_LIMIT
+    try:
+        chunk_limit = max(1, int(request.args.get("chunk_limit") or AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT))
+    except (TypeError, ValueError):
+        chunk_limit = AI_NATIVE_CONTEXT_PACK_DEFAULT_CHUNK_LIMIT
+    payload = build_ai_native_context_pack_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        document_limit=document_limit,
+        chunk_limit=chunk_limit,
+        per_document_chunk_limit=AI_NATIVE_CONTEXT_PACK_PER_DOC_CHUNK_LIMIT,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(
+        build_ai_agent_tool_response(
+            "context_pack",
+            payload,
+            request_payload={
+                "query": query,
+                "symbols": normalize_ai_native_symbol_filters(raw_symbols),
+                "kinds": normalize_ai_native_kind_filters(raw_kinds),
+                "document_limit": document_limit,
+                "chunk_limit": chunk_limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/tools/timeline.json")
+def ai_agent_timeline_tool_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT
+    payload = build_ai_timeline_analysis_payload(
+        query=query,
+        symbol_filters=normalize_ai_native_symbol_filters(raw_symbols),
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        limit=limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(
+        build_ai_agent_tool_response(
+            "timeline",
+            payload,
+            request_payload={
+                "query": query,
+                "symbols": normalize_ai_native_symbol_filters(raw_symbols),
+                "kinds": normalize_ai_native_kind_filters(raw_kinds),
+                "limit": limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/tools/compare.json")
+def ai_agent_compare_tool_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    resolved_symbols = normalize_ai_native_symbol_filters(raw_symbols)
+    if len(resolved_symbols) < 2:
+        return jsonify({"ok": False, "error": "at least two symbols are required"}), 400
+    try:
+        per_symbol_limit = max(
+            1,
+            int(request.args.get("per_symbol_limit") or request.args.get("limit") or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT),
+        )
+    except (TypeError, ValueError):
+        per_symbol_limit = AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT
+    payload = build_ai_compare_analysis_payload(
+        symbol_filters=resolved_symbols,
+        kind_filters=normalize_ai_native_kind_filters(raw_kinds),
+        query=query,
+        per_symbol_limit=per_symbol_limit,
+        force_refresh=is_truthy_flag(request.args.get("refresh")),
+    )
+    return jsonify(
+        build_ai_agent_tool_response(
+            "compare",
+            payload,
+            request_payload={
+                "query": query,
+                "symbols": resolved_symbols,
+                "kinds": normalize_ai_native_kind_filters(raw_kinds),
+                "per_symbol_limit": per_symbol_limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/tools/artifacts.json")
+def ai_agent_artifact_tool_json():
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(1, int(request.args.get("limit") or 24))
+    except (TypeError, ValueError):
+        limit = 24
+    return jsonify(
+        build_ai_agent_tool_response(
+            "artifacts",
+            build_ai_artifact_list_payload(
+                limit=limit,
+                kind_filters=raw_kinds,
+                symbol_filters=raw_symbols,
+                query=query,
+            ),
+            request_payload={
+                "kinds": normalize_ai_artifact_kind_filters(raw_kinds),
+                "symbols": normalize_ai_native_symbol_filters(raw_symbols),
+                "query": query,
+                "limit": limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/tools/jobs.json")
+def ai_agent_job_tool_json():
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    raw_statuses = request.args.getlist("statuses")
+    if not raw_statuses:
+        raw_statuses = [request.args.get("statuses", ""), request.args.get("status", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or 24))
+    except (TypeError, ValueError):
+        limit = 24
+    return jsonify(
+        build_ai_agent_tool_response(
+            "jobs",
+            build_ai_job_list_payload(
+                limit=limit,
+                kind_filters=raw_kinds,
+                status_filters=raw_statuses,
+            ),
+            request_payload={
+                "kinds": normalize_ai_job_kind_filters(raw_kinds),
+                "statuses": normalize_ai_job_status_filters(raw_statuses),
+                "limit": limit,
+            },
+        )
+    )
+
+
+@app.get("/api/agent/writes/operations.json")
+def ai_agent_write_operations_json():
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    try:
+        limit = max(1, int(request.args.get("limit") or 24))
+    except (TypeError, ValueError):
+        limit = 24
+    return jsonify(build_ai_agent_write_operations_payload(limit=limit))
+
+
+@app.post("/api/agent/writes/clipboard/preview.json")
+def ai_agent_clipboard_preview_json():
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return ai_agent_json_error("json body is required", 400)
+    try:
+        operation = build_ai_agent_clipboard_preview_operation(payload)
+    except ValueError as exc:
+        return ai_agent_json_error(str(exc), 400)
+    with AI_AGENT_OPS_LOCK:
+        store = load_ai_agent_ops_store()
+        store.setdefault("operations", []).insert(0, operation)
+        save_ai_agent_ops_store(store)
+    return jsonify(
+        {
+            "ok": True,
+            "tool": "clipboard_item_preview",
+            "guarded_write": True,
+            "preview_required": True,
+            "operation": build_ai_agent_operation_public_payload(operation),
+        }
+    )
+
+
+@app.post("/api/agent/writes/stock-note/preview.json")
+def ai_agent_stock_note_preview_json():
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return ai_agent_json_error("json body is required", 400)
+    try:
+        operation = build_ai_agent_stock_note_preview_operation(payload)
+    except ValueError as exc:
+        return ai_agent_json_error(str(exc), 400)
+    with AI_AGENT_OPS_LOCK:
+        store = load_ai_agent_ops_store()
+        store.setdefault("operations", []).insert(0, operation)
+        save_ai_agent_ops_store(store)
+    return jsonify(
+        {
+            "ok": True,
+            "tool": "stock_note_preview",
+            "guarded_write": True,
+            "preview_required": True,
+            "operation": build_ai_agent_operation_public_payload(operation),
+        }
+    )
+
+
+@app.post("/api/agent/writes/operations/<operation_id>/commit.json")
+def ai_agent_write_operation_commit_json(operation_id: str):
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    safe_operation_id = secure_filename(str(operation_id or "").strip())[:24]
+    if not safe_operation_id:
+        return ai_agent_json_error("operation_id is required", 400)
+    with AI_AGENT_OPS_LOCK:
+        store = load_ai_agent_ops_store()
+        operation_index, operation = find_ai_agent_operation(store, safe_operation_id)
+        if operation is None:
+            return ai_agent_json_error("operation was not found", 404)
+        if operation.get("status") != "preview":
+            return ai_agent_json_error("only preview operations can be committed", 409)
+        commit_result = commit_ai_agent_operation(operation)
+        if not commit_result.get("ok"):
+            extra = {}
+            if isinstance(commit_result.get("conflict"), dict):
+                extra["conflict"] = commit_result["conflict"]
+            return ai_agent_json_error(
+                str(commit_result.get("error") or "commit failed"),
+                int(commit_result.get("status_code") or 400),
+                extra=extra,
+            )
+        operation["status"] = "committed"
+        operation["updated_at"] = now_iso()
+        operation["committed_at"] = now_iso()
+        operation["result"] = commit_result.get("result") if isinstance(commit_result.get("result"), dict) else {}
+        store["operations"][operation_index] = operation
+        save_ai_agent_ops_store(store)
+    return jsonify(
+        {
+            "ok": True,
+            "guarded_write": True,
+            "operation": build_ai_agent_operation_public_payload(operation),
+            "result": operation.get("result", {}),
+        }
+    )
+
+
+@app.post("/api/agent/writes/operations/<operation_id>/discard.json")
+def ai_agent_write_operation_discard_json(operation_id: str):
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    safe_operation_id = secure_filename(str(operation_id or "").strip())[:24]
+    if not safe_operation_id:
+        return ai_agent_json_error("operation_id is required", 400)
+    with AI_AGENT_OPS_LOCK:
+        store = load_ai_agent_ops_store()
+        operation_index, operation = find_ai_agent_operation(store, safe_operation_id)
+        if operation is None:
+            return ai_agent_json_error("operation was not found", 404)
+        if operation.get("status") != "preview":
+            return ai_agent_json_error("only preview operations can be discarded", 409)
+        operation["status"] = "discarded"
+        operation["updated_at"] = now_iso()
+        operation["discarded_at"] = now_iso()
+        store["operations"][operation_index] = operation
+        save_ai_agent_ops_store(store)
+    return jsonify(
+        {
+            "ok": True,
+            "guarded_write": True,
+            "operation": build_ai_agent_operation_public_payload(operation),
+        }
+    )
+
+
+@app.get("/api/artifacts/bootstrap.json")
+def ai_artifact_bootstrap_json():
+    return jsonify(build_ai_artifact_bootstrap_payload())
+
+
+@app.get("/api/artifacts/list.json")
+def ai_artifact_list_json():
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    raw_symbols = request.args.getlist("symbols")
+    if not raw_symbols:
+        raw_symbols = [request.args.get("symbols", ""), request.args.get("symbol", "")]
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(1, int(request.args.get("limit") or 24))
+    except (TypeError, ValueError):
+        limit = 24
+    return jsonify(
+        build_ai_artifact_list_payload(
+            limit=limit,
+            kind_filters=raw_kinds,
+            symbol_filters=raw_symbols,
+            query=query,
+        )
+    )
+
+
+@app.get("/api/artifacts/<artifact_id>.json")
+def ai_artifact_detail_json(artifact_id: str):
+    safe_artifact_id = secure_filename(str(artifact_id or "").strip())[:24]
+    if not safe_artifact_id:
+        return jsonify({"ok": False, "error": "artifact_id is required"}), 400
+    with AI_ARTIFACT_LOCK:
+        store = load_ai_artifact_store()
+        _, artifact = find_ai_artifact(store, safe_artifact_id)
+    if artifact is None:
+        return jsonify({"ok": False, "error": "artifact was not found"}), 404
+    return jsonify(
+        {
+            "ok": True,
+            "generated_at": now_iso(),
+            "artifact": build_ai_artifact_public_payload(
+                artifact,
+                include_payload=True,
+                include_markdown=True,
+            ),
+        }
+    )
+
+
+@app.get("/api/artifacts/<artifact_id>.md")
+def ai_artifact_markdown(artifact_id: str):
+    safe_artifact_id = secure_filename(str(artifact_id or "").strip())[:24]
+    if not safe_artifact_id:
+        abort(404)
+    with AI_ARTIFACT_LOCK:
+        store = load_ai_artifact_store()
+        _, artifact = find_ai_artifact(store, safe_artifact_id)
+    if artifact is None:
+        abort(404)
+    return str(artifact.get("markdown") or ""), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/jobs/list.json")
+def ai_job_list_json():
+    raw_kinds = request.args.getlist("kinds")
+    if not raw_kinds:
+        raw_kinds = [request.args.get("kinds", ""), request.args.get("kind", "")]
+    raw_statuses = request.args.getlist("statuses")
+    if not raw_statuses:
+        raw_statuses = [request.args.get("statuses", ""), request.args.get("status", "")]
+    try:
+        limit = max(1, int(request.args.get("limit") or 24))
+    except (TypeError, ValueError):
+        limit = 24
+    return jsonify(
+        build_ai_job_list_payload(
+            limit=limit,
+            kind_filters=raw_kinds,
+            status_filters=raw_statuses,
+        )
+    )
+
+
+@app.get("/api/jobs/<job_id>.json")
+def ai_job_detail_json(job_id: str):
+    safe_job_id = secure_filename(str(job_id or "").strip())[:24]
+    if not safe_job_id:
+        return jsonify({"ok": False, "error": "job_id is required"}), 400
+    job = read_ai_job(safe_job_id)
+    if job is None:
+        return jsonify({"ok": False, "error": "job was not found"}), 404
+    return jsonify(
+        {
+            "ok": True,
+            "generated_at": now_iso(),
+            "job": build_ai_job_public_payload(job),
+        }
+    )
+
+
+@app.post("/api/jobs/artifacts/timeline.json")
+def queue_ai_timeline_artifact_job():
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return ai_agent_json_error("json body is required", 400)
+    try:
+        limit = max(1, int(payload.get("limit") or AI_ANALYSIS_TIMELINE_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        return ai_agent_json_error("limit must be a positive integer", 400)
+    request_payload = {
+        "title": str(payload.get("title") or "").strip()[:160],
+        "query": str(payload.get("query") or payload.get("q") or "").strip(),
+        "symbols": normalize_ai_native_symbol_filters(payload.get("symbols", [])),
+        "kinds": normalize_ai_native_kind_filters(payload.get("kinds", [])),
+        "limit": limit,
+        "refresh": is_truthy_flag(payload.get("refresh")),
+    }
+    job = enqueue_ai_artifact_job(job_kind="artifact_timeline", request_payload=request_payload)
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "queued": True,
+                "job": build_ai_job_public_payload(job),
+                "bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+            }
+        ),
+        202,
+    )
+
+
+@app.post("/api/jobs/artifacts/compare.json")
+def queue_ai_compare_artifact_job():
+    access_error = ensure_ai_agent_admin_access()
+    if access_error is not None:
+        return access_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return ai_agent_json_error("json body is required", 400)
+    symbols = normalize_ai_native_symbol_filters(payload.get("symbols", []))
+    if len(symbols) < 2:
+        return ai_agent_json_error("at least two symbols are required", 400)
+    try:
+        per_symbol_limit = max(1, int(payload.get("per_symbol_limit") or payload.get("limit") or AI_ANALYSIS_COMPARE_PER_SYMBOL_LIMIT))
+    except (TypeError, ValueError):
+        return ai_agent_json_error("per_symbol_limit must be a positive integer", 400)
+    request_payload = {
+        "title": str(payload.get("title") or "").strip()[:160],
+        "query": str(payload.get("query") or payload.get("q") or "").strip(),
+        "symbols": symbols,
+        "kinds": normalize_ai_native_kind_filters(payload.get("kinds", [])),
+        "per_symbol_limit": per_symbol_limit,
+        "refresh": is_truthy_flag(payload.get("refresh")),
+    }
+    job = enqueue_ai_artifact_job(job_kind="artifact_compare", request_payload=request_payload)
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "queued": True,
+                "job": build_ai_job_public_payload(job),
+                "bootstrap_url": url_for("ai_artifact_bootstrap_json"),
+            }
+        ),
+        202,
+    )
+
+
+@app.get("/api/ai/brief.json")
+def ai_native_brief_json():
+    symbol = normalize_stock_symbol(request.args.get("symbol", ""))
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol query parameter is required"}), 400
+    return jsonify(build_ai_native_brief_payload(symbol))
+
+
+@app.get("/api/ai/brief/<symbol>.json")
+def ai_native_brief_path_json(symbol: str):
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not normalized_symbol:
+        return jsonify({"ok": False, "error": "symbol path parameter is required"}), 400
+    return jsonify(build_ai_native_brief_payload(normalized_symbol))
+
+
+@app.get("/api/ai/stock/<symbol>.json")
+def ai_native_compact_stock_json(symbol: str):
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not normalized_symbol:
+        return jsonify({"ok": False, "error": "symbol path parameter is required"}), 400
+    return jsonify(build_ai_native_compact_stock_payload(normalized_symbol))
+
+
+@app.get("/api/ai/stock/<symbol>.md")
+def ai_native_compact_stock_markdown(symbol: str):
+    normalized_symbol = normalize_stock_symbol(symbol)
+    if not normalized_symbol:
+        abort(404)
+    payload = build_ai_native_compact_stock_payload(normalized_symbol)
+    return build_ai_native_compact_stock_markdown(payload), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/experts.json")
+def ai_native_experts_json():
+    symbol = str(request.args.get("symbol") or "").strip()
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(0, int(request.args.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    materialize_assets = is_truthy_flag(request.args.get("materialize")) or is_truthy_flag(
+        request.args.get("materialize_assets")
+    )
+    payload = build_ai_native_expert_directory_payload(
+        symbol=symbol,
+        query=query,
+        limit=limit,
+        materialize_assets=materialize_assets,
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/experts/<symbol>.json")
+def ai_native_experts_path_json(symbol: str):
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(0, int(request.args.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    materialize_assets = is_truthy_flag(request.args.get("materialize")) or is_truthy_flag(
+        request.args.get("materialize_assets")
+    )
+    payload = build_ai_native_expert_directory_payload(
+        symbol=str(symbol or "").strip(),
+        query=query,
+        limit=limit,
+        materialize_assets=materialize_assets,
+    )
+    return jsonify(payload)
+
+
+@app.get("/api/ai/experts.md")
+def ai_native_experts_markdown():
+    symbol = str(request.args.get("symbol") or "").strip()
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    try:
+        limit = max(0, int(request.args.get("limit") or 0))
+    except (TypeError, ValueError):
+        limit = 0
+    payload = build_ai_native_expert_directory_payload(symbol=symbol, query=query, limit=limit)
+    return build_ai_native_expert_directory_markdown(payload), 200, {
+        "Content-Type": "text/markdown; charset=utf-8"
+    }
+
+
+@app.get("/api/ai/documents/<kind>/<path:doc_id>.md")
+def ai_native_document_markdown(kind: str, doc_id: str):
+    descriptor = resolve_ai_native_document_descriptor(kind, doc_id)
+    ensure_ai_native_document_asset(descriptor)
+    markdown_path = build_ai_native_asset_dir(kind, doc_id) / "document.md"
+    try:
+        content = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        abort(404)
+    return content, 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/md/<kind>/<path:doc_id>")
+def ai_native_document_markdown_plain(kind: str, doc_id: str):
+    return ai_native_document_markdown(kind, doc_id)
+
+
+@app.get("/api/ai/documents/<kind>/<path:doc_id>.json")
+def ai_native_document_json(kind: str, doc_id: str):
+    descriptor = resolve_ai_native_document_descriptor(kind, doc_id)
+    return jsonify(build_ai_native_document_response_payload(descriptor))
+
+
+@app.get("/api/ai/json/<kind>/<path:doc_id>")
+def ai_native_document_json_plain(kind: str, doc_id: str):
+    return ai_native_document_json(kind, doc_id)
+
+
+@app.get("/api/ai/latest/<symbol>/<kind>.json")
+def ai_native_latest_document_json(symbol: str, kind: str):
+    descriptor = find_latest_ai_native_document_descriptor(symbol, kind)
+    if descriptor is None:
+        return jsonify({"ok": False, "error": "no matching document was found"}), 404
+    return jsonify(
+        {
+            "ok": True,
+            "selected_symbol": normalize_stock_symbol(symbol) or "",
+            "selected_kind": str(kind or "").strip().lower(),
+            **build_ai_native_document_response_payload(descriptor),
+        }
+    )
+
+
+@app.get("/api/ai/latest/<symbol>/<kind>.md")
+def ai_native_latest_document_markdown(symbol: str, kind: str):
+    descriptor = find_latest_ai_native_document_descriptor(symbol, kind)
+    if descriptor is None:
+        abort(404)
+    return ai_native_document_markdown(str(descriptor.get("kind") or ""), str(descriptor.get("doc_id") or ""))
+
+
+@app.get("/api/ai/bundle.md")
+def ai_native_scope_bundle_markdown():
+    scope_settings, include_setups = parse_ai_native_scope_request()
+    try:
+        per_kind_limit = max(1, int(request.args.get("per_kind_limit") or AI_NATIVE_DEFAULT_SCOPE_LIMIT))
+    except (TypeError, ValueError):
+        per_kind_limit = AI_NATIVE_DEFAULT_SCOPE_LIMIT
+    content = render_ai_native_scope_bundle_markdown(
+        scope_settings,
+        include_setups=include_setups,
+        per_kind_limit=per_kind_limit,
+    )
+    return content, 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/data/stablecoins.json")
+def ai_native_stablecoin_data_json():
+    return jsonify(build_ai_native_stablecoin_payload())
+
+
+@app.get("/api/ai/data/manifest.json")
+def ai_native_data_manifest_json():
+    return jsonify(build_ai_native_data_manifest_payload())
+
+
+@app.get("/api/ai/data/search.json")
+def ai_native_data_search_json():
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    if not query:
+        return jsonify({"ok": False, "error": "q is required"}), 400
+
+    raw_datasets = request.args.getlist("datasets")
+    if not raw_datasets:
+        raw_datasets = [request.args.get("datasets", ""), request.args.get("dataset", "")]
+    raw_types = request.args.getlist("types")
+    if not raw_types:
+        raw_types = [request.args.get("types", ""), request.args.get("type", "")]
+    limit = normalize_ai_native_data_search_limit(
+        request.args.get("limit") or AI_NATIVE_DATA_SEARCH_DEFAULT_LIMIT
+    )
+    return jsonify(
+        build_ai_native_data_search_payload(
+            query=query,
+            dataset_filters=raw_datasets,
+            type_filters=raw_types,
+            limit=limit,
+        )
+    )
+
+
+@app.get("/api/ai/data/stablecoins.md")
+def ai_native_stablecoin_data_markdown():
+    descriptor = build_ai_native_stablecoin_descriptor(include_body=True)
+    ensure_ai_native_document_asset(descriptor)
+    return build_ai_native_markdown_document(descriptor), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/data/cdn.json")
+def ai_native_cdn_data_json():
+    provider = str(request.args.get("provider") or "").strip()
+    category = str(request.args.get("category") or "").strip()
+    query = str(request.args.get("q") or request.args.get("query") or "").strip()
+    site_limit = normalize_ai_native_cdn_site_limit(
+        request.args.get("site_limit") or request.args.get("limit") or AI_NATIVE_CDN_SITE_LIMIT_DEFAULT
+    )
+    return jsonify(
+        build_ai_native_cdn_payload(
+            provider=provider,
+            category=category,
+            query=query,
+            site_limit=site_limit,
+        )
+    )
+
+
+@app.get("/api/ai/data/cdn.md")
+def ai_native_cdn_data_markdown():
+    descriptor = build_ai_native_cdn_descriptor(include_body=True)
+    ensure_ai_native_document_asset(descriptor)
+    return build_ai_native_markdown_document(descriptor), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/data/applovin.json")
+def ai_native_applovin_data_json():
+    platform_id = str(request.args.get("platform") or "").strip()
+    category_id = str(request.args.get("category") or "").strip()
+    return jsonify(build_ai_native_applovin_payload(platform_id=platform_id, category_id=category_id))
+
+
+@app.get("/api/ai/data/applovin.md")
+def ai_native_applovin_data_markdown():
+    platform_id = str(request.args.get("platform") or "").strip()
+    category_id = str(request.args.get("category") or "").strip()
+    descriptor = build_ai_native_applovin_descriptor(
+        include_body=True,
+        platform_id=platform_id,
+        category_id=category_id,
+    )
+    ensure_ai_native_document_asset(descriptor)
+    return build_ai_native_markdown_document(descriptor), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/api/ai/data/gpu-prices.json")
+def ai_native_gpu_price_data_json():
+    return jsonify(build_ai_native_gpu_price_payload())
+
+
+@app.get("/api/ai/data/gpu-prices.md")
+def ai_native_gpu_price_data_markdown():
+    descriptor = build_ai_native_gpu_price_descriptor(include_body=True)
+    ensure_ai_native_document_asset(descriptor)
+    return build_ai_native_markdown_document(descriptor), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+
+@app.get("/data-monitor/gpu-prices/status")
+def gpu_price_monitor_status():
+    cache = load_gpu_price_tracker_cache()
+    runtime = sync_gpu_price_monitor_runtime()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "runtime": {
+                **runtime,
+                "status_label": monitor_runtime_status_label(runtime["status"]),
+                "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                "is_running": runtime["status"] == "running",
+                "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "never",
+                "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "never",
+            },
+            "updated_at_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "never",
+            "is_stale": gpu_price_tracker_cache_is_stale(cache),
+            "offer_count": int(summary.get("offer_count") or 0),
+            "provider_count": int(summary.get("provider_count") or 0),
+            "daily_index_count": int(summary.get("daily_index_count") or 0),
+            "csp_daily_index_count": int(summary.get("csp_daily_index_count") or 0),
+        }
+    )
+
+
+@app.post("/data-monitor/gpu-prices/refresh")
+def refresh_gpu_price_monitor():
+    runtime = sync_gpu_price_monitor_runtime()
+    started = False
+    if runtime["status"] != "running":
+        runtime = start_gpu_price_tracker_refresh("manual_refresh")
+        started = True
+
+    message = "GPU price tracker refresh started." if started else "GPU price tracker is already refreshing."
+    if expects_json_response():
+        return jsonify(
+            {
+                "ok": True,
+                "started": started,
+                "message": message,
+                "runtime": {
+                    **runtime,
+                    "status_label": monitor_runtime_status_label(runtime["status"]),
+                    "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                    "is_running": runtime["status"] == "running",
+                    "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "never",
+                    "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "never",
+                },
+            }
+        )
+
+    flash(message, "success")
+    return redirect(url_for("data_monitor_page", tab="gpu-prices"))
 
 
 @app.get("/data-monitor/stablecoins/status")
@@ -15461,16 +30264,215 @@ def refresh_stablecoin_monitor():
     return redirect(url_for("data_monitor_page", tab="stablecoins"))
 
 
+@app.get("/data-monitor/cdn/status")
+def cdn_monitor_status():
+    cache = load_cdn_tracker_cache()
+    runtime = sync_cdn_monitor_runtime()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "runtime": {
+                **runtime,
+                "status_label": monitor_runtime_status_label(runtime["status"]),
+                "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                "is_running": runtime["status"] == "running",
+                "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+                "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+            },
+            "updated_at_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "尚未抓取",
+            "is_stale": cdn_tracker_cache_is_stale(cache),
+            "tracked_count": int(summary.get("tracked_count") or 0),
+            "reachable_count": int(summary.get("reachable_count") or 0),
+            "detected_count": int(summary.get("detected_count") or 0),
+            "multi_provider_count": int(summary.get("multi_provider_count") or 0),
+        }
+    )
+
+
+@app.get("/data-monitor/cdn/sites")
+def cdn_monitor_sites():
+    cache = load_cdn_tracker_cache()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    tracked_sites = cache.get("tracked_sites") if isinstance(cache.get("tracked_sites"), list) else []
+    site_rows = build_cdn_site_view_rows(tracked_sites)
+    return jsonify(
+        {
+            "ok": True,
+            "updated_at_label": format_iso_timestamp(cache.get("updated_at")) if cache.get("updated_at") else "尚未抓取",
+            "tracked_count": int(summary.get("tracked_count") or len(tracked_sites)),
+            "site_count": len(site_rows),
+            "sites": site_rows,
+        }
+    )
+
+
+@app.post("/data-monitor/cdn/refresh")
+def refresh_cdn_monitor():
+    runtime = sync_cdn_monitor_runtime()
+    started = False
+    if runtime["status"] != "running":
+        runtime = start_cdn_tracker_refresh("manual_refresh")
+        started = True
+
+    message = "CDN 追踪刷新已启动。" if started else "CDN 追踪正在刷新中。"
+    if expects_json_response():
+        return jsonify(
+            {
+                "ok": True,
+                "started": started,
+                "message": message,
+                "runtime": {
+                    **runtime,
+                    "status_label": monitor_runtime_status_label(runtime["status"]),
+                    "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                    "is_running": runtime["status"] == "running",
+                    "started_at_label": format_iso_timestamp(runtime.get("started_at")) if runtime.get("started_at") else "尚未刷新",
+                    "finished_at_label": format_iso_timestamp(runtime.get("finished_at")) if runtime.get("finished_at") else "尚未刷新",
+                },
+            }
+        )
+
+    flash(message, "success")
+    return redirect(url_for("data_monitor_page", tab="cdn"))
+
+
+@app.get("/data-monitor/applovin/status")
+def applovin_monitor_status():
+    cache = load_applovin_tracker_cache()
+    runtime = sync_applovin_monitor_runtime()
+    summary = cache.get("summary") if isinstance(cache.get("summary"), dict) else {}
+    return jsonify(
+        {
+            "ok": True,
+            "runtime": {
+                **runtime,
+                "status_label": monitor_runtime_status_label(runtime["status"]),
+                "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                "is_running": runtime["status"] == "running",
+                "started_at_label": format_monitor_date_label(runtime.get("started_at")),
+                "finished_at_label": format_monitor_date_label(runtime.get("finished_at")),
+            },
+            "updated_at_label": format_monitor_date_label(cache.get("updated_at")),
+            "is_stale": applovin_tracker_cache_is_stale(cache),
+            "tracked_page_count": int(
+                summary.get("tracked_page_count") or len(APPLOVIN_MONITOR_PLATFORMS) * len(APPLOVIN_MONITOR_CATEGORIES)
+            ),
+            "available_page_count": int(summary.get("available_page_count") or 0),
+            "fresh_page_count": int(summary.get("fresh_page_count") or 0),
+            "applovin_present_page_count": int(summary.get("applovin_present_page_count") or 0),
+            "page_error_count": int(summary.get("page_error_count") or 0),
+        }
+    )
+
+
+@app.post("/data-monitor/applovin/refresh")
+def refresh_applovin_monitor():
+    runtime = sync_applovin_monitor_runtime()
+    started = False
+    if runtime["status"] != "running":
+        runtime = start_applovin_sdk_refresh("manual_refresh")
+        started = True
+
+    message = (
+        "AppLovin tracker refresh started."
+        if started
+        else "AppLovin tracker is already refreshing."
+    )
+    if expects_json_response():
+        return jsonify(
+            {
+                "ok": True,
+                "started": started,
+                "message": message,
+                "runtime": {
+                    **runtime,
+                    "status_label": monitor_runtime_status_label(runtime["status"]),
+                    "status_tone": monitor_runtime_status_tone(runtime["status"]),
+                    "is_running": runtime["status"] == "running",
+                    "started_at_label": format_monitor_date_label(runtime.get("started_at")),
+                    "finished_at_label": format_monitor_date_label(runtime.get("finished_at")),
+                },
+            }
+        )
+
+    flash(message, "success")
+    return redirect(
+        url_for(
+            "data_monitor_page",
+            tab="applovin",
+            platform=str(request.form.get("platform") or request.args.get("platform") or "").strip() or "gplay",
+            category=str(request.form.get("category") or request.args.get("category") or "").strip()
+            or "top-ad-mediation-sdks",
+        )
+    )
+
+
 @app.get("/reports/<path:filename>/preview-fragment")
 def preview_report_fragment(filename: str):
+    store = load_stock_store()
     report = load_report(filename)
+    report_state = store.get("report_reader_state", {}).get(
+        report["filename"],
+        {"reader_annotations": [], "reading_record": {}},
+    )
     if request.headers.get("X-Requested-With") != "XMLHttpRequest":
         return redirect(url_for("monitor_page", report=report["filename"]))
     return render_template(
         "report_modal.html",
         report=report,
         is_monitor_report=is_monitor_report_entry(report),
+        report_reader_bootstrap=build_reader_bootstrap_payload(
+            report_state,
+            kind="report",
+            item_id=report["filename"],
+            save_url=url_for("persist_report_reader_state", filename=report["filename"]),
+            content_text=report.get("content") or "",
+            content_html=report.get("html") or "",
+        ),
+        report_reader_signature=build_reader_content_signature(
+            report.get("content") or "",
+            report.get("html") or "",
+        ),
     )
+
+
+@app.post("/reports/<path:filename>/reader-state")
+def persist_report_reader_state(filename: str):
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        report = load_report(filename)
+        reader_state = store.setdefault("report_reader_state", {}).setdefault(
+            report["filename"],
+            {"reader_annotations": [], "reading_record": {}},
+        )
+        try:
+            apply_reader_state_action(
+                reader_state,
+                payload,
+                content_text=report.get("content") or "",
+                content_html=report.get("html") or "",
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    reader_state,
+                    save_url=url_for("persist_report_reader_state", filename=report["filename"]),
+                    kind="report",
+                    item_id=report["filename"],
+                    content_text=report.get("content") or "",
+                    content_html=report.get("html") or "",
+                ),
+            }
+        )
 
 
 @app.post("/monitor/config")
@@ -15695,6 +30697,7 @@ def terminate_signal_monitor_job():
 def signal_monitor_status():
     store = load_stock_store()
     reports = collect_reports()
+    config = load_signal_monitor_config()
     runtime = sync_signal_monitor_runtime()
     signal_reports = collect_signal_reports()
     today_reports = collect_today_signal_reports(signal_reports)
@@ -15714,7 +30717,7 @@ def signal_monitor_status():
             "latest_report": latest_report,
             "report_count": len(signal_reports),
             "trash_count": len(store.get("trash", [])),
-            "source_count": len(load_signal_monitor_config().get("sources", [])),
+            "source_count": len(config.get("sources", [])),
             "nav_reports_count": len(reports),
         }
     )
@@ -15802,6 +30805,8 @@ def sync_all_stock_earnings():
 def schedule_page() -> str:
     store = load_stock_store()
     current_view = normalize_schedule_view(request.args.get("view"))
+    if is_visitor_mode():
+        current_view = "board"
     page_return_url = request.full_path if request.query_string else request.path
     schedule_context = build_schedule_page_context(
         store,
@@ -15984,6 +30989,8 @@ def experts_page() -> str:
     store = load_stock_store()
     selected_expert_id = str(request.args.get("expert") or "").strip()
     current_expert_view = normalize_expert_view(request.args.get("view"), has_experts=bool(store.get("experts")))
+    if is_visitor_mode():
+        current_expert_view = "manage"
     manage_params: dict[str, str] = {"view": "manage"}
     create_params: dict[str, str] = {"view": "create"}
     if selected_expert_id:
@@ -16729,8 +31736,8 @@ def transcripts_page() -> str:
     store = load_stock_store()
     requested_symbol = normalize_stock_symbol(request.args.get("symbol", ""))
     page_context = build_transcript_page_context(store, requested_symbol=requested_symbol or "")
-    tingwu_status = build_tingwu_status()
-    oss_status = probe_oss_bridge()
+    tingwu_status = build_transcript_page_tingwu_status()
+    oss_status = build_transcript_page_oss_status()
 
     return render_template(
         "transcripts.html",
@@ -16746,9 +31753,10 @@ def transcripts_page() -> str:
         summarization_options=TRANSCRIPT_SUMMARIZATION_OPTIONS,
         transcript_category_options=TRANSCRIPT_CATEGORY_OPTIONS,
         transcript_status_poll_seconds=TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS,
+        transcript_auto_process_default=TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT,
         supported_format_hint=(
             "音频支持 mp3 / wav / m4a / aac / amr / flac，"
-            "视频支持 mp4 / mov / mkv / webm / avi 等格式。保存后会自动尝试上传到 OSS。"
+            "视频支持 mp4 / mov / mkv / webm / avi 等格式。保存后会先落本机；只有勾选自动处理时才会继续连接 OSS / 听悟。"
         ),
         **page_context,
         **build_navigation_context(active_page="transcripts", stock_store=store),
@@ -16856,6 +31864,12 @@ def create_transcript_job():
         else (first_filename_date or submitted_meeting_date)
     ) or today_date_iso()
     is_batch_upload = len(uploaded_files) > 1
+    auto_process_after_upload_raw = request.form.get("auto_process_after_upload")
+    auto_process_after_upload = (
+        TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT
+        if auto_process_after_upload_raw is None
+        else is_truthy_flag(auto_process_after_upload_raw)
+    )
 
     transcript_base_payload = {
         "provider": "tingwu",
@@ -16896,8 +31910,8 @@ def create_transcript_job():
         "tags": normalize_tag_list(request.form.get("transcript_tags", "")),
     }
 
-    tingwu_status = build_tingwu_status()
-    oss_status = build_oss_status()
+    tingwu_status = build_tingwu_status() if auto_process_after_upload else {"is_ready": False}
+    oss_status = build_oss_status() if auto_process_after_upload else {"is_ready": False, "bridge_ready": False}
     normalized_transcripts: list[dict[str, Any]] = []
     auto_submitted_count = 0
     auto_source_ready_count = 0
@@ -16944,7 +31958,12 @@ def create_transcript_job():
 
         auto_submit_error = ""
         auto_source_ready = False
-        if tingwu_status["is_ready"] and not normalized_transcript["file_url_hint"] and oss_status["is_ready"]:
+        if (
+            auto_process_after_upload
+            and tingwu_status["is_ready"]
+            and not normalized_transcript["file_url_hint"]
+            and oss_status["is_ready"]
+        ):
             try:
                 ensure_transcript_source_url(normalized_transcript)
                 auto_source_ready = True
@@ -16953,7 +31972,11 @@ def create_transcript_job():
                 normalized_transcript["updated_at"] = now_iso()
                 auto_submit_error = str(exc)
 
-        if tingwu_status["is_ready"] and (normalized_transcript["file_url_hint"] or normalized_transcript["source_object_key"]):
+        if (
+            auto_process_after_upload
+            and tingwu_status["is_ready"]
+            and (normalized_transcript["file_url_hint"] or normalized_transcript["source_object_key"])
+        ):
             try:
                 submit_transcript_job_to_tingwu(normalized_transcript)
                 auto_submitted_count += 1
@@ -16983,7 +32006,9 @@ def create_transcript_job():
 
     if len(normalized_transcripts) == 1:
         normalized_transcript = normalized_transcripts[0]
-        if auto_submitted_count:
+        if not auto_process_after_upload:
+            flash("会议转录任务已保存到本机。为了让远程访问更稳定，这次没有在上传请求里直接连接 OSS 或听悟；稍后可以手动点“提交到听悟”。", "success")
+        elif auto_submitted_count:
             flash("会议转录任务已保存，并已提交到听悟。后续请用“刷新状态”主动轮询结果。", "success")
         elif auto_submit_errors:
             flash(f"任务已保存，但提交到听悟失败：{auto_submit_errors[0].split(': ', 1)[-1]}", "error")
@@ -16995,7 +32020,9 @@ def create_transcript_job():
             flash("会议转录任务已保存。系统还没拿到可用的云端地址，稍后可以直接点“提交到听悟”再试。", "success")
     else:
         flash(f"已批量保存 {len(normalized_transcripts)} 个会议转录任务。", "success")
-        if auto_submitted_count:
+        if not auto_process_after_upload:
+            flash("这批任务目前只保存在本机，适合 Cloudflare tunnel 或网络不稳时先落地再处理。", "success")
+        elif auto_submitted_count:
             flash(f"其中 {auto_submitted_count} 个任务已自动提交到听悟。", "success")
         elif auto_source_ready_count:
             flash(f"其中 {auto_source_ready_count} 个任务的源文件已自动上传到 OSS，可以稍后继续提交。", "success")
@@ -17013,20 +32040,17 @@ def create_transcript_job():
 def submit_transcript_job(transcript_id: str):
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    with STOCK_STORE_LOCK:
-        store = load_stock_store()
-        transcript = get_transcript_entry(store, transcript_id)
-
+    try:
+        transcript = load_transcript_entry_snapshot(transcript_id)
+        submit_transcript_job_to_tingwu(transcript)
+        persist_transcript_cloud_snapshot(transcript_id, transcript)
+        flash("任务已提交到听悟。当前项目按主动轮询设计，请继续点击“刷新状态”获取结果。", "success")
+    except Exception as exc:
         try:
-            submit_transcript_job_to_tingwu(transcript)
-            touch_transcript_stocks(store, transcript)
-            save_stock_store(store)
-            flash("任务已提交到听悟。当前项目按主动轮询设计，请继续点击“刷新状态”获取结果。", "success")
-        except Exception as exc:
-            transcript["last_error"] = str(exc)[:2000]
-            transcript["updated_at"] = now_iso()
-            save_stock_store(store)
-            flash(f"提交到听悟失败：{exc}", "error")
+            persist_transcript_cloud_error(transcript_id, str(exc))
+        except Exception:
+            pass
+        flash(f"提交到听悟失败：{exc}", "error")
 
     return redirect(next_url)
 
@@ -17035,28 +32059,25 @@ def submit_transcript_job(transcript_id: str):
 def sync_transcript_job(transcript_id: str):
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    with STOCK_STORE_LOCK:
-        store = load_stock_store()
-        transcript = get_transcript_entry(store, transcript_id)
-
+    try:
+        transcript = load_transcript_entry_snapshot(transcript_id)
+        task_info = sync_transcript_job_from_tingwu(transcript)
+        persisted_transcript = persist_transcript_cloud_snapshot(transcript_id, transcript)
+        if persisted_transcript["status"] == "completed":
+            flash("听悟结果已同步回来，转录内容已经写入页面。", "success")
+        elif persisted_transcript["status"] == "failed":
+            flash(
+                persisted_transcript.get("last_error") or "听悟任务返回失败状态，请检查云端任务。",
+                "error",
+            )
+        else:
+            flash(f"任务状态已刷新：{task_info.get('task_status') or '处理中'}。", "success")
+    except Exception as exc:
         try:
-            task_info = sync_transcript_job_from_tingwu(transcript)
-            touch_transcript_stocks(store, transcript)
-            save_stock_store(store)
-            if transcript["status"] == "completed":
-                flash("听悟结果已同步回来，转录内容已经写入页面。", "success")
-            elif transcript["status"] == "failed":
-                flash(
-                    transcript.get("last_error") or "听悟任务返回失败状态，请检查云端任务。",
-                    "error",
-                )
-            else:
-                flash(f"任务状态已刷新：{task_info.get('task_status') or '处理中'}。", "success")
-        except Exception as exc:
-            transcript["last_error"] = str(exc)[:2000]
-            transcript["updated_at"] = now_iso()
-            save_stock_store(store)
-            flash(f"刷新任务状态失败：{exc}", "error")
+            persist_transcript_cloud_error(transcript_id, str(exc))
+        except Exception:
+            pass
+        flash(f"刷新任务状态失败：{exc}", "error")
 
     return redirect(next_url)
 
@@ -17074,32 +32095,44 @@ def sync_active_transcripts():
 
     with STOCK_STORE_LOCK:
         store = load_stock_store()
+        active_transcript_ids = [
+            str(transcript.get("id") or "").strip()
+            for transcript in store.get("transcripts", [])
+            if transcript.get("status") in {"queued", "processing"} and transcript.get("provider_task_id")
+        ]
 
-        for transcript in store.get("transcripts", []):
-            if transcript.get("status") not in {"queued", "processing"}:
-                continue
-            if not transcript.get("provider_task_id"):
-                continue
+    for transcript_id in active_transcript_ids:
+        if not transcript_id:
+            continue
+        try:
+            transcript = load_transcript_entry_snapshot(transcript_id)
+            sync_transcript_job_from_tingwu(transcript)
+            persisted_transcript = persist_transcript_cloud_snapshot(transcript_id, transcript)
+            refreshed += 1
+            in_scope = not scope_symbol or transcript_matches_symbol(persisted_transcript, scope_symbol)
+            if persisted_transcript["status"] == "completed":
+                completed += 1
+                if in_scope:
+                    scope_completed += 1
+            elif persisted_transcript["status"] == "failed":
+                terminal_failed += 1
+                if in_scope:
+                    scope_terminal_failed += 1
+        except Exception as exc:
+            sync_errors += 1
             try:
-                sync_transcript_job_from_tingwu(transcript)
-                refreshed += 1
-                in_scope = not scope_symbol or transcript_matches_symbol(transcript, scope_symbol)
-                if transcript["status"] == "completed":
-                    completed += 1
-                    if in_scope:
-                        scope_completed += 1
-                elif transcript["status"] == "failed":
-                    terminal_failed += 1
-                    if in_scope:
-                        scope_terminal_failed += 1
-                touch_transcript_stocks(store, transcript)
-            except Exception as exc:
-                transcript["last_error"] = str(exc)[:2000]
-                transcript["updated_at"] = now_iso()
-                sync_errors += 1
+                persist_transcript_cloud_error(transcript_id, str(exc))
+            except Exception:
+                pass
 
-        save_stock_store(store)
-        transcript_cards = build_transcript_cards(store, symbol_filter=scope_symbol or None)
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript_cards = build_transcript_cards(
+            store,
+            symbol_filter=scope_symbol or None,
+            include_reader_body=False,
+            include_reader_state=False,
+        )
     counts = build_transcript_stats_payload(transcript_cards)
 
     if expects_json_response():
@@ -17241,6 +32274,49 @@ def update_transcript_links(transcript_id: str):
     return redirect(next_url)
 
 
+@app.post("/transcripts/<transcript_id>/reader-state")
+def persist_transcript_reader_state(transcript_id: str):
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        transcript = get_transcript_entry(store, transcript_id)
+        try:
+            apply_reader_state_action(transcript, payload)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        transcript["updated_at"] = now_iso()
+        touch_transcript_stocks(store, transcript)
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    transcript,
+                    save_url=url_for("persist_transcript_reader_state", transcript_id=transcript_id),
+                    kind="transcript",
+                    item_id=transcript_id,
+                ),
+            }
+        )
+
+
+@app.get("/transcripts/<transcript_id>/preview-fragment")
+def preview_transcript_fragment(transcript_id: str):
+    store = load_stock_store()
+    transcript = get_transcript_entry(store, transcript_id)
+    next_url = safe_next_url(request.args.get("next"), url_for("transcripts_page"))
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return redirect(next_url)
+    return render_template(
+        "transcript_reader_modal.html",
+        transcript=build_transcript_card(transcript),
+        next_url=next_url,
+    )
+
+
 @app.get("/transcripts/<transcript_id>/export.pdf")
 def export_transcript_pdf(transcript_id: str):
     store = load_stock_store()
@@ -17374,6 +32450,205 @@ def stock_detail(symbol: str) -> str:
         return_to=request.full_path if request.query_string else request.path,
         **build_navigation_context(active_page="stocks", stock_store=store),
     )
+
+
+@app.post("/stocks/<symbol>/earnings-calls/<call_id>/reader-state")
+def persist_stock_earnings_call_reader_state(symbol: str, call_id: str):
+    symbol = require_stock_symbol(symbol)
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        call = get_stock_earnings_call_entry(store, symbol, call_id)
+        try:
+            apply_reader_state_action(call, payload)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        touch_stock(store, symbol)
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    call,
+                    save_url=url_for("persist_stock_earnings_call_reader_state", symbol=symbol, call_id=call_id),
+                    kind="earnings_call",
+                    item_id=call_id,
+                ),
+            }
+        )
+
+
+@app.get("/stocks/<symbol>/earnings-calls/<call_id>/preview-fragment")
+def preview_stock_earnings_call_fragment(symbol: str, call_id: str):
+    symbol = require_stock_symbol(symbol)
+    store = load_stock_store()
+    call = get_stock_earnings_call_entry(store, symbol, call_id)
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return redirect(url_for("stock_detail", symbol=symbol))
+    return render_template(
+        "stock_earnings_call_reader_modal.html",
+        stock_symbol=symbol,
+        call=build_stock_earnings_call_card(call),
+    )
+
+
+@app.post("/stocks/<symbol>/setup/reader-state")
+def persist_stock_setup_reader_state(symbol: str):
+    symbol = require_stock_symbol(symbol)
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        entry = ensure_stock_entry(store, symbol)
+        setup = build_stock_setup_view(store, symbol)
+        if not setup.get("has_setup"):
+            return jsonify({"ok": False, "message": "褰撳墠杩樻病鏈?setup 姝ｆ枃銆?"}), 400
+
+        state_item = {
+            "reader_annotations": entry.get("setup_reader_annotations", []),
+            "reading_record": entry.get("setup_reading_record"),
+        }
+        try:
+            apply_reader_state_action(
+                state_item,
+                payload,
+                content_text=setup.get("content_text") or "",
+                content_html=setup.get("html") or "",
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        entry["setup_reader_annotations"] = list(state_item.get("reader_annotations", []))
+        entry["setup_reading_record"] = dict(state_item.get("reading_record") or {})
+        touch_stock(store, symbol)
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    state_item,
+                    save_url=url_for("persist_stock_setup_reader_state", symbol=symbol),
+                    kind="stock_setup",
+                    item_id=symbol,
+                    content_text=setup.get("content_text") or "",
+                    content_html=setup.get("html") or "",
+                ),
+            }
+        )
+
+
+@app.post("/stocks/<symbol>/notes/<note_id>/reader-state")
+def persist_stock_note_reader_state(symbol: str, note_id: str):
+    symbol = require_stock_symbol(symbol)
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        note = get_stock_note_entry(store, symbol, note_id)
+        try:
+            apply_reader_state_action(
+                note,
+                payload,
+                content_text=note.get("content_text") or "",
+                content_html=note.get("content_html") or "",
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        touch_stock(store, symbol)
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    note,
+                    save_url=url_for("persist_stock_note_reader_state", symbol=symbol, note_id=note_id),
+                    kind="note",
+                    item_id=note_id,
+                    content_text=note.get("content_text") or "",
+                    content_html=note.get("content_html") or "",
+                ),
+            }
+        )
+
+
+@app.post("/stocks/<symbol>/files/<file_id>/reader-state")
+def persist_stock_file_reader_state(symbol: str, file_id: str):
+    symbol = require_stock_symbol(symbol)
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        record = get_stock_file_record(store, symbol, file_id)
+        file_entry = record["file_entry"]
+        preview_context = build_stock_file_preview_context(store, symbol, record)
+        try:
+            apply_reader_state_action(
+                file_entry,
+                payload,
+                content_text=preview_context.get("reader_content_text") or "",
+                content_html=preview_context.get("reader_content_html") or "",
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        touch_stock_symbols(store, stock_file_linked_symbols(file_entry, record["storage_symbol"]))
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    file_entry,
+                    save_url=url_for("persist_stock_file_reader_state", symbol=symbol, file_id=file_id),
+                    kind="file",
+                    item_id=file_id,
+                    content_text=preview_context.get("reader_content_text") or "",
+                    content_html=preview_context.get("reader_content_html") or "",
+                ),
+            }
+        )
+
+
+@app.post("/schedule/items/<item_id>/reader-state")
+def persist_schedule_reader_state(item_id: str):
+    payload = request.get_json(silent=True) or {}
+
+    with STOCK_STORE_LOCK:
+        store = load_stock_store()
+        item = get_schedule_item(store, item_id)
+        reader_text = str(item.get("note") or "").strip() or str(item.get("title") or "").strip()
+        reader_html = plain_text_to_html(reader_text)
+        try:
+            apply_reader_state_action(
+                item,
+                payload,
+                content_text=reader_text,
+                content_html=reader_html,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+        save_stock_store(store)
+
+        return jsonify(
+            {
+                "ok": True,
+                "state": build_reader_state_payload(
+                    item,
+                    save_url=url_for("persist_schedule_reader_state", item_id=item_id),
+                    kind="schedule",
+                    item_id=item_id,
+                    content_text=reader_text,
+                    content_html=reader_html,
+                ),
+            }
+        )
 
 
 @app.post("/stocks/<symbol>/earnings/sync")
@@ -17868,6 +33143,9 @@ def build_stock_file_preview_context(
         elif file_entry.get("description"):
             preview_note_html = plain_text_to_html(str(file_entry.get("description") or "").strip())
 
+    reader_text = preview_text if preview_text else note_html_to_text(preview_note_html)
+    reader_html = preview_note_html if preview_note_html else plain_text_to_html(preview_text) if preview_text else ""
+
     return {
         "file_entry": build_stock_file_card(store, file_record, access_symbol=symbol),
         "preview_text": preview_text,
@@ -17876,6 +33154,19 @@ def build_stock_file_preview_context(
         "image_url": url_for("inline_stock_file", symbol=symbol, file_id=file_entry["id"])
         if is_image_previewable(original_name)
         else "",
+        **build_reader_content_fields(
+            file_entry,
+            content_text=reader_text,
+            content_html=reader_html,
+        ),
+        "reader_bootstrap": build_reader_bootstrap_payload(
+            file_entry,
+            kind="file",
+            item_id=str(file_entry.get("id") or ""),
+            save_url=url_for("persist_stock_file_reader_state", symbol=symbol, file_id=str(file_entry.get("id") or "")),
+            content_text=reader_text,
+            content_html=reader_html,
+        ),
     }
 
 
@@ -18013,6 +33304,8 @@ if __name__ == "__main__":
     STOCK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     maybe_start_stablecoin_monitor_scheduler()
+    maybe_start_cdn_monitor_scheduler()
+    maybe_start_gpu_price_monitor_scheduler()
     host = os.getenv("HOST", "0.0.0.0")
     port = current_port()
     app.run(host=host, port=port, debug=False)
