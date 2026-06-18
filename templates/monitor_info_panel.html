@@ -6,7 +6,7 @@
           <div>
             <p class="eyebrow">信息监控</p>
             <h3>默认跟踪股票</h3>
-            <p class="section-caption">这里保存默认跟踪股票。后面如果你不改，手动运行时就直接用这组股票。</p>
+            <p class="section-caption">手动运行时使用这组股票。</p>
           </div>
           <span class="summary-count" data-monitor-chip-count>{{ monitor_config.stock_pool|length }}</span>
         </div>
@@ -68,12 +68,12 @@
 
     <section class="panel monitor-history-panel" id="report-library">
       <div class="section-header section-header-slider">
-        <div class="section-slider-shell" aria-label="信息监控报告说明">
+        <div class="section-slider-shell" aria-label="信息监控报告">
           <div class="section-slider-track">
             <article class="section-slider-card">
           <p class="eyebrow">结果历史</p>
           <h3>信息监控报告</h3>
-          <p class="section-caption">报告列表和阅读都放在这里。点击即可弹窗阅读，也兼容从个股页带着 report 参数直接跳进来。</p>
+          <p class="section-caption">股票池日报归档。</p>
             </article>
           </div>
         </div>
@@ -188,12 +188,12 @@
         </div>
         <div class="empty-card" data-monitor-report-empty-state hidden>
           <p class="empty-title">信息监控报告暂时为空</p>
-          <p>列表会在你删除最后一份报告后自动回到这个空状态。</p>
+          <p>暂无报告。</p>
         </div>
       {% else %}
         <div class="empty-card" data-monitor-report-empty-state>
           <p class="empty-title">信息监控报告暂时为空</p>
-          <p>现在还没有信息监控结果。你可以先保存股票池，再手动运行一轮监测。</p>
+          <p>保存股票池后可手动运行。</p>
         </div>
       {% endif %}
     </section>
@@ -282,7 +282,7 @@
             <li>{{ report.report_date }} · {{ report.filename }}</li>
           {% endfor %}
         </ul>
-        <p class="field-help">如果今天已经有结果，再次运行前会先提醒你，避免同一天重复覆盖。</p>
+        <p class="field-help">再次运行前会提醒确认。</p>
       {% else %}
         <p class="field-help">今天还没有新的信息监控结果。</p>
       {% endif %}

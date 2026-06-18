@@ -6,7 +6,7 @@
         <div>
           <p class="eyebrow">大V监控</p>
           <h3>来源配置</h3>
-          <p class="section-caption">支持 X 链接、`@handle` 或名称。这里维护一组长期跟踪的大 V / 公开来源。</p>
+          <p class="section-caption">X 链接、@handle 或名称。</p>
         </div>
         <span class="summary-count" data-signal-source-count>{{ signal_sources|length }}</span>
       </div>
@@ -94,9 +94,9 @@
           <p class="eyebrow">阅读结果</p>
           <h3>{% if active_signal_report %}{{ active_signal_report.title }}{% else %}新的监控结果会显示在这里{% endif %}</h3>
           {% if active_signal_report %}
-            <p class="section-caption">这里会优先展示你当前选中的大V监控结果。</p>
+            <p class="section-caption">当前选中结果。</p>
           {% else %}
-            <p class="section-caption">每次运行结束后，新的 Markdown 结果会先显示在这里。</p>
+            <p class="section-caption">运行后显示最新结果。</p>
           {% endif %}
         </div>
         {% if active_signal_report %}
@@ -125,19 +125,19 @@
       {% else %}
         <div class="empty-card">
           <p class="empty-title">还没有大V监控结果</p>
-          <p>你可以先用 `SemiAnalysis` 跑一轮，确认这套监控方式是否符合你的观察习惯。</p>
+          <p>保存来源后可手动运行。</p>
         </div>
       {% endif %}
     </section>
 
     <section class="panel signal-history-panel">
       <div class="section-header section-header-slider">
-        <div class="section-slider-shell" aria-label="大V监控报告说明">
+        <div class="section-slider-shell" aria-label="大V监控报告">
           <div class="section-slider-track">
             <article class="section-slider-card">
               <p class="eyebrow">结果历史</p>
               <h3>大V监控报告</h3>
-              <p class="section-caption">每次运行后的结果都会留在这里，方便回看不同时间窗口里发生了什么变化。</p>
+              <p class="section-caption">公开来源观察归档。</p>
             </article>
           </div>
         </div>
@@ -190,12 +190,12 @@
         </div>
         <div class="empty-card" data-signal-report-empty-state hidden>
           <p class="empty-title">大V监控报告暂时为空</p>
-          <p>删除最后一份结果后，这里会自动回到空状态。</p>
+          <p>暂无报告。</p>
         </div>
       {% else %}
         <div class="empty-card" data-signal-report-empty-state>
           <p class="empty-title">大V监控报告暂时为空</p>
-          <p>现在还没有大V监控结果。你可以先保存来源，再手动运行一轮。</p>
+          <p>保存来源后可手动运行。</p>
         </div>
       {% endif %}
     </section>
@@ -317,7 +317,7 @@
             <li>{{ report.report_date }} · {{ report.filename }}</li>
           {% endfor %}
         </ul>
-        <p class="field-help">如果今天已经跑过一轮，再次运行前会先提醒你，避免结果时间窗口重叠。</p>
+        <p class="field-help">再次运行前会提醒确认。</p>
       {% else %}
         <p class="field-help">今天还没有新的大V监控结果。</p>
       {% endif %}

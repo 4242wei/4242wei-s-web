@@ -20,11 +20,8 @@
     <section class="stock-hero panel monitor-hero">
       <div class="stock-hero-copy">
         <p class="eyebrow">Monitor</p>
-        <h2>统一监控工作台</h2>
-        <p class="story-dek">
-          左侧只保留一个 `Monitor` 入口，这里再拆成“信息监控”和“大V监控”两个子功能区。
-          信息监控负责股票池日报；大V监控负责 X / 公开来源的舆论抓取。两块都放在同一页切换，阅读和配置会更顺。
-        </p>
+        <h2>监控工作台</h2>
+        <p class="story-dek">股票池日报与公开来源观察。</p>
         <div
           class="monitor-tab-switcher monitor-tab-switcher-hero"
           role="tablist"
@@ -75,32 +72,6 @@
           <strong>{{ signal_today_reports|length }} 份</strong>
         </article>
       </aside>
-    </section>
-
-    <section class="panel monitor-subnav-panel">
-      <div class="section-header monitor-subnav-head">
-        <div>
-          <p class="eyebrow">子功能区</p>
-          <h3>页内切换</h3>
-          <p class="section-caption">不再分成两个侧边入口。点击切换条就能在两类监控之间平滑切换，地址栏也会同步记录当前子区。</p>
-        </div>
-      </div>
-      <div class="monitor-tab-copy-stack">
-        <p class="monitor-tab-copy{% if monitor_active_tab == 'info' %} is-active{% endif %}" data-monitor-tab-copy="info" {% if monitor_active_tab != 'info' %}hidden{% endif %}>
-          {% if is_visitor_mode %}
-            信息监控聚焦股票池与日报结果，这里只保留阅读与回看。
-          {% else %}
-            信息监控聚焦股票池与日报结果，资料都写入 <span class="inline-path">{{ reports_dir }}</span>。
-          {% endif %}
-        </p>
-        <p class="monitor-tab-copy{% if monitor_active_tab == 'signals' %} is-active{% endif %}" data-monitor-tab-copy="signals" {% if monitor_active_tab != 'signals' %}hidden{% endif %}>
-          {% if is_visitor_mode %}
-            大V监控聚焦 X / 公开来源，这里只展示已整理好的结果。
-          {% else %}
-            大V监控聚焦 X / 公开来源，结果写入 <span class="inline-path">{{ signal_reports_dir }}</span>，不会混进正式研究报告。
-          {% endif %}
-        </p>
-      </div>
     </section>
 
     <div class="monitor-tab-stage" data-monitor-tab-stage>
