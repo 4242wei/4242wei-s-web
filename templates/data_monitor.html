@@ -17,22 +17,13 @@
         <p class="eyebrow">Data Monitor</p>
         <h2>数据监控工作台</h2>
         {% if data_monitor_active_tab == "cdn" %}
-          <p class="story-dek">
-            用本地可复刻的 HTTP 头、DNS alias 和首页资源域名信号，持续跟踪网站级 CDN / edge provider 的分布变化。
-          </p>
+          <p class="story-dek">网站级 CDN / edge provider 分布。</p>
         {% elif data_monitor_active_tab == "applovin" %}
-          <p class="story-dek">
-            参考 42matters 的展示方式，保留双平台筛选，并只跟踪对 AppLovin 最重要的 3 个分类:
-            Ad Mediation、Ad Networks、Attribution。
-          </p>
+          <p class="story-dek">AppLovin SDK 排名与分类快照。</p>
         {% elif data_monitor_active_tab == "gpu_prices" %}
-          <p class="story-dek">
-            Track H100 / H200 / B200 public cloud GPU prices as a daily time series, with billing type and bundle quality kept separate.
-          </p>
+          <p class="story-dek">Public cloud GPU price time series.</p>
         {% else %}
-          <p class="story-dek">
-            把稳定币月度结构和当前快照放在同一页里，便于同时看长期结构变化和短期状态。
-          </p>
+          <p class="story-dek">稳定币月度结构与当前快照。</p>
         {% endif %}
         <div class="monitor-tab-switcher monitor-tab-switcher-hero" role="tablist" aria-label="数据监控子功能">
           <a
@@ -142,27 +133,19 @@
     <section class="panel monitor-subnav-panel data-monitor-subnav-panel"{% if data_monitor_active_tab == "applovin" %} data-applovin-subnav-shell{% endif %}>
       <div class="section-header monitor-subnav-head data-monitor-toolbar-head">
         <div>
-          <p class="eyebrow">子功能区</p>
+          <p class="eyebrow">数据视图</p>
           {% if data_monitor_active_tab == "cdn" %}
             <h3>CDN 跟踪</h3>
-            <p class="section-caption">
-              当前口径是 unweighted website tracker，先看 provider 覆盖与结构变化，不做真实流量加权。
-            </p>
+            <p class="section-caption">Unweighted website tracker.</p>
           {% elif data_monitor_active_tab == "applovin" %}
             <h3>AppLovin / 42matters Tracker</h3>
-            <p class="section-caption">
-              当前保留 Google Play 与 App Store 两个平台，并聚焦 AppLovin 最重要的 3 个分类。
-            </p>
+            <p class="section-caption">Google Play、App Store 与 3 个核心分类。</p>
           {% elif data_monitor_active_tab == "gpu_prices" %}
             <h3>GPU Price Tracker</h3>
-            <p class="section-caption">
-              Public on-demand provider summaries, normalized to one-GPU quality windows before daily median indexing.
-            </p>
+            <p class="section-caption">Daily median index by family and provider.</p>
           {% else %}
             <h3>稳定币</h3>
-            <p class="section-caption">
-              数据来自 {{ stablecoin_source_name }}，当前页面把月度结构与当前快照合并展示，方便把长期与短期放在一起看。
-            </p>
+            <p class="section-caption">{{ stablecoin_source_name }} 数据源。</p>
           {% endif %}
         </div>
         {% if not is_visitor_mode %}
@@ -206,37 +189,32 @@
       <div class="monitor-tab-copy-stack">
         {% if data_monitor_active_tab == "cdn" %}
           <p class="monitor-tab-copy is-active">
-            当前样本 {{ cdn_tracked_count }} 个站点，自动刷新 <span class="inline-path">{{ cdn_auto_refresh_label }}</span>。
-            方法说明 <span class="inline-path">{{ cdn_source_endpoint }}</span>。
+            样本 {{ cdn_tracked_count }} 个站点 · 自动刷新 <span class="inline-path">{{ cdn_auto_refresh_label }}</span>。
             {% if cdn_refresh_hint %}
               {{ cdn_refresh_hint }}
             {% endif %}
           </p>
         {% elif data_monitor_active_tab == "applovin" %}
           <p class="monitor-tab-copy is-active">
-            当前选择 <span class="inline-path">{{ applovin_selected_platform_title }}</span> /
+            <span class="inline-path">{{ applovin_selected_platform_title }}</span> /
             <span class="inline-path">{{ applovin_selected_category_title }}</span>，
-            来源更新时间 <span class="inline-path">{{ applovin_selected_source_updated_label }}</span>，
-            自动刷新 <span class="inline-path">{{ applovin_auto_refresh_label }}</span>。
+            更新 <span class="inline-path">{{ applovin_selected_source_updated_label }}</span>。
             {% if applovin_page_error_count %}
-              最近一次抓取中有 {{ applovin_page_error_count }} 个页面沿用了旧缓存。
+              {{ applovin_page_error_count }} 个页面沿用旧缓存。
             {% endif %}
           </p>
         {% elif data_monitor_active_tab == "gpu_prices" %}
           <p class="monitor-tab-copy is-active">
-            Tracking <span class="inline-path">{{ gpu_price_family_label }}</span>;
-            auto refresh is <span class="inline-path">{{ gpu_price_auto_refresh_label }}</span>.
-            Source path: <span class="inline-path">{{ gpu_price_source_endpoint }}</span>.
+            Tracking <span class="inline-path">{{ gpu_price_family_label }}</span> · auto refresh <span class="inline-path">{{ gpu_price_auto_refresh_label }}</span>.
             {% if gpu_price_is_stale %}
-              Cache is stale; the background refresher will keep the last readable snapshot while pulling new pages.
+              Cache is stale.
             {% endif %}
           </p>
         {% else %}
           <p class="monitor-tab-copy is-active">
-            覆盖区间 <span class="inline-path">{{ stablecoin_coverage_label }}</span>，
-            自动刷新 <span class="inline-path">{{ stablecoin_auto_refresh_label }}</span>。
+            覆盖 <span class="inline-path">{{ stablecoin_coverage_label }}</span> · 自动刷新 <span class="inline-path">{{ stablecoin_auto_refresh_label }}</span>。
             {% if stablecoin_is_stale %}
-              当前缓存已经偏旧，系统会优先在后台拉新数据，但页面会先保留上一版可读结果。
+              缓存偏旧。
             {% endif %}
           </p>
         {% endif %}

@@ -1,0 +1,116 @@
+<main class="stock-layout monitor-layout security-daily-article-layout">
+  <section class="stock-main monitor-main">
+    <section class="panel monitor-history-panel security-daily-library-panel">
+      <div class="section-header section-header-slider">
+        <div class="section-slider-shell" aria-label="安全软件日报">
+          <div class="section-slider-track">
+            <article class="section-slider-card">
+              <p class="eyebrow">SECURITY SOFTWARE DAILY</p>
+              <h3>安全软件日报</h3>
+              <p class="section-caption">每日公开消息、公司事件、间接影响和市场观点整理。</p>
+            </article>
+          </div>
+        </div>
+        <span class="summary-count">{{ security_software_daily_report.article_count_label }}</span>
+      </div>
+
+      <div class="scroll-expander-list security-daily-featured-list">
+        <details class="expander scroll-expander-card security-daily-content-expander" open>
+          <summary class="expander-summary scroll-expander-summary security-daily-content-summary">
+            <div>
+              <div class="card-inline-meta">
+                <span class="meta-chip">{{ security_software_daily_report.date }}</span>
+                <span class="meta-chip">{{ security_software_daily_report.mode }}</span>
+                <span class="meta-chip">X {{ security_software_daily_report.x_status_label }}</span>
+                <span class="meta-chip">{{ security_software_daily_report.event_count_label }}</span>
+              </div>
+              <h3>{{ security_software_daily_report.title }}</h3>
+              <p class="section-caption">{{ security_software_daily_report.conclusion }}</p>
+            </div>
+            <div class="expander-meta">
+              <span class="summary-count">全文</span>
+              <span class="expander-toggle">
+                <span class="expander-closed-label">展开</span>
+                <span class="expander-open-label">收起</span>
+              </span>
+            </div>
+          </summary>
+
+          <div class="expander-body scroll-expander-body security-daily-content-body">
+            <div class="card-link-row scroll-expander-actions security-daily-card-actions">
+              <form action="{{ url_for('generate_security_software_demo') }}" method="post">
+                <button class="button button-secondary button-compact" type="submit">刷新</button>
+              </form>
+            </div>
+
+            <article class="scroll-expander-pane security-daily-inline-body">
+              {% for paragraph in security_software_daily_report["article_paragraphs"] %}
+                <p>{{ paragraph }}</p>
+              {% endfor %}
+
+              <section class="security-daily-report-section">
+                <h3>相关公司</h3>
+                <div class="security-clean-company-row">
+                  {% for item in security_software_daily_report["items"] %}
+                    {% for company in item["companies"] %}
+                      <a href="{{ url_for('stock_detail', symbol=company) }}">{{ company }}</a>
+                    {% endfor %}
+                  {% endfor %}
+                </div>
+              </section>
+
+              <section class="security-daily-report-section">
+                <h3>来源</h3>
+                <div class="security-report-source-row">
+                  {% for source in security_software_daily_report["sources"] %}
+                    <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.label }}</a>
+                  {% endfor %}
+                </div>
+              </section>
+            </article>
+          </div>
+        </details>
+      </div>
+    </section>
+  </section>
+
+  <aside class="stock-sidebar security-clean-sidebar">
+    <section class="panel security-clean-source-panel">
+      <div class="section-header compact">
+        <div>
+          <p class="eyebrow">SOURCES</p>
+          <h3>来源</h3>
+        </div>
+      </div>
+
+      <div class="security-clean-source-status">
+        <article>
+          <span>新闻/博客/IR</span>
+          <strong>{{ security_software_daily_report.source_status }}</strong>
+        </article>
+        <article>
+          <span>公司池</span>
+          <strong>{{ security_software_companies|length }} 个</strong>
+        </article>
+      </div>
+
+      <form class="security-clean-x-form" action="{{ url_for('configure_security_software_x_monitor') }}" method="post">
+        <label class="security-toggle-row">
+          <input type="checkbox" name="use_x" value="1" {% if security_software_x_monitor.enabled %}checked{% endif %}>
+          <span>使用推特</span>
+        </label>
+        <input type="hidden" name="spend_limit_usdc" value="{{ security_software_x_monitor.spend_limit_usdc }}">
+        <input type="hidden" name="settlement_network" value="{{ security_software_x_monitor.settlement_network }}">
+        <button class="button button-secondary" type="submit">保存</button>
+      </form>
+
+      <form class="security-clean-auth-form" action="{{ url_for('authorize_security_software_x_monitor') }}" method="post">
+        <button class="button button-primary" type="submit">USDC 授权</button>
+      </form>
+
+      <p class="security-clean-auth-note">
+        {{ security_software_x_monitor.authorization_status }}{% if security_software_x_monitor.authorization_ticket %} · {{ security_software_x_monitor.authorization_ticket }}{% endif %}
+      </p>
+    </section>
+  </aside>
+</main>

@@ -16,9 +16,7 @@
       <div class="stock-hero-copy">
         <p class="eyebrow">股票工作台</p>
         <h2>股票总览</h2>
-        <p class="story-dek">
-          先整理观察名单，再进入个股页沉淀笔记、资料和会议转录。研究路径会更清晰，也更适合长期回看。
-        </p>
+        <p class="story-dek">观察名单、分组和个股研究入口。</p>
         <div class="story-actions">
           <a class="button button-primary" href="{{ url_for('monitor_page') }}">返回 Monitor</a>
           <a class="button button-secondary" href="{{ url_for('global_search') }}">全局搜索</a>
@@ -60,10 +58,10 @@
         <section class="panel stock-favorites-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">自选区</p>
-              <h3>重点观察股票</h3>
-            </div>
-            <span class="section-caption">点击股票代码即可进入个股页。</span>
+            <p class="eyebrow">自选区</p>
+            <h3>重点观察股票</h3>
+          </div>
+            <span class="section-caption">点击代码进入个股页。</span>
           </div>
 
           {% if favorites %}
@@ -95,7 +93,7 @@
           {% else %}
             <div class="empty-card">
               <p class="empty-title">你的自选区还是空的</p>
-              <p>先在下方分组里添加股票，然后点星标把它加入自选区。</p>
+              <p>添加股票后点星标。</p>
             </div>
           {% endif %}
         </section>
@@ -103,10 +101,10 @@
         <section class="panel stock-groups-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">分组</p>
-              <h3>自定义分组</h3>
-            </div>
-            <span class="section-caption">先看概览，需要时再展开编辑信息、补充股票和维护清单。</span>
+            <p class="eyebrow">分组</p>
+            <h3>自定义分组</h3>
+          </div>
+            <span class="section-caption">概览、编辑、补充成员。</span>
           </div>
 
           {% if groups %}
@@ -195,7 +193,7 @@
                             </div>
                           {% else %}
                             <div class="empty-inline">
-                              <p>这个分组里还没有股票。你可以先在右侧补充股票代码，后面再在这里维护星标和成员清单。</p>
+                              <p>这个分组还没有股票。</p>
                             </div>
                           {% endif %}
                         </section>
@@ -204,10 +202,10 @@
                           <section class="group-panel-slab">
                             <div class="group-panel-head">
                               <div>
-                                <p class="eyebrow">分组信息</p>
-                                <h5>编辑名称和说明</h5>
-                              </div>
-                              <span class="section-caption">这里负责定义这个分组为什么存在。</span>
+                              <p class="eyebrow">分组信息</p>
+                              <h5>编辑名称和说明</h5>
+                            </div>
+                              <span class="section-caption">分组定位。</span>
                             </div>
                             <form class="stack-form compact-form" action="{{ url_for('update_stock_group', group_id=group.id) }}" method="post" data-preserve-scroll>
                               <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
@@ -226,10 +224,10 @@
                           <section class="group-panel-slab">
                             <div class="group-panel-head">
                               <div>
-                                <p class="eyebrow">补充股票</p>
-                                <h5>继续加入成员</h5>
-                              </div>
-                              <span class="section-caption">一次可添加多只，也可以顺手加入自选。</span>
+                              <p class="eyebrow">补充股票</p>
+                              <h5>继续加入成员</h5>
+                            </div>
+                              <span class="section-caption">可批量添加。</span>
                             </div>
                             <form class="stack-form compact-form" action="{{ url_for('add_group_stocks', group_id=group.id) }}" method="post" data-preserve-scroll>
                               <input type="hidden" name="next_url" value="{{ url_for('stocks_workspace') }}">
@@ -254,7 +252,7 @@
           {% else %}
             <div class="empty-card">
               <p class="empty-title">先创建一个分组</p>
-              <p>例如“核心观察”“高弹性”“财报前后”“航空链”“半导体”等，然后再往里面加入股票。</p>
+              <p>例如核心观察、高弹性、财报前后。</p>
             </div>
           {% endif %}
         </section>
@@ -284,15 +282,14 @@
         <section class="panel stock-guide-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">使用方式</p>
-              <h3>如何组织研究</h3>
+              <p class="eyebrow">组织</p>
+              <h3>研究结构</h3>
             </div>
           </div>
           <ul class="briefing-list">
-            <li>先创建分组，用来区分策略、行业、主题或阶段观察。</li>
-            <li>在分组里输入股票代码，一次可以加入多只股票。</li>
-            <li>点进个股页后，再集中写笔记、上传文件、看活动日历。</li>
-            <li>后面如果继续增加模块，也能沿着这套结构继续扩展。</li>
+            <li>分组区分策略、行业和阶段。</li>
+            <li>个股页沉淀笔记、资料和转录。</li>
+            <li>自选保留重点观察。</li>
           </ul>
         </section>
 

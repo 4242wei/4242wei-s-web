@@ -11,3 +11,4 @@ oss2==2.19.1
 alibabacloud-tea-openapi==0.4.3
 alibabacloud-tingwu20230930==2.0.24
 reportlab==4.4.4
+waitress==3.0.2

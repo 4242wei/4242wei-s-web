@@ -16,9 +16,7 @@
       <div class="ai-hero-copy">
         <p class="eyebrow">研究导图</p>
         <h2>资料梳理台</h2>
-        <p class="story-dek">
-          先选股票、资料类型和时间窗口，再让本地 Codex 把资料整理成一张可浏览的分叉思维图。梳理时会同时考虑时间演化、资料互补、管理层电话会议口径、资料冲突和上下游传导。
-        </p>
+        <p class="story-dek">把资料范围整理成可浏览导图。</p>
       </div>
       <div class="ai-hero-scope">
         <article class="ai-scope-card ai-scope-card-hero" data-ai-scope-summary-card>
@@ -31,7 +29,7 @@
               设置范围
             </button>
           </div>
-          <p class="section-caption" data-ai-scope-description>生成导图时会读取这里定义范围内的资料，并重点整理时间轴与资料之间的互补、分歧和修正关系。</p>
+          <p class="section-caption" data-ai-scope-description>股票、时间和内容类型。</p>
           <div class="ai-scope-summary-chips">
             <span class="meta-chip" data-ai-scope-stock-label>{{ mindmap_scope_summary.stock_label }}</span>
             <span class="meta-chip" data-ai-scope-time-label>{{ mindmap_scope_summary.time_label }}</span>
@@ -117,7 +115,7 @@
 
             {% if not mindmap_records %}
               <div class="empty-inline">
-                <p>第一次生成后，导图会留在这里，方便你持续回看和复盘资料结构。</p>
+                <p>生成后会保存在这里。</p>
               </div>
             {% endif %}
           </div>
@@ -129,9 +127,7 @@
           <div>
             <p class="eyebrow">当前工作区</p>
             <h3>{{ active_record.title if active_record else "新导图" }}</h3>
-            <p class="section-caption">
-              点击生成后，Codex 会把当前资料范围整理成一张可浏览导图，并突出时间演化、资料互补和结论冲突。
-            </p>
+            <p class="section-caption">生成结构、时间线和证据关系。</p>
           </div>
           {% if active_record and active_record.status in ["pending", "running"] %}
             <form action="{{ url_for('stop_mindmap', record_id=active_record.id) }}" method="post">
@@ -159,7 +155,7 @@
           <div class="ai-composer-shell mindmap-composer-shell">
             <div class="mindmap-composer-copy">
               <strong>生成分叉思维图</strong>
-              <p class="section-caption">默认会自动判断是单股拆解、同行对比、产业链传导还是主题资料包，并强制抽出时间主线与资料关系。</p>
+              <p class="section-caption">单股、同行、产业链或主题资料包。</p>
             </div>
             <label class="form-field mindmap-prompt-field">
               <span class="field-label">额外归纳要求</span>
@@ -169,7 +165,7 @@
                 placeholder="可选：比如“帮我重点分析新增量/变化，再列一个思维导图”或“按管理层最新口径 vs 旧判断的变化去归纳”"
                 {% if not codex_ready %}disabled{% endif %}
               >{{ mindmap_generation_prompt }}</textarea>
-              <span class="field-help">不填就按默认逻辑归纳；填了会优先按你的方向整理结构、变化点和待验证项。</span>
+              <span class="field-help">可选。留空则按默认逻辑。</span>
             </label>
             <label class="form-field mindmap-upload-field">
               <span class="field-label">摘要底稿 PDF / Word</span>
@@ -179,7 +175,7 @@
                 accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 {% if not codex_ready %}disabled{% endif %}
               >
-              <span class="field-help">可选：上传你自己写的周报、summary 或摘要底稿，系统会先拆出你的逻辑链，再回到资料库找依据、冲突点和待验证环节。</span>
+              <span class="field-help">可选。用于补充你的摘要逻辑。</span>
             </label>
             <div class="mindmap-composer-controls">
               <label class="form-field ai-compact-field">
@@ -211,7 +207,7 @@
                 </button>
               </div>
             </div>
-            <p class="field-help">思维图是只读整理结果，不会修改网页原始资料。</p>
+            <p class="field-help">只读整理，不修改原始资料。</p>
           </div>
         </form>
 
@@ -219,7 +215,7 @@
           {% if active_record.status in ["pending", "running"] %}
             <div class="empty-card mindmap-empty-state">
               <p class="empty-title">导图生成中</p>
-              <p>Codex 正在整理资料结构、时间演化和互补/冲突关系。页面会自动刷新到最新结果。</p>
+              <p>正在整理资料结构。</p>
             </div>
           {% elif active_record.status == "error" %}
             <div class="empty-card mindmap-empty-state is-error">
@@ -276,7 +272,7 @@
                   {% if active_record.generation_brief.summary %}
                     <p>{{ active_record.generation_brief.summary }}</p>
                   {% endif %}
-                  <p class="field-help">生成时会先拆这份底稿的逻辑主线，允许不同的链条有不同层数，再结合资料库补证据、反例和时间传导。</p>
+                  <p class="field-help">生成时会参考这份底稿。</p>
                 </div>
               {% endif %}
 

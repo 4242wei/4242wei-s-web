@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -47,6 +48,17 @@ from flask import (
     url_for,
 )
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+from app_routes.schedule_routes import register_schedule_routes
+from app_routes.trash_routes import register_trash_routes
+from app_support.json_documents import (
+    load_json,
+    load_normalized_json,
+    save_normalized_json,
+    write_json_atomic,
+    write_text_atomic,
+)
 
 from gpu_price_tracker import (
     GPU_FAMILY_CONFIGS,
@@ -601,26 +613,6 @@ def resolve_app_path(env_name: str, fallback: Path) -> Path:
     return candidate if candidate.is_absolute() else (BASE_DIR / candidate).resolve()
 
 
-def load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def write_text_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.replace(path)
-
-
-def write_json_atomic(path: Path, payload: Any) -> None:
-    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
 FALLBACK_REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR = resolve_app_path(
     "REPORTS_DIR",
@@ -958,6 +950,22 @@ SIGNAL_MONITOR_STATUS_POLL_INTERVAL_SECONDS = 5
 SIGNAL_MONITOR_DEFAULT_WINDOW_DAYS = 7
 SIGNAL_MONITOR_MIN_INTERVAL_HOURS = 6
 SIGNAL_MONITOR_DEFAULT_CATEGORY = "通用监控"
+SECURITY_SOFTWARE_MONITOR_DATA_DIR = BASE_DIR / "data" / "security_software_monitor"
+SECURITY_SOFTWARE_MONITOR_CONFIG_PATH = SECURITY_SOFTWARE_MONITOR_DATA_DIR / "config.json"
+SECURITY_SOFTWARE_MONITOR_STATE_PATH = SECURITY_SOFTWARE_MONITOR_DATA_DIR / "state.json"
+SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR = BASE_DIR / "backend_skills" / "security-software-daily-writer"
+SECURITY_SOFTWARE_DAILY_WRITER_SKILL_PATH = SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR / "SKILL.md"
+SECURITY_SOFTWARE_DAILY_WRITER_FRAMEWORK_PATH = SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR / "references" / "writing-framework.md"
+AGENT_PAYMENT_DIR = Path(os.environ.get("AGENT_PAYMENT_DIR", r"D:\工作\Agent支付"))
+AISA_X402_SKILL_SCRIPT_PATH = Path(
+    os.environ.get(
+        "AISA_X402_SKILL_SCRIPT",
+        r"C:\Users\user1\.codex\skills\agent-market-x402-payments\scripts\aisa_x402_probe.py",
+    )
+)
+AISA_X402_PYTHON_PATH = Path(
+    os.environ.get("AISA_X402_PYTHON", str(AGENT_PAYMENT_DIR / ".venv" / "Scripts" / "python.exe"))
+)
 SIGNAL_MONITOR_DEFAULT_SOURCES = [
     {
         "id": "semianalysis-x",
@@ -1316,9 +1324,12 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "stock-daily-analysis-local-secret")
 app.permanent_session_lifetime = timedelta(days=WEB_ACCESS_REMEMBER_DAYS)
 app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+app.config["PREFERRED_URL_SCHEME"] = os.getenv("PREFERRED_URL_SCHEME", "https")
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH", str(1024 * 1024 * 1024)))
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 STATIC_ASSET_VERSIONS = {
-    "style.css": "20260413-monitorupgrades2",
+    "style.css": "20260624-scroll-expander-component1",
     "flash-messages.js": "20260330-access-gate",
     "calendar-modal.js": "20260316-modalfix1",
     "confirm-modal.js": "20260315-confirmfix",
@@ -1339,6 +1350,16 @@ def current_port() -> int:
 
 def current_local_url() -> str:
     return f"http://127.0.0.1:{current_port()}"
+
+
+def initialize_runtime() -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STOCK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    maybe_start_stablecoin_monitor_scheduler()
+    maybe_start_cdn_monitor_scheduler()
+    maybe_start_gpu_price_monitor_scheduler()
 
 
 def path_is_within(child: Path, parent: Path) -> bool:
@@ -4350,17 +4371,11 @@ def normalize_monitor_config(raw: Any) -> dict[str, Any]:
 
 
 def load_monitor_config() -> dict[str, Any]:
-    MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not MONITOR_CONFIG_PATH.exists():
-        config = normalize_monitor_config({})
-        save_monitor_config(config)
-        return config
-    return normalize_monitor_config(load_json(MONITOR_CONFIG_PATH))
+    return load_normalized_json(MONITOR_CONFIG_PATH, normalize_monitor_config)
 
 
 def save_monitor_config(config: dict[str, Any]) -> None:
-    normalized = normalize_monitor_config(config)
-    write_json_atomic(MONITOR_CONFIG_PATH, normalized)
+    save_normalized_json(MONITOR_CONFIG_PATH, config, normalize_monitor_config)
 
 
 def normalize_monitor_runtime(raw: Any) -> dict[str, Any]:
@@ -4384,17 +4399,11 @@ def normalize_monitor_runtime(raw: Any) -> dict[str, Any]:
 
 
 def load_monitor_runtime() -> dict[str, Any]:
-    MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not MONITOR_RUNTIME_PATH.exists():
-        runtime = normalize_monitor_runtime({})
-        save_monitor_runtime(runtime)
-        return runtime
-    return normalize_monitor_runtime(load_json(MONITOR_RUNTIME_PATH))
+    return load_normalized_json(MONITOR_RUNTIME_PATH, normalize_monitor_runtime)
 
 
 def save_monitor_runtime(runtime: dict[str, Any]) -> None:
-    normalized = normalize_monitor_runtime(runtime)
-    write_json_atomic(MONITOR_RUNTIME_PATH, normalized)
+    save_normalized_json(MONITOR_RUNTIME_PATH, runtime, normalize_monitor_runtime)
 
 
 def monitor_runtime_status_label(status: str) -> str:
@@ -4938,17 +4947,11 @@ def normalize_signal_monitor_config(raw: Any) -> dict[str, Any]:
 
 
 def load_signal_monitor_config() -> dict[str, Any]:
-    SIGNAL_MONITOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not SIGNAL_MONITOR_CONFIG_PATH.exists():
-        config = normalize_signal_monitor_config({})
-        save_signal_monitor_config(config)
-        return config
-    return normalize_signal_monitor_config(load_json(SIGNAL_MONITOR_CONFIG_PATH))
+    return load_normalized_json(SIGNAL_MONITOR_CONFIG_PATH, normalize_signal_monitor_config)
 
 
 def save_signal_monitor_config(config: dict[str, Any]) -> None:
-    normalized = normalize_signal_monitor_config(config)
-    write_json_atomic(SIGNAL_MONITOR_CONFIG_PATH, normalized)
+    save_normalized_json(SIGNAL_MONITOR_CONFIG_PATH, config, normalize_signal_monitor_config)
 
 
 def normalize_signal_state_entry(raw_state: Any) -> dict[str, Any] | None:
@@ -5002,17 +5005,11 @@ def normalize_signal_monitor_state(raw: Any) -> dict[str, Any]:
 
 
 def load_signal_monitor_state() -> dict[str, Any]:
-    SIGNAL_MONITOR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not SIGNAL_MONITOR_STATE_PATH.exists():
-        state = normalize_signal_monitor_state({})
-        save_signal_monitor_state(state)
-        return state
-    return normalize_signal_monitor_state(load_json(SIGNAL_MONITOR_STATE_PATH))
+    return load_normalized_json(SIGNAL_MONITOR_STATE_PATH, normalize_signal_monitor_state)
 
 
 def save_signal_monitor_state(state: dict[str, Any]) -> None:
-    normalized = normalize_signal_monitor_state(state)
-    write_json_atomic(SIGNAL_MONITOR_STATE_PATH, normalized)
+    save_normalized_json(SIGNAL_MONITOR_STATE_PATH, state, normalize_signal_monitor_state)
 
 
 def normalize_signal_monitor_runtime(raw: Any) -> dict[str, Any]:
@@ -5038,17 +5035,11 @@ def normalize_signal_monitor_runtime(raw: Any) -> dict[str, Any]:
 
 
 def load_signal_monitor_runtime() -> dict[str, Any]:
-    SIGNAL_MONITOR_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not SIGNAL_MONITOR_RUNTIME_PATH.exists():
-        runtime = normalize_signal_monitor_runtime({})
-        save_signal_monitor_runtime(runtime)
-        return runtime
-    return normalize_signal_monitor_runtime(load_json(SIGNAL_MONITOR_RUNTIME_PATH))
+    return load_normalized_json(SIGNAL_MONITOR_RUNTIME_PATH, normalize_signal_monitor_runtime)
 
 
 def save_signal_monitor_runtime(runtime: dict[str, Any]) -> None:
-    normalized = normalize_signal_monitor_runtime(runtime)
-    write_json_atomic(SIGNAL_MONITOR_RUNTIME_PATH, normalized)
+    save_normalized_json(SIGNAL_MONITOR_RUNTIME_PATH, runtime, normalize_signal_monitor_runtime)
 
 
 def parse_signal_monitor_datetime(value: Any) -> datetime | None:
@@ -5345,6 +5336,588 @@ def build_signal_source_groups(cards: list[dict[str, Any]]) -> list[dict[str, An
     for group in groups:
         group["is_scrollable"] = len(group["items"]) >= 4
     return groups
+
+
+def default_security_software_monitor_config() -> dict[str, Any]:
+    companies = [
+        {"id": "okta", "ticker": "OKTA", "name": "Okta", "focus": "Identity", "aliases": ["Okta"]},
+        {"id": "microsoft", "ticker": "MSFT", "name": "Microsoft", "focus": "Security platform / cloud", "aliases": ["Microsoft", "Azure"]},
+        {"id": "sailpoint", "ticker": "SAIL", "name": "SailPoint", "focus": "Identity governance", "aliases": ["SailPoint"]},
+        {"id": "palo-alto", "ticker": "PANW", "name": "Palo Alto Networks", "focus": "Platform / SASE / CNAPP", "aliases": ["Palo Alto", "PANW"]},
+        {"id": "cyberark", "ticker": "CYBR", "name": "CyberArk", "focus": "Privileged access", "aliases": ["CyberArk"]},
+        {"id": "zscaler", "ticker": "ZS", "name": "Zscaler", "focus": "Zero Trust / SSE", "aliases": ["Zscaler"]},
+        {"id": "cloudflare", "ticker": "NET", "name": "Cloudflare", "focus": "SASE / App Security", "aliases": ["Cloudflare"]},
+        {"id": "fortinet", "ticker": "FTNT", "name": "Fortinet", "focus": "Network security", "aliases": ["Fortinet"]},
+        {"id": "check-point", "ticker": "CHKP", "name": "Check Point", "focus": "Network security", "aliases": ["Check Point"]},
+        {"id": "cisco", "ticker": "CSCO", "name": "Cisco", "focus": "Network / SOC", "aliases": ["Cisco"]},
+        {"id": "crowdstrike", "ticker": "CRWD", "name": "CrowdStrike", "focus": "Endpoint / XDR", "aliases": ["CrowdStrike"]},
+        {"id": "sentinelone", "ticker": "S", "name": "SentinelOne", "focus": "Endpoint / AI Security", "aliases": ["SentinelOne"]},
+        {"id": "tenable", "ticker": "TENB", "name": "Tenable", "focus": "Exposure management", "aliases": ["Tenable"]},
+        {"id": "qualys", "ticker": "QLYS", "name": "Qualys", "focus": "Vulnerability / compliance", "aliases": ["Qualys"]},
+        {"id": "rapid7", "ticker": "RPD", "name": "Rapid7", "focus": "Exposure / SOC", "aliases": ["Rapid7"]},
+        {"id": "datadog", "ticker": "DDOG", "name": "Datadog", "focus": "Cloud observability / security", "aliases": ["Datadog"]},
+        {"id": "gitlab", "ticker": "GTLB", "name": "GitLab", "focus": "DevSecOps", "aliases": ["GitLab"]},
+        {"id": "jfrog", "ticker": "FROG", "name": "JFrog", "focus": "Software supply chain", "aliases": ["JFrog"]},
+        {"id": "rubrik", "ticker": "RBRK", "name": "Rubrik", "focus": "Cyber resilience / data security", "aliases": ["Rubrik"]},
+        {"id": "varonis", "ticker": "VRNS", "name": "Varonis", "focus": "Data security", "aliases": ["Varonis"]},
+        {"id": "servicenow", "ticker": "NOW", "name": "ServiceNow", "focus": "Workflow / GRC", "aliases": ["ServiceNow"]},
+    ]
+    control_layers = [
+        {
+            "id": "identity",
+            "order": 1,
+            "name": "身份安全",
+            "question": "谁在访问？权限对不对？",
+            "stage": "先确认身份",
+            "color": "blue",
+            "company_ids": ["okta", "microsoft", "sailpoint", "palo-alto", "cyberark"],
+            "direct_signals": ["IAM / PAM / IGA 产品发布", "大客户身份项目", "权限治理、MFA、SSO、passkey 更新"],
+            "indirect_signals": ["凭证泄露", "AI agent 权限扩张", "身份供应链攻击"],
+        },
+        {
+            "id": "access",
+            "order": 2,
+            "name": "访问安全",
+            "question": "能不能访问？访问路径安全吗？",
+            "stage": "再控制访问",
+            "color": "green",
+            "company_ids": ["zscaler", "cloudflare", "palo-alto", "fortinet", "check-point", "cisco"],
+            "direct_signals": ["SASE / SSE / ZTNA 产品更新", "网络安全平台整合", "防火墙、网关、浏览器隔离消息"],
+            "indirect_signals": ["VPN / firewall 漏洞", "远程办公流量变化", "云访问路径重构"],
+        },
+        {
+            "id": "endpoint-workload",
+            "order": 3,
+            "name": "终端与工作负载安全",
+            "question": "设备和服务器安全吗？",
+            "stage": "保护设备与云",
+            "color": "orange",
+            "company_ids": ["crowdstrike", "microsoft", "sentinelone", "palo-alto", "fortinet"],
+            "direct_signals": ["EDR / XDR / workload protection 更新", "AI SOC agent 与终端遥测", "平台打包和客户扩展"],
+            "indirect_signals": ["勒索软件扩散", "服务器入侵", "端点代理争议或性能事件"],
+        },
+        {
+            "id": "cloud-app-code",
+            "order": 4,
+            "name": "云、应用和代码安全",
+            "question": "云资源、应用和代码安全吗？",
+            "stage": "保护设备与云",
+            "color": "purple",
+            "company_ids": ["palo-alto", "crowdstrike", "microsoft", "tenable", "qualys", "rapid7", "datadog", "gitlab", "jfrog"],
+            "direct_signals": ["CNAPP / ASPM / code scanning 更新", "软件供应链安全", "云市场上架和集成"],
+            "indirect_signals": ["云配置泄露", "开源依赖攻击", "CI/CD 凭证泄露"],
+        },
+        {
+            "id": "data",
+            "order": 5,
+            "name": "数据安全",
+            "question": "敏感数据在哪里？有没有外泄？",
+            "stage": "保护数据",
+            "color": "teal",
+            "company_ids": ["microsoft", "rubrik", "varonis", "zscaler", "cloudflare", "palo-alto"],
+            "direct_signals": ["DSPM / DLP / backup security 更新", "数据访问治理", "勒索恢复客户案例"],
+            "indirect_signals": ["数据泄露", "AI 训练数据合规", "SaaS 权限外溢"],
+        },
+        {
+            "id": "soc",
+            "order": 6,
+            "name": "安全运营 SOC",
+            "question": "出了事怎么发现、调查、响应？",
+            "stage": "最后检测、响应、恢复",
+            "color": "indigo",
+            "company_ids": ["crowdstrike", "palo-alto", "microsoft", "sentinelone", "rapid7", "cisco"],
+            "direct_signals": ["SIEM / SOAR / XDR 平台消息", "AI analyst / agent", "托管检测响应 MDR"],
+            "indirect_signals": ["威胁情报热度", "SOC 人力紧张", "攻击 dwell time 变化"],
+        },
+        {
+            "id": "recovery-compliance",
+            "order": 7,
+            "name": "恢复与合规",
+            "question": "被打后能不能恢复？审计能不能交代？",
+            "stage": "最后检测、响应、恢复",
+            "color": "red",
+            "company_ids": ["rubrik", "microsoft", "tenable", "qualys", "rapid7", "servicenow"],
+            "direct_signals": ["cyber recovery / backup 更新", "GRC / audit 工作流", "合规报告和网络保险"],
+            "indirect_signals": ["勒索赔付变化", "监管处罚", "审计要求升级"],
+        },
+    ]
+    return {
+        "version": 1,
+        "updated_at": now_iso(),
+        "companies": companies,
+        "control_layers": control_layers,
+        "layer_edges": [
+            {"from": "identity", "to": "access", "label": "身份确认后进入访问控制"},
+            {"from": "access", "to": "endpoint-workload", "label": "访问路径落到设备与工作负载"},
+            {"from": "endpoint-workload", "to": "cloud-app-code", "label": "工作负载连接云、应用和代码"},
+            {"from": "cloud-app-code", "to": "data", "label": "应用和代码最终触达数据"},
+            {"from": "data", "to": "soc", "label": "数据与资产遥测进入检测响应"},
+            {"from": "soc", "to": "recovery-compliance", "label": "响应结果进入恢复、审计和合规"},
+        ],
+        "signal_taxonomy": [
+            {"kind": "direct", "label": "直接监测", "title": "公司官方与资本市场消息", "scope": "新闻稿、IR、财报电话会、SEC 8-K/10-Q、产品发布、客户案例、定价包装。"},
+            {"kind": "direct", "label": "直接监测", "title": "官方博客与技术更新", "scope": "公司博客、安全研究博客、docs changelog、release notes、平台集成、Marketplace 上架。"},
+            {"kind": "indirect", "label": "间接影响", "title": "安全事件与漏洞链", "scope": "重大 CVE、勒索攻击、供应链事件、身份泄露、云配置事故、数据泄露。"},
+            {"kind": "indirect", "label": "间接影响", "title": "AI / Agent 安全预算迁移", "scope": "AI agent 权限、数据访问、runtime guardrails、DLP、identity、browser isolation。"},
+            {"kind": "context", "label": "上下文积累", "title": "公司-产品-主题图谱", "scope": "把公司、产品线、核心客户、攻击场景、合规主题、竞品关系持续写入上下文。"},
+        ],
+        "source_groups": [
+            {"name": "公司官方源", "description": "最适合直接监测，优先接入你给的公司列表。", "items": ["Investor Relations", "Newsroom", "Company Blog", "Security Research Blog", "Docs / Changelog"]},
+            {"name": "市场与新闻源", "description": "用于捕捉财务叙事、并购、监管、客户采购和行业事件。", "items": ["SEC filings", "Earnings call transcript", "Reuters / Bloomberg", "The Register", "Dark Reading"]},
+            {"name": "技术与威胁源", "description": "用于识别会影响预算方向的安全事件和攻击链。", "items": ["CISA KEV", "NVD / CVE", "vendor advisories", "threat intel blogs", "ransomware incident feeds"]},
+            {"name": "生态与间接源", "description": "用于积累大主题，不把安全软件只看成公司新闻。", "items": ["AWS / Azure / GCP marketplace", "identity ecosystem", "AI security papers", "analyst notes", "X long-form pitches"]},
+        ],
+        "x_monitor": {
+            "enabled": False,
+            "payment_method": "USDC",
+            "payment_provider": "Circle",
+            "settlement_network": "Base USDC",
+            "spend_limit_usdc": 25,
+            "authorization_status": "not_authorized",
+            "authorization_ticket": "",
+            "agent_market_scope": "security_software_x_research",
+            "capture_plan": "开启后按公司、品类、X 长文 pitch、事故关键词和竞品关系拉取上下文。",
+            "updated_at": now_iso(),
+        },
+    }
+
+
+def normalize_security_software_monitor_config(raw: Any) -> dict[str, Any]:
+    baseline = default_security_software_monitor_config()
+    source = raw if isinstance(raw, dict) else {}
+    companies = source.get("companies") if isinstance(source.get("companies"), list) else baseline["companies"]
+    control_layers = source.get("control_layers") if isinstance(source.get("control_layers"), list) else baseline["control_layers"]
+    source_groups = source.get("source_groups") if isinstance(source.get("source_groups"), list) else baseline["source_groups"]
+    signal_taxonomy = source.get("signal_taxonomy") if isinstance(source.get("signal_taxonomy"), list) else baseline["signal_taxonomy"]
+    layer_edges = source.get("layer_edges") if isinstance(source.get("layer_edges"), list) else baseline["layer_edges"]
+    raw_x_monitor = source.get("x_monitor") if isinstance(source.get("x_monitor"), dict) else {}
+    x_monitor = {**baseline["x_monitor"], **raw_x_monitor}
+    try:
+        spend_limit_usdc = max(1, min(500, int(float(x_monitor.get("spend_limit_usdc") or baseline["x_monitor"]["spend_limit_usdc"]))))
+    except (TypeError, ValueError):
+        spend_limit_usdc = baseline["x_monitor"]["spend_limit_usdc"]
+    x_monitor["enabled"] = bool(x_monitor.get("enabled"))
+    x_monitor["payment_method"] = str(x_monitor.get("payment_method") or "USDC").strip()[:24] or "USDC"
+    x_monitor["payment_provider"] = str(x_monitor.get("payment_provider") or "Circle").strip()[:48] or "Circle"
+    x_monitor["settlement_network"] = str(x_monitor.get("settlement_network") or "Base USDC").strip()[:80] or "Base USDC"
+    x_monitor["spend_limit_usdc"] = spend_limit_usdc
+    x_monitor["authorization_status"] = str(x_monitor.get("authorization_status") or "not_authorized").strip()[:80] or "not_authorized"
+    x_monitor["authorization_ticket"] = str(x_monitor.get("authorization_ticket") or "").strip()[:120]
+    x_monitor["agent_market_scope"] = str(x_monitor.get("agent_market_scope") or "security_software_x_research").strip()[:120] or "security_software_x_research"
+    x_monitor["capture_plan"] = str(x_monitor.get("capture_plan") or baseline["x_monitor"]["capture_plan"]).strip()[:500]
+    x_monitor["updated_at"] = str(x_monitor.get("updated_at") or source.get("updated_at") or now_iso()).strip()
+    return {
+        "version": int(source.get("version") or baseline["version"]),
+        "updated_at": str(source.get("updated_at") or baseline["updated_at"]),
+        "companies": companies,
+        "control_layers": control_layers,
+        "layer_edges": layer_edges,
+        "signal_taxonomy": signal_taxonomy,
+        "source_groups": source_groups,
+        "x_monitor": x_monitor,
+    }
+
+
+def load_security_software_monitor_config() -> dict[str, Any]:
+    return load_normalized_json(SECURITY_SOFTWARE_MONITOR_CONFIG_PATH, normalize_security_software_monitor_config)
+
+
+def save_security_software_monitor_config(config: dict[str, Any]) -> None:
+    save_normalized_json(
+        SECURITY_SOFTWARE_MONITOR_CONFIG_PATH,
+        {**config, "updated_at": now_iso()},
+        normalize_security_software_monitor_config,
+    )
+
+
+def normalize_security_software_monitor_state(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    demo_runs = source.get("demo_runs") if isinstance(source.get("demo_runs"), list) else []
+    last_demo_run = source.get("last_demo_run") if isinstance(source.get("last_demo_run"), dict) else {}
+    x_authorization = source.get("x_authorization") if isinstance(source.get("x_authorization"), dict) else {}
+    return {
+        "last_demo_run": last_demo_run,
+        "demo_runs": demo_runs[:30],
+        "x_authorization": {
+            "status": str(x_authorization.get("status") or "").strip(),
+            "ticket": str(x_authorization.get("ticket") or "").strip()[:120],
+            "created_at": str(x_authorization.get("created_at") or "").strip(),
+            "payment_method": str(x_authorization.get("payment_method") or "USDC").strip()[:24],
+            "payment_provider": str(x_authorization.get("payment_provider") or "Circle").strip()[:48],
+            "spend_limit_usdc": x_authorization.get("spend_limit_usdc") or "",
+            "note": str(x_authorization.get("note") or "").strip()[:500],
+        },
+    }
+
+
+def load_security_software_monitor_state() -> dict[str, Any]:
+    return load_normalized_json(SECURITY_SOFTWARE_MONITOR_STATE_PATH, normalize_security_software_monitor_state)
+
+
+def save_security_software_monitor_state(state: dict[str, Any]) -> None:
+    save_normalized_json(
+        SECURITY_SOFTWARE_MONITOR_STATE_PATH,
+        state,
+        normalize_security_software_monitor_state,
+    )
+
+
+def run_security_software_x_payment_readiness() -> dict[str, Any]:
+    if not AISA_X402_SKILL_SCRIPT_PATH.exists():
+        return {
+            "ok": False,
+            "status": "script_missing",
+            "message": f"AIsa x402 skill script not found: {AISA_X402_SKILL_SCRIPT_PATH}",
+        }
+    if not AISA_X402_PYTHON_PATH.exists():
+        return {
+            "ok": False,
+            "status": "python_missing",
+            "message": f"AIsa x402 python not found: {AISA_X402_PYTHON_PATH}",
+        }
+    try:
+        result = subprocess.run(
+            [str(AISA_X402_PYTHON_PATH), str(AISA_X402_SKILL_SCRIPT_PATH), "readiness"],
+            cwd=str(AGENT_PAYMENT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout", "message": "AIsa x402 readiness timed out."}
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": str(exc)}
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except ValueError:
+        payload = {"stdout": (result.stdout or "")[:1000]}
+    ready = bool(payload.get("ready_for_paid_request"))
+    return {
+        "ok": ready and result.returncode == 0,
+        "status": "wallet_ready" if ready else "not_ready",
+        "return_code": result.returncode,
+        "payload": payload,
+        "stderr": (result.stderr or "")[:1000],
+    }
+
+
+def run_security_software_x_gateway_probe(
+    *,
+    query: str = "$RBRK lang:en",
+    query_type: str = "Latest",
+    chain: str = "BASE",
+) -> dict[str, Any]:
+    paid_dir = SECURITY_SOFTWARE_MONITOR_DATA_DIR / "paid_x"
+    paid_dir.mkdir(parents=True, exist_ok=True)
+    output_path = paid_dir / f"aisa_gateway_probe_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    if not AISA_X402_SKILL_SCRIPT_PATH.exists() or not AISA_X402_PYTHON_PATH.exists():
+        return {
+            "ok": False,
+            "status": "not_configured",
+            "output_path": str(output_path),
+            "message": "AIsa x402 skill script or python runtime is missing.",
+        }
+    cmd = [
+        str(AISA_X402_PYTHON_PATH),
+        str(AISA_X402_SKILL_SCRIPT_PATH),
+        "gateway-search",
+        "--endpoint",
+        "advanced_search",
+        "--query",
+        query,
+        "--query-type",
+        query_type,
+        "--chain",
+        chain,
+        "--output",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(AGENT_PAYMENT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout", "output_path": str(output_path)}
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": str(exc), "output_path": str(output_path)}
+    payload: dict[str, Any] = {}
+    if output_path.exists():
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    return_code = int((payload.get("gateway_client") or {}).get("return_code") or result.returncode)
+    status = "paid_ready" if return_code == 0 else str(body.get("reason") or body.get("error") or "probe_failed")
+    return {
+        "ok": return_code == 0,
+        "status": status,
+        "return_code": return_code,
+        "query": query,
+        "chain": chain,
+        "output_path": str(output_path),
+        "body_error": body.get("error"),
+        "body_reason": body.get("reason"),
+        "stderr": str(payload.get("stderr") or result.stderr or "")[:1500],
+    }
+
+
+def load_security_software_daily_writer_skill() -> dict[str, Any]:
+    skill_text = read_text_file(SECURITY_SOFTWARE_DAILY_WRITER_SKILL_PATH) if SECURITY_SOFTWARE_DAILY_WRITER_SKILL_PATH.exists() else ""
+    framework_text = read_text_file(SECURITY_SOFTWARE_DAILY_WRITER_FRAMEWORK_PATH) if SECURITY_SOFTWARE_DAILY_WRITER_FRAMEWORK_PATH.exists() else ""
+    return {
+        "available": bool(skill_text and framework_text),
+        "skill_path": str(SECURITY_SOFTWARE_DAILY_WRITER_SKILL_PATH),
+        "framework_path": str(SECURITY_SOFTWARE_DAILY_WRITER_FRAMEWORK_PATH),
+        "skill_chars": len(skill_text),
+        "framework_chars": len(framework_text),
+        "summary": "Use one article with prior-context comparison, source-tier judgment, direct/indirect reasoning, and a watchlist.",
+    }
+
+
+def build_security_software_demo_analysis(config: dict[str, Any]) -> dict[str, Any]:
+    companies_by_id = {str(item.get("id")): item for item in config.get("companies", []) if isinstance(item, dict)}
+    layers_by_id = {str(item.get("id")): item for item in config.get("control_layers", []) if isinstance(item, dict)}
+    demo_signals = [
+        {
+            "title": "AI agent 接入企业 SaaS 与内部 API",
+            "signal_type": "间接影响",
+            "trigger": "新工作方式让非人类身份、OAuth token、数据访问路径变多。",
+            "layer_ids": ["identity", "access", "data", "soc"],
+            "company_ids": ["okta", "cyberark", "zscaler", "cloudflare", "rubrik", "varonis", "microsoft"],
+            "readthrough": "先利好身份治理和访问控制，再传导到数据可见性、DLP、备份恢复和 SOC 自动化。",
+        },
+        {
+            "title": "VPN / firewall 重大漏洞被加入高危清单",
+            "signal_type": "间接影响",
+            "trigger": "访问入口暴露会把预算推向 SASE、ZTNA、网络安全平台和漏洞管理。",
+            "layer_ids": ["access", "endpoint-workload", "cloud-app-code", "soc"],
+            "company_ids": ["palo-alto", "fortinet", "check-point", "cisco", "tenable", "qualys", "rapid7", "crowdstrike"],
+            "readthrough": "短期看访问安全和漏洞管理，后续看是否带动 XDR/SOC 调查与平台整合。",
+        },
+        {
+            "title": "勒索攻击后客户强调不可变备份和恢复演练",
+            "signal_type": "直接 + 间接",
+            "trigger": "攻击事件会把安全讨论从检测扩展到恢复、审计和网络保险。",
+            "layer_ids": ["data", "soc", "recovery-compliance"],
+            "company_ids": ["rubrik", "microsoft", "varonis", "servicenow", "rapid7", "tenable"],
+            "readthrough": "RBRK 这类 cyber resilience 叙事会更容易被市场理解，同时带动 GRC、暴露管理和 SOC 工作流。",
+        },
+    ]
+    layer_heat: dict[str, int] = {}
+    company_heat: dict[str, int] = {}
+    for signal in demo_signals:
+        for layer_id in signal["layer_ids"]:
+            layer_heat[layer_id] = layer_heat.get(layer_id, 0) + 1
+        for company_id in signal["company_ids"]:
+            company_heat[company_id] = company_heat.get(company_id, 0) + 1
+
+    logic_chains = []
+    for signal in demo_signals:
+        layers = [layers_by_id.get(layer_id, {"name": layer_id}) for layer_id in signal["layer_ids"]]
+        companies = [companies_by_id.get(company_id, {"ticker": company_id, "name": company_id}) for company_id in signal["company_ids"]]
+        logic_chains.append(
+            {
+                **signal,
+                "layers": layers,
+                "companies": companies,
+                "chain_label": " -> ".join(str(layer.get("name") or layer.get("id")) for layer in layers),
+            }
+        )
+
+    return {
+        "run_id": uuid.uuid4().hex[:12],
+        "generated_at": now_iso(),
+        "signals": demo_signals,
+        "logic_chains": logic_chains,
+        "layer_heat": [
+            {"layer": layers_by_id.get(layer_id, {"id": layer_id, "name": layer_id}), "count": count}
+            for layer_id, count in sorted(layer_heat.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "company_heat": [
+            {"company": companies_by_id.get(company_id, {"id": company_id, "ticker": company_id, "name": company_id}), "count": count}
+            for company_id, count in sorted(company_heat.items(), key=lambda item: (-item[1], item[0]))[:12]
+        ],
+    }
+
+
+def build_security_software_daily_report(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    x_monitor = config.get("x_monitor", {}) if isinstance(config.get("x_monitor"), dict) else {}
+    writer_skill = load_security_software_daily_writer_skill()
+    x_enabled = bool(x_monitor.get("enabled"))
+    return {
+        "date": today_date_iso(),
+        "mode": "正式日报",
+        "title": "AI agent 风险从概念进入 CI/CD、恢复和漏洞修复闭环",
+        "conclusion": (
+            "本期没有单一财报级强催化，但 AI agent 风险正在从抽象讨论落到 CI/CD secrets、代码恢复、漏洞验证和补丁闭环。"
+            "直接受益线索仍是 RBRK 的 agentic recovery；间接受益线索转向 MSFT/GitHub、PANW、CRWD、TENB、QLYS、RPD 与 OT/资产发现。"
+        ),
+        "x_status_label": "开/已抓" if x_enabled else "关",
+        "source_status": "公开源已核验；本次使用付费 X，约 0.0088 USDC",
+        "updated_at": now_iso(),
+        "article_count_label": "1篇",
+        "event_count_label": "4条核心事件",
+        "writer_skill": writer_skill,
+        "article_paragraphs": [
+            "本期真正的增量不是某家安全公司发布一个普通 AI 功能，而是 AI agent 风险开始进入具体控制面：Microsoft 把 Claude Code GitHub Action 的 secrets 暴露拆成了 CI/CD 边界问题，Rubrik 把 Claude Code 场景包装成 agentic recovery，Anthropic Project Glasswing 把漏洞发现速度推高到修复流程承压，CISA KEV 则继续显示通信、SD-WAN、网关和 AI proxy 这类入口资产正在被快速纳入补丁优先级。",
+            "和 6 月 24 日的历史记录相比，AI agent 主题从“非人类身份、OAuth token、数据访问路径变多”的抽象 thesis，推进到“未受信 GitHub issue/PR 内容可影响 agent、agent 可读 CI runner secrets、修复需要隔离工具权限和最小化 token”的工程证据。这里直接映射到 MSFT/GitHub、GTLB、FROG、PANW、CRWD 和身份/PAM 公司；但短期还不是收入催化，更多是财报电话会与产品路线的观察项。",
+            "Rubrik 仍是最直接的公司事件。Rubrik 6 月 9 日宣布多家全球系统集成商把 Rubrik Agent Cloud 用于 Anthropic Claude Code，并强调 runtime guardrails、blast-radius control、Agent Rewind、代码库恢复和 prompt/control-plane 保护。这条线不是泛 AI 营销，因为它把 agent 出错后的回滚和恢复变成可销售工作流；但证据仍停留在产品/渠道层，下一步要看客户案例、定价和 ARR 口径。",
+            "Anthropic Project Glasswing 的新增意义在于：安全软件价值可能从“发现漏洞”迁移到“验证、排序、修复和部署补丁”。Anthropic 的更新称合作方使用 Claude Mythos Preview 找到大量高危/严重漏洞，并明确说瓶颈从发现转向验证、披露和修补。这对 TENB、QLYS、RPD、PANW、CRWD、DDOG、GTLB 是间接叙事强化：AI 让漏洞发现更便宜，平台必须证明自己能把发现接到 remediation workflow。",
+            "CISA KEV 6 月下旬新增 Cisco Unified CM、Cisco Catalyst SD-WAN Manager、Check Point Security Gateway、BerriAI LiteLLM 等条目，继续强化“访问入口和控制面资产是预算入口”的判断。对 CSCO/CHKP 是负面事件属性；对 ZS、NET、PANW、FTNT 以及 TENB/QLYS/RPD 则是间接预算线索，重点不是单个 CVE，而是企业需要更快识别暴露面、资产归属和补丁优先级。",
+            "Accenture 对 Dragos、runZero、NetRise 的约 41.75 亿美元 OT 安全组合交易继续提供一条非安全软件公司的间接证据：OT/工业资产安全正在从咨询项目走向平台化。FTNT、CSCO、PANW、TENB、RPD、QLYS 都会被问到工业资产发现、固件/供应链可见性和 SOC 闭环能力；但服务商拿走预算的风险也存在，因此本期只列为间接强化，不写成明确利好。",
+            "付费 X 市场观点给了一个有用校准：RBRK 讨论确实从“备份公司”转向“enterprise AI / cyber resilience”，但反方强调估值和执行条件，尤其是能否把 Agent Cloud 转成新买方、新销售动作和收入再加速。Claude Code 安全讨论则更偏从业者风险：干净 repo、错误恢复、DNS 动态载荷、shell 权限和环境变量泄露，比单纯 prompt injection 更接近真实攻击链。OT 交易讨论把 Accenture 的 Dragos/runZero/NetRise 解读成软件加服务合同和 208M ARR 资产组合，这支持 OT 平台化判断，但也提示服务商可能拿走预算。",
+            "本期结论：安全软件主线仍是 AI agent 与控制面扩张，但证据质量比上一版更实。RBRK 是直接映射，MSFT/GitHub 与 DevSecOps 是工程证据，暴露管理和 SOC 平台是间接受益，网络/OT 平台则受益于入口资产持续高危化。后续观察三件事：RBRK 是否给出客户/定价/ARR 口径；安全厂商是否把 AI-discovered vulnerability 接入修复闭环；CISA KEV 中通信、网关、AI proxy 是否持续成为主流入口。",
+        ],
+        "article_sections": [
+            {
+                "heading": "一句话结论",
+                "paragraphs": [
+                    "本期没有单一财报级强催化，但 AI agent 风险从抽象 thesis 落到了 CI/CD secrets、代码恢复、漏洞验证和补丁闭环。直接映射是 RBRK，间接映射是 MSFT/GitHub、DevSecOps、暴露管理、SOC 和 OT/资产发现。"
+                ],
+            },
+            {
+                "heading": "核心变化",
+                "paragraphs": [
+                    "第一，Microsoft 对 Claude Code GitHub Action 的研究把 agent 安全问题落到了 CI/CD 工程边界：未受信 issue/PR 内容进入 prompt，agent 又有文件读取、外联、token 和 secrets 权限时，传统 GitHub Actions 自动化边界会被改写。这是对上一版“agent 身份与权限扩张”判断的强化。",
+                    "第二，Rubrik 仍是最直接公司事件。Rubrik Agent Cloud for Claude Code 已经有 GSI 渠道和 GA 口径，产品叙事从备份/恢复扩展到 agent 行为治理、blast-radius control、Agent Rewind 和代码库恢复。判断：RBRK 叙事增强，但还缺客户采用和财务口径。",
+                    "第三，Anthropic Project Glasswing 把漏洞发现能力推到新阶段，新增变量不是“AI 会找漏洞”本身，而是瓶颈转向验证、披露、修补和部署。暴露管理、CNAPP、DevSecOps、SOC 厂商需要证明自己能做 remediation workflow，而不是只做扫描。",
+                    "第四，CISA KEV 近期入口类资产密集：Cisco UC、Cisco SD-WAN、Check Point Security Gateway、BerriAI LiteLLM 等条目说明通信、网关、SD-WAN 和 AI proxy 都在进入高优先级补丁队列。这条线间接强化 SASE、资产发现、漏洞管理和 SOC。"
+                ],
+            },
+            {
+                "heading": "公司影响地图",
+                "paragraphs": [
+                    "RBRK：直接，agentic recovery 叙事增强，证据从产品发布推进到 GSI 渠道，但仍需客户/ARR 验证。",
+                    "MSFT/GitHub、GTLB、FROG：间接，AI agent 进入 CI/CD 后，secret 管理、runner 隔离、代码审查和供应链控制成为新预算点。",
+                    "PANW、CRWD、TENB、QLYS、RPD、DDOG：间接，AI 漏洞发现让价值从 discovery 迁移到 prioritization、remediation、verification 和 SOC 闭环。",
+                    "ZS、NET、FTNT、CSCO、CHKP：观察，入口资产持续进入 KEV 强化访问安全/SASE 需求，但部分厂商自身也是漏洞事件主体。"
+                ],
+            },
+            {
+                "heading": "AI / 间接变量",
+                "paragraphs": [
+                    "AI 间接变量足够强。影响链是：agent 进入 CI/CD 和企业开发环境 -> 未受信内容变成可执行指令、token/secrets 暴露、agent 可改代码或创建 PR -> 企业需要 agent identity、least privilege、runtime isolation、DLP/secrets scanning、code recovery、remediation workflow -> 映射 RBRK、MSFT、OKTA/CYBR、GTLB/FROG、PANW/CRWD/TENB/QLYS/RPD。"
+                ],
+            },
+            {
+                "heading": "市场观点",
+                "paragraphs": [
+                    "付费 X 本次作为观点源，不作为事实源。RBRK 讨论里，多头把 Agent Cloud 解释为从 data protection 进入 enterprise AI/cyber resilience；反方或谨慎方主要看估值、收入再加速和销售组织能否适应新买方。从业者讨论 Claude Code 时，重点不是“AI 写代码”本身，而是 agent 自动执行 setup/error-recovery 命令后触达 shell、DNS 载荷和环境变量。OT 讨论则认为 Accenture 在用 Dragos/runZero/NetRise 做工业安全平台化押注，但市场同时担心服务主业放缓和并购整合风险。"
+                ],
+            },
+            {
+                "heading": "后续观察",
+                "paragraphs": [
+                    "一看 RBRK 是否给出 Agent Cloud 的客户、定价或 ARR 线索；二看 PANW/CRWD/TENB/QLYS/RPD 是否把 AI-discovered vulnerability 接到修复闭环；三看 KEV 是否继续集中在通信、网关、SD-WAN、AI proxy 与 OT/xOT 资产。"
+                ],
+            },
+        ],
+        "items": [
+            {
+                "title": "Rubrik Agent Cloud for Claude Code",
+                "importance": "直接消息：RBRK 把 agent 风险转成恢复、治理和代码库回滚工作流。",
+                "companies": ["RBRK", "MSFT", "OKTA", "CYBR", "VRNS"],
+                "sources": [
+                    {"label": "Rubrik: Global Systems Integrators Partner with Rubrik", "url": "https://www.rubrik.com/company/newsroom/press-releases/26/global-systems-integrators-partner-with-rubrik-to-deliver-rubrik-agent-cloud-for-anthropics-claude-code"},
+                    {"label": "Rubrik Agentic Cyber Resilience Platform", "url": "https://www.rubrik.com/products/agentic-cyber-resilience-platform"},
+                ],
+            },
+            {
+                "title": "AI 漏洞发现后的 remediation workflow",
+                "importance": "间接影响：发现漏洞变快后，预算重点转向排序、修复、验证和 SOC 闭环。",
+                "companies": ["PANW", "CRWD", "TENB", "QLYS", "RPD", "DDOG", "GTLB"],
+                "sources": [
+                    {"label": "Anthropic: Project Glasswing", "url": "https://www.anthropic.com/glasswing"},
+                    {"label": "Anthropic: Project Glasswing initial update", "url": "https://www.anthropic.com/research/glasswing-initial-update"},
+                    {"label": "VulnCheck: Anthropic / Glasswing CVE tracking", "url": "https://www.vulncheck.com/blog/anthropic-glasswing-cves"},
+                ],
+            },
+            {
+                "title": "OT / xOT 安全平台化",
+                "importance": "间接影响：工业资产发现、固件可见性和 OT SOC 可能从咨询项目走向软件平台预算。",
+                "companies": ["FTNT", "CSCO", "PANW", "TENB", "RPD", "QLYS"],
+                "sources": [
+                    {"label": "SecurityWeek: Accenture OT cybersecurity push", "url": "https://www.securityweek.com/accenture-to-acquire-majority-stake-in-dragos-all-of-runzero-netrise-in-4-1-billion-ot-cybersecurity-push/"},
+                    {"label": "CyberScoop: Accenture industrial cybersecurity acquisition", "url": "https://cyberscoop.com/accenture-industrial-cybersecurity-acquisition-dragos-netrise-runzero/"},
+                ],
+            },
+            {
+                "title": "CISA KEV 入口资产与 AI proxy 风险",
+                "importance": "间接影响：通信、SD-WAN、网关和 LiteLLM 等入口资产继续进入高优先级补丁队列。",
+                "companies": ["CSCO", "CHKP", "ZS", "NET", "PANW", "FTNT", "TENB", "QLYS", "RPD"],
+                "sources": [
+                    {"label": "CISA Known Exploited Vulnerabilities Catalog", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"},
+                    {"label": "local raw KEV snapshot", "url": "D:\\工作\\网页\\data\\security_software_monitor\\kev_latest.json"},
+                ],
+            },
+        ],
+        "sources": [
+            {"label": "Microsoft Security: Securing CI/CD in an agentic world", "url": "https://www.microsoft.com/en-us/security/blog/2026/06/05/securing-ci-cd-in-agentic-world-claude-code-github-action-case/"},
+            {"label": "Rubrik: Global Systems Integrators Partner with Rubrik", "url": "https://www.rubrik.com/company/newsroom/press-releases/26/global-systems-integrators-partner-with-rubrik-to-deliver-rubrik-agent-cloud-for-anthropics-claude-code"},
+            {"label": "Rubrik Agentic Cyber Resilience Platform", "url": "https://www.rubrik.com/products/agentic-cyber-resilience-platform"},
+            {"label": "Anthropic: Project Glasswing", "url": "https://www.anthropic.com/glasswing"},
+            {"label": "Anthropic: Project Glasswing initial update", "url": "https://www.anthropic.com/research/glasswing-initial-update"},
+            {"label": "VulnCheck: Anthropic / Glasswing CVE tracking", "url": "https://www.vulncheck.com/blog/anthropic-glasswing-cves"},
+            {"label": "CISA Known Exploited Vulnerabilities Catalog", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"},
+            {"label": "SecurityWeek: Accenture OT cybersecurity push", "url": "https://www.securityweek.com/accenture-to-acquire-majority-stake-in-dragos-all-of-runzero-netrise-in-4-1-billion-ot-cybersecurity-push/"},
+            {"label": "CyberScoop: Accenture industrial cybersecurity acquisition", "url": "https://cyberscoop.com/accenture-industrial-cybersecurity-acquisition-dragos-netrise-runzero/"},
+            {"label": "Paid X: RBRK Claude Code latest", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\rbrk_claude_code_latest.json"},
+            {"label": "Paid X: Claude Code CI/CD security top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\claude_code_cicd_security_top.json"},
+            {"label": "Paid X: Glasswing vulnerability remediation top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\glasswing_vuln_remediation_top.json"},
+            {"label": "Paid X: OT Dragos runZero NetRise top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\ot_dragos_runzero_netrise_top.json; paid_cost_usdc≈0.0088 total"},
+        ],
+    }
+
+
+def build_security_software_monitor_context() -> dict[str, Any]:
+    config = load_security_software_monitor_config()
+    state = load_security_software_monitor_state()
+    demo_analysis = state.get("last_demo_run") if isinstance(state.get("last_demo_run"), dict) and state.get("last_demo_run") else build_security_software_demo_analysis(config)
+    daily_report = build_security_software_daily_report(config, state)
+    relation_count = sum(
+        len(layer.get("company_ids", []))
+        for layer in config.get("control_layers", [])
+        if isinstance(layer, dict)
+    ) + len(config.get("layer_edges", []))
+    company_map = {str(company.get("id") or ""): company for company in config.get("companies", []) if isinstance(company, dict)}
+    return {
+        "security_software_config": config,
+        "security_software_state": state,
+        "security_software_companies": config.get("companies", []),
+        "security_software_company_map": company_map,
+        "security_software_control_layers": config.get("control_layers", []),
+        "security_software_layer_edges": config.get("layer_edges", []),
+        "security_software_relation_count": relation_count,
+        "security_software_monitor_tracks": config.get("signal_taxonomy", []),
+        "security_software_source_groups": config.get("source_groups", []),
+        "security_software_x_monitor": config.get("x_monitor", {}),
+        "security_software_x_authorization": state.get("x_authorization", {}),
+        "security_software_demo_analysis": demo_analysis,
+        "security_software_daily_report": daily_report,
+        "security_software_indirect_themes": [
+            "Agentic AI 权限与数据访问",
+            "勒索恢复与数据韧性",
+            "Identity / Zero Trust 预算",
+            "CNAPP 与云工作负载安全",
+            "SASE / Browser Isolation",
+            "Exposure Management",
+            "监管、合规与网络保险",
+        ],
+        "security_software_workflow_steps": [
+            {"title": "导入公司池", "detail": "确认 ticker、公司名、核心产品线和竞品关系。"},
+            {"title": "绑定官方源", "detail": "接入 IR、新闻稿、公司博客、安全博客、docs/release notes。"},
+            {"title": "补充间接源", "detail": "接入漏洞、威胁情报、云生态、AI 安全、监管合规消息。"},
+            {"title": "建立上下文图谱", "detail": "把消息归因到公司、产品、客户、主题、竞品和预算方向。"},
+            {"title": "输出日报与异动", "detail": "分成直接命中、间接影响、需要跟踪、噪音四档。"},
+        ],
+    }
 
 
 def build_signal_monitor_page_context(
@@ -11092,6 +11665,8 @@ def normalize_monitor_workspace_tab(raw_value: str | None, *, fallback: str = "i
     value = str(raw_value or "").strip().lower()
     if value in {"signals", "signal", "bigv", "big-v", "big_v", "v"}:
         return "signals"
+    if value in {"security", "security-software", "security_software", "cyber", "cybersecurity", "secsoft"}:
+        return "security"
     if value in {"info", "monitor", "stock", "stocks"}:
         return "info"
     return fallback
@@ -11225,12 +11800,37 @@ def static_asset_url(filename: str, *, version: str | None = None) -> str:
     return url_for("static", filename=filename)
 
 
+@app.get("/healthz")
+def healthz():
+    return jsonify({"ok": True, "service": "stock-research-web"})
+
+
+@app.get("/readyz")
+def readyz():
+    checks = {
+        "reports_dir": REPORTS_DIR.exists(),
+        "stock_store_parent": STOCK_STORE_PATH.parent.exists(),
+        "uploads_dir": STOCK_UPLOADS_DIR.exists(),
+        "transcript_uploads_dir": TRANSCRIPT_UPLOADS_DIR.exists(),
+    }
+    status_code = 200 if all(checks.values()) else 503
+    return jsonify({"ok": status_code == 200, "checks": checks}), status_code
+
+
 @app.before_request
 def enforce_web_access_password():
     if not WEB_ACCESS_PASSWORD_SIGNATURE:
         return None
 
-    allowed_endpoints = {"static", "favicon", "access_password_gate", "access_password_submit", "visitor_direct_entry"}
+    allowed_endpoints = {
+        "static",
+        "favicon",
+        "healthz",
+        "readyz",
+        "access_password_gate",
+        "access_password_submit",
+        "visitor_direct_entry",
+    }
     if request.endpoint in allowed_endpoints:
         return None
 
@@ -29056,6 +29656,7 @@ def monitor_page() -> str:
         monitor_active_tab=active_tab,
         **build_monitor_page_context(store, all_reports=reports),
         **build_signal_monitor_page_context(selected_name=selected_signal_report),
+        **build_security_software_monitor_context(),
         **build_navigation_context(active_page="monitor", reports=reports, stock_store=store),
     )
 
@@ -30723,6 +31324,150 @@ def signal_monitor_status():
     )
 
 
+@app.post("/security-software/demo")
+def generate_security_software_demo():
+    config = load_security_software_monitor_config()
+    state = load_security_software_monitor_state()
+    demo_analysis = build_security_software_demo_analysis(config)
+    state["last_demo_run"] = demo_analysis
+    state["demo_runs"] = [demo_analysis] + [
+        run for run in state.get("demo_runs", []) if str(run.get("run_id") or "") != demo_analysis["run_id"]
+    ]
+    save_security_software_monitor_state(state)
+    flash("安全软件 demo 联动链已生成。", "success")
+    return redirect_to_monitor_workspace(tab="security")
+
+
+@app.post("/security-software/x-config")
+def configure_security_software_x_monitor():
+    config = load_security_software_monitor_config()
+    x_monitor = dict(config.get("x_monitor") or {})
+    enabled = request.form.get("use_x") == "1"
+    try:
+        spend_limit_usdc = max(1, min(500, int(float(request.form.get("spend_limit_usdc") or x_monitor.get("spend_limit_usdc") or 25))))
+    except (TypeError, ValueError):
+        spend_limit_usdc = int(x_monitor.get("spend_limit_usdc") or 25)
+    settlement_network = str(request.form.get("settlement_network") or x_monitor.get("settlement_network") or "Base USDC").strip()[:80]
+    existing_status = str(x_monitor.get("authorization_status") or "").strip()
+    x_monitor.update(
+        {
+            "enabled": enabled,
+            "payment_method": "USDC",
+            "payment_provider": "Circle",
+            "settlement_network": settlement_network or "Base USDC",
+            "spend_limit_usdc": spend_limit_usdc,
+            "authorization_status": (
+                existing_status
+                if enabled and existing_status not in {"", "not_authorized"}
+                else ("needs_authorization" if enabled else "not_authorized")
+            ),
+            "updated_at": now_iso(),
+        }
+    )
+    config["x_monitor"] = x_monitor
+    save_security_software_monitor_config(config)
+    flash("推特/X 付费源设置已保存。开启后仍需完成 USDC 授权单。", "success")
+    return redirect_to_monitor_workspace(tab="security")
+
+
+@app.post("/security-software/x-authorize")
+def authorize_security_software_x_monitor():
+    config = load_security_software_monitor_config()
+    state = load_security_software_monitor_state()
+    x_monitor = dict(config.get("x_monitor") or {})
+    readiness = run_security_software_x_payment_readiness()
+    authorization_status = (
+        "wallet_ready_gateway_check_needed" if readiness.get("ok") else "wallet_not_ready"
+    )
+    ticket = f"secx-{uuid.uuid4().hex[:10]}"
+    x_monitor.update(
+        {
+            "enabled": True,
+            "payment_method": "USDC",
+            "payment_provider": "Circle",
+            "authorization_status": authorization_status,
+            "authorization_ticket": ticket,
+            "updated_at": now_iso(),
+        }
+    )
+    config["x_monitor"] = x_monitor
+    state["x_authorization"] = {
+        "status": authorization_status,
+        "ticket": ticket,
+        "created_at": now_iso(),
+        "payment_method": "USDC",
+        "payment_provider": "Circle",
+        "spend_limit_usdc": x_monitor.get("spend_limit_usdc") or 25,
+        "readiness": readiness,
+        "note": "Real AIsa/Circle x402 readiness checked locally; run x-probe to test settlement.",
+    }
+    save_security_software_monitor_config(config)
+    save_security_software_monitor_state(state)
+    if readiness.get("ok"):
+        flash("USDC 钱包配置已读取，下一步可执行 AIsa/Circle Gateway probe。", "success")
+    else:
+        flash(f"USDC 钱包暂未 ready：{readiness.get('status')}", "warning")
+    return redirect_to_monitor_workspace(tab="security")
+
+
+@app.post("/security-software/x-probe")
+def probe_security_software_x_monitor():
+    config = load_security_software_monitor_config()
+    state = load_security_software_monitor_state()
+    x_monitor = dict(config.get("x_monitor") or {})
+    query = str(request.form.get("query") or "$RBRK lang:en").strip()[:200] or "$RBRK lang:en"
+    query_type = str(request.form.get("query_type") or "Latest").strip()[:40] or "Latest"
+    chain = str(request.form.get("chain") or "BASE").strip()[:40] or "BASE"
+    probe = run_security_software_x_gateway_probe(query=query, query_type=query_type, chain=chain)
+    x_monitor.update(
+        {
+            "enabled": True,
+            "payment_method": "USDC",
+            "payment_provider": "Circle",
+            "authorization_status": (
+                "paid_ready" if probe.get("ok") else str(probe.get("status") or "probe_failed")[:80]
+            ),
+            "updated_at": now_iso(),
+        }
+    )
+    config["x_monitor"] = x_monitor
+    state["x_authorization"] = {
+        **(state.get("x_authorization") or {}),
+        "status": x_monitor["authorization_status"],
+        "updated_at": now_iso(),
+        "last_probe": probe,
+        "note": "AIsa/Circle Gateway paid probe executed; see output_path for raw result.",
+    }
+    save_security_software_monitor_config(config)
+    save_security_software_monitor_state(state)
+    if expects_json_response():
+        return jsonify({"ok": bool(probe.get("ok")), "probe": probe, "x_monitor": x_monitor})
+    if probe.get("ok"):
+        flash("AIsa/Circle Gateway paid X probe succeeded.", "success")
+    else:
+        flash(f"AIsa/Circle Gateway probe did not settle: {probe.get('status')}", "warning")
+    return redirect_to_monitor_workspace(tab="security")
+
+
+@app.get("/security-software/status")
+def security_software_monitor_status():
+    config = load_security_software_monitor_config()
+    state = load_security_software_monitor_state()
+    readiness = run_security_software_x_payment_readiness()
+    return jsonify(
+        {
+            "ok": True,
+            "company_count": len(config.get("companies", [])),
+            "layer_count": len(config.get("control_layers", [])),
+            "x_monitor": config.get("x_monitor", {}),
+            "x_payment_readiness": readiness,
+            "x_authorization": state.get("x_authorization", {}),
+            "last_demo_run": state.get("last_demo_run", {}),
+            "writer_skill": load_security_software_daily_writer_skill(),
+        }
+    )
+
+
 @app.post("/signals/reports/<path:filename>/delete")
 def delete_signal_report(filename: str):
     store = load_stock_store()
@@ -30799,189 +31544,6 @@ def sync_all_stock_earnings():
     if errors:
         flash("部分股票同步失败：" + "；".join(errors[:3]), "error")
     return redirect(next_url)
-
-
-@app.get("/schedule")
-def schedule_page() -> str:
-    store = load_stock_store()
-    current_view = normalize_schedule_view(request.args.get("view"))
-    if is_visitor_mode():
-        current_view = "board"
-    page_return_url = request.full_path if request.query_string else request.path
-    schedule_context = build_schedule_page_context(
-        store,
-        month_param=request.args.get("month"),
-        year_param=request.args.get("year"),
-        month_number_param=request.args.get("month_number"),
-        date_param=request.args.get("date"),
-        focus_item_id=request.args.get("focus", "").strip(),
-    )
-    selected_date = schedule_context.get("selected_schedule_date") or ""
-    focus_item_id = schedule_context.get("focus_schedule_item_id") or ""
-    board_params = {"view": "board", "month": schedule_context["month_key"]}
-    form_params = {"view": "form", "month": schedule_context["month_key"]}
-    if selected_date:
-        board_params["date"] = selected_date
-        form_params["date"] = selected_date
-    if focus_item_id:
-        board_params["focus"] = focus_item_id
-        form_params["focus"] = focus_item_id
-
-    return render_template(
-        "schedule.html",
-        stock_options=build_stock_selector_options(store),
-        today_date=today_date_iso(),
-        page_return_url=page_return_url,
-        current_schedule_view=current_view,
-        schedule_view_links={
-            "board": url_for("schedule_page", **board_params),
-            "form": url_for("schedule_page", **form_params),
-        },
-        **schedule_context,
-        **build_navigation_context(active_page="schedule", stock_store=store),
-    )
-
-
-@app.post("/schedule/items")
-def create_schedule_item():
-    store = load_stock_store()
-    next_url = safe_next_url(request.form.get("next_url"), url_for("schedule_page"))
-    normalized_item = normalize_schedule_item(
-        {
-            "title": request.form.get("title"),
-            "kind": request.form.get("kind"),
-            "status": "planned",
-            "priority": request.form.get("priority"),
-            "symbol": request.form.get("symbol"),
-            "company": request.form.get("company"),
-            "scheduled_date": request.form.get("scheduled_date"),
-            "has_time_range": request.form.get("has_time_range") == "on",
-            "start_time": request.form.get("start_time"),
-            "end_time": request.form.get("end_time"),
-            "all_day": request.form.get("all_day") == "on",
-            "location": request.form.get("location"),
-            "note": request.form.get("note"),
-            "tags": request.form.get("tags"),
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-        }
-    )
-
-    if normalized_item is None:
-        flash("请至少填写标题和日期，这样日程才能真正落下来。", "error")
-        return redirect(next_url)
-
-    store.setdefault("schedule_items", []).append(normalized_item)
-    save_stock_store(store)
-    flash(f'日程“{normalized_item["title"]}”已加入。', "success")
-    return redirect(
-        url_for(
-            "schedule_page",
-            view="board",
-            month=normalized_item["scheduled_date"][:7],
-            date=normalized_item["scheduled_date"],
-            focus=normalized_item["id"],
-        )
-    )
-
-
-@app.post("/schedule/items/<item_id>/update")
-def update_schedule_item(item_id: str):
-    store = load_stock_store()
-    item = get_schedule_item(store, item_id)
-    next_url = safe_next_url(
-        request.form.get("next_url"),
-        url_for(
-            "schedule_page",
-            month=str(item.get("scheduled_date") or "")[:7],
-            date=item.get("scheduled_date"),
-            focus=item_id,
-        ),
-    )
-    normalized_item = normalize_schedule_item(
-        {
-            "id": item["id"],
-            "created_at": item.get("created_at"),
-            "title": request.form.get("title"),
-            "kind": request.form.get("kind"),
-            "status": request.form.get("status") or item.get("status"),
-            "priority": request.form.get("priority"),
-            "symbol": request.form.get("symbol"),
-            "company": request.form.get("company"),
-            "scheduled_date": request.form.get("scheduled_date"),
-            "has_time_range": request.form.get("has_time_range") == "on",
-            "start_time": request.form.get("start_time"),
-            "end_time": request.form.get("end_time"),
-            "all_day": request.form.get("all_day") == "on",
-            "location": request.form.get("location"),
-            "note": request.form.get("note"),
-            "tags": request.form.get("tags"),
-            "updated_at": now_iso(),
-        }
-    )
-
-    if normalized_item is None:
-        flash("请至少保留标题和日期，避免这条日程变成空壳。", "error")
-        return redirect(next_url)
-
-    item.update(normalized_item)
-    save_stock_store(store)
-    flash(f'日程“{item["title"]}”已更新。', "success")
-    return redirect(
-        url_for(
-            "schedule_page",
-            view="board",
-            month=item["scheduled_date"][:7],
-            date=item["scheduled_date"],
-            focus=item["id"],
-        )
-    )
-
-
-@app.post("/schedule/items/<item_id>/status")
-def update_schedule_item_status(item_id: str):
-    store = load_stock_store()
-    item = get_schedule_item(store, item_id)
-    next_url = safe_next_url(
-        request.form.get("next_url"),
-        url_for(
-            "schedule_page",
-            month=str(item.get("scheduled_date") or "")[:7],
-            date=item.get("scheduled_date"),
-            focus=item_id,
-        ),
-    )
-    status = str(request.form.get("status") or "").strip()
-    if status not in SCHEDULE_STATUS_META:
-        flash("这次状态更新没有识别出来，请再试一次。", "error")
-        return redirect(next_url)
-
-    item["status"] = status
-    item["updated_at"] = now_iso()
-    save_stock_store(store)
-    flash(f'日程“{item["title"]}”状态已更新为 {SCHEDULE_STATUS_META[status]["label"]}。', "success")
-    return redirect(next_url)
-
-
-@app.post("/schedule/items/<item_id>/delete")
-def delete_schedule_item(item_id: str):
-    store = load_stock_store()
-    item = get_schedule_item(store, item_id)
-    append_to_trash(
-        store,
-        create_trash_entry(
-            "schedule_item",
-            item,
-            symbol=str(item.get("symbol") or ""),
-            title=str(item.get("title") or "日程"),
-        ),
-    )
-    store["schedule_items"] = [
-        schedule_item for schedule_item in store.get("schedule_items", []) if schedule_item["id"] != item_id
-    ]
-    save_stock_store(store)
-    flash(f'日程“{item["title"]}”已移入回收站。', "success")
-    return redirect(safe_next_url(request.form.get("next_url"), url_for("schedule_page")))
 
 
 @app.get("/experts")
@@ -31211,524 +31773,6 @@ def global_search() -> str:
         **search_context,
         **build_navigation_context(active_page="search", reports=reports, stock_store=store),
     )
-
-
-@app.get("/trash")
-def trash_page() -> str:
-    store = load_stock_store()
-    query = request.args.get("q", "").strip()
-    item_type = request.args.get("item_type", "").strip()
-    symbol_filter = normalize_stock_symbol(request.args.get("symbol", "")) or ""
-    tag_filter = normalize_tag_value(request.args.get("tag")) or ""
-    terms = split_search_terms(query)
-
-    trash_items = build_trash_cards(store)
-    trash_stats = build_trash_stats(trash_items)
-    filtered_items: list[dict[str, Any]] = []
-    for item in trash_items:
-        if item_type and item["item_type"] != item_type:
-            continue
-        if symbol_filter and item.get("display_symbol") != symbol_filter:
-            continue
-        if tag_filter and not tag_match(item.get("tags", []), tag_filter):
-            continue
-        haystack = " ".join(
-            [
-                item.get("display_title", ""),
-                item.get("display_symbol", ""),
-                item.get("kind_label", ""),
-                " ".join(item.get("tags", [])),
-            ]
-        )
-        if terms and not text_contains_all_terms(haystack, terms):
-            continue
-        filtered_items.append(item)
-
-    tag_counts = collect_tag_counts(store.get("trash", []))
-
-    return render_template(
-        "trash.html",
-        trash_items=filtered_items,
-        trash_stats={**trash_stats, "filtered_count": len(filtered_items)},
-        trash_filters={
-            "query": query,
-            "item_type": item_type,
-            "symbol": symbol_filter,
-            "tag": tag_filter,
-        },
-        trash_kind_options=[{"value": "", "label": "全部"}]
-        + [
-            {"value": key, "label": meta["label"]}
-            for key, meta in TRASH_KIND_META.items()
-        ],
-        stock_options=build_stock_selector_options(store),
-        popular_tags=tag_counts[:14],
-        **build_navigation_context(active_page="trash", stock_store=store),
-    )
-
-
-@app.post("/trash/<trash_id>/restore")
-def restore_trash_item(trash_id: str):
-    store = load_stock_store()
-    trash_entry = get_trash_entry(store, trash_id)
-    payload = deepcopy(trash_entry["payload"])
-    item_type = trash_entry["item_type"]
-    symbol = str(trash_entry.get("symbol") or "")
-    next_url = safe_next_url(request.form.get("next_url"), url_for("trash_page"))
-
-    if item_type == "note":
-        if not symbol:
-            abort(400)
-        entry = ensure_stock_entry(store, symbol)
-        payload["id"] = ensure_unique_id(payload.get("id", ""), {item["id"] for item in entry["notes"]})
-        entry["notes"].append(payload)
-        touch_stock(store, symbol)
-    elif item_type == "file":
-        storage_symbol = stock_file_storage_symbol(payload, symbol) or symbol
-        if not storage_symbol:
-            abort(400)
-        entry = ensure_stock_entry(store, storage_symbol)
-        payload["id"] = ensure_unique_id(payload.get("id", ""), {item["id"] for item in entry["files"]})
-        entry["files"].append(payload)
-        touch_stock_symbols(store, stock_file_linked_symbols(payload, storage_symbol))
-    elif item_type == "transcript":
-        payload["id"] = ensure_unique_id(payload.get("id", ""), {item["id"] for item in store.get("transcripts", [])})
-        store.setdefault("transcripts", []).append(payload)
-        touch_transcript_stocks(store, payload)
-    elif item_type == "group":
-        payload["id"] = ensure_unique_id(payload.get("id", ""), {group["id"] for group in store["groups"]}, length=8)
-        store["groups"].append(payload)
-    elif item_type == "schedule_item":
-        payload["id"] = ensure_unique_id(
-            payload.get("id", ""),
-            {item["id"] for item in store.get("schedule_items", [])},
-        )
-        store.setdefault("schedule_items", []).append(payload)
-    elif item_type == "monitor_report":
-        trash_path = Path(str(payload.get("trash_path") or ""))
-        if not trash_path.exists():
-            abort(400)
-        restore_name = Path(str(payload.get("filename") or "")).name
-        if not restore_name:
-            abort(400)
-        target_path = REPORTS_DIR / restore_name
-        if target_path.exists():
-            target_path = REPORTS_DIR / f"{target_path.stem}-restored-{uuid.uuid4().hex[:6]}{target_path.suffix}"
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        trash_path.replace(target_path)
-    elif item_type == "signal_report":
-        trash_path = Path(str(payload.get("trash_path") or ""))
-        if not trash_path.exists():
-            abort(400)
-        restore_name = Path(str(payload.get("filename") or "")).name
-        if not restore_name:
-            abort(400)
-        target_path = SIGNAL_MONITOR_REPORTS_DIR / restore_name
-        if target_path.exists():
-            target_path = SIGNAL_MONITOR_REPORTS_DIR / f"{target_path.stem}-restored-{uuid.uuid4().hex[:6]}{target_path.suffix}"
-        SIGNAL_MONITOR_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        trash_path.replace(target_path)
-    else:
-        abort(400)
-
-    store["trash"] = [item for item in store.get("trash", []) if item["id"] != trash_id]
-    save_stock_store(store)
-    message = f"{TRASH_KIND_META[item_type]['label']}已从回收站恢复。"
-    if expects_json_response():
-        return jsonify(
-            {
-                "ok": True,
-                "restored_id": trash_id,
-                "message": message,
-                "stats": build_trash_stats(store.get("trash", [])),
-            }
-        )
-    flash(message, "success")
-    return redirect(next_url)
-
-
-@app.post("/trash/<trash_id>/delete")
-def permanently_delete_trash_item(trash_id: str):
-    store = load_stock_store()
-    trash_entry = get_trash_entry(store, trash_id)
-    next_url = safe_next_url(request.form.get("next_url"), url_for("trash_page"))
-
-    try:
-        permanently_delete_trash_entry(trash_entry)
-    except Exception as exc:
-        flash(f"永久删除时有一部分资源清理失败：{exc}", "error")
-
-    store["trash"] = [item for item in store.get("trash", []) if item["id"] != trash_id]
-    save_stock_store(store)
-    message = "该条目已从回收站永久删除。"
-    if expects_json_response():
-        return jsonify(
-            {
-                "ok": True,
-                "deleted_id": trash_id,
-                "message": message,
-                "stats": build_trash_stats(store.get("trash", [])),
-            }
-        )
-    flash(message, "success")
-    return redirect(next_url)
-
-
-def build_global_search_context(
-    store: dict[str, Any],
-    reports: list[dict[str, Any]],
-    *,
-    query: str,
-    kind_filter: str,
-    symbol_filter: str,
-    tag_filter: str,
-) -> dict[str, Any]:
-    terms = split_search_terms(query)
-    folded_terms = fold_search_terms(terms)
-    normalized_symbol = normalize_stock_symbol(symbol_filter or "") or ""
-    normalized_tag = normalize_tag_value(tag_filter) or ""
-    selected_kind = kind_filter if kind_filter in SEARCH_KIND_META else ""
-    results: list[dict[str, Any]] = []
-
-    for symbol in sorted(list_stock_symbols(store)):
-        entry = ensure_stock_entry(store, symbol)
-        for note in entry["notes"]:
-            if selected_kind and selected_kind != "note":
-                continue
-            tags = normalize_tag_list(note.get("tags", []))
-            search_text = " ".join(
-                [
-                    symbol,
-                    note.get("title") or "",
-                    note.get("content_text") or "",
-                    " ".join(tags),
-                ]
-            )
-            if normalized_symbol and symbol != normalized_symbol:
-                continue
-            if normalized_tag and not tag_match(tags, normalized_tag):
-                continue
-            if terms and not text_contains_all_terms(
-                search_text,
-                terms,
-                text_casefolded=search_text.casefold(),
-                folded_terms=folded_terms,
-            ):
-                continue
-
-            results.append(
-                {
-                    "kind": "note",
-                    "kind_label": SEARCH_KIND_META["note"]["label"],
-                    "kind_tone": SEARCH_KIND_META["note"]["tone"],
-                    "title": note.get("title") or "未命名笔记",
-                    "summary": build_match_excerpt(
-                        note.get("content_text") or "",
-                        terms,
-                        summarize_text_block(note.get("content_text") or ""),
-                    ),
-                    "symbol": symbol,
-                    "display_time": note_display_time(note),
-                    "sort_value": coerce_sort_timestamp(note.get("created_at")),
-                    "tags": tags,
-                    "url": build_stock_detail_deep_link(
-                        symbol=symbol,
-                        panel="notes",
-                        item_kind="note",
-                        item_id=str(note.get("id") or ""),
-                        anchor=f"note-{note.get('id')}",
-                    ),
-                }
-            )
-
-        for call in build_stock_earnings_call_cards(entry):
-            if selected_kind and selected_kind != "earnings_call":
-                continue
-            if normalized_symbol and symbol != normalized_symbol:
-                continue
-            if normalized_tag:
-                continue
-
-            search_text = " ".join(
-                [
-                    symbol,
-                    str(call.get("display_title") or ""),
-                    str(call.get("original_title") or ""),
-                    str(call.get("transcript_text") or ""),
-                    str(call.get("source_query_label") or ""),
-                ]
-            )
-            if terms and not text_contains_all_terms(
-                search_text,
-                terms,
-                text_casefolded=search_text.casefold(),
-                folded_terms=folded_terms,
-            ):
-                continue
-
-            results.append(
-                {
-                    "kind": "earnings_call",
-                    "kind_label": SEARCH_KIND_META["earnings_call"]["label"],
-                    "kind_tone": SEARCH_KIND_META["earnings_call"]["tone"],
-                    "title": call["display_title"],
-                    "summary": build_match_excerpt(
-                        call.get("transcript_text") or "",
-                        terms,
-                        call["summary_excerpt"],
-                    ),
-                    "symbol": symbol,
-                    "display_time": call.get("display_call_date") or call.get("display_published_at"),
-                    "sort_value": coerce_sort_timestamp(call.get("call_date") or call.get("published_at")),
-                    "tags": [],
-                    "url": build_stock_detail_deep_link(
-                        symbol=symbol,
-                        panel="earnings-calls",
-                        item_kind="earnings_call",
-                        item_id=str(call.get("id") or ""),
-                        anchor=f"earnings-call-{call.get('id')}",
-                    ),
-                    "secondary_url": call.get("source_url") or "",
-                    "secondary_label": "打开来源",
-                }
-            )
-
-    for record in iter_stock_file_records(store, symbol_filter=normalized_symbol or None):
-        if selected_kind and selected_kind != "file":
-            continue
-
-        file_entry = record["file_entry"]
-        access_symbol = normalized_symbol or record["storage_symbol"]
-        tags = normalize_tag_list(file_entry.get("tags", []))
-        search_text = " ".join(
-            [
-                " ".join(record["linked_symbols"]),
-                file_entry.get("original_name") or "",
-                file_entry.get("description") or "",
-                file_entry.get("linked_note_title") or "",
-                " ".join(tags),
-            ]
-        )
-        if normalized_tag and not tag_match(tags, normalized_tag):
-            continue
-        if terms and not text_contains_all_terms(
-            search_text,
-            terms,
-            text_casefolded=search_text.casefold(),
-            folded_terms=folded_terms,
-        ):
-            continue
-
-        results.append(
-            {
-                "kind": "file",
-                "kind_label": SEARCH_KIND_META["file"]["label"],
-                "kind_tone": SEARCH_KIND_META["file"]["tone"],
-                "title": file_entry.get("original_name") or "未命名文件",
-                "summary": build_match_excerpt(
-                    " ".join(
-                        [
-                            file_entry.get("description") or "",
-                            file_entry.get("linked_note_title") or "",
-                        ]
-                    ),
-                    terms,
-                    summarize_text_block(file_entry.get("description") or file_entry.get("original_name") or ""),
-                ),
-                "symbol": access_symbol,
-                "display_time": file_display_time(file_entry),
-                "sort_value": coerce_sort_timestamp(file_entry.get("uploaded_at")),
-                "tags": tags,
-                "url": build_stock_detail_deep_link(
-                    symbol=access_symbol,
-                    panel="files",
-                    item_kind="file",
-                    item_id=str(file_entry.get("id") or ""),
-                    anchor=f"file-{file_entry.get('id')}",
-                ),
-                "secondary_url": url_for("download_stock_file", symbol=access_symbol, file_id=file_entry["id"]),
-                "secondary_label": "下载文件",
-            }
-        )
-
-    for transcript in build_transcript_cards(store):
-        if selected_kind and selected_kind != "transcript":
-            continue
-        symbols = transcript.get("linked_symbols", [])
-        symbol = (
-            normalized_symbol
-            if normalized_symbol and normalized_symbol in symbols
-            else (symbols[0] if len(symbols) == 1 else "")
-        )
-        tags = normalize_tag_list(transcript.get("tags", []))
-        search_text = " ".join(
-            [
-                transcript.get("linked_symbols_label") or "",
-                transcript.get("display_title") or "",
-                transcript.get("transcript_text") or "",
-                transcript.get("original_name") or "",
-                " ".join(tags),
-            ]
-        )
-        if normalized_symbol and normalized_symbol not in symbols:
-            continue
-        if normalized_tag and not tag_match(tags, normalized_tag):
-            continue
-        if terms and not text_contains_all_terms(
-            search_text,
-            terms,
-            text_casefolded=search_text.casefold(),
-            folded_terms=folded_terms,
-        ):
-            continue
-
-        results.append(
-            {
-                "kind": "transcript",
-                "kind_label": SEARCH_KIND_META["transcript"]["label"],
-                "kind_tone": SEARCH_KIND_META["transcript"]["tone"],
-                "title": transcript["display_title"],
-                "summary": build_match_excerpt(
-                    transcript.get("transcript_text") or "",
-                    terms,
-                    transcript["summary_excerpt"],
-                ),
-                "symbol": symbol,
-                "symbols": symbols,
-                "display_time": transcript.get("meeting_date_label") or transcript.get("display_created_at"),
-                "sort_value": coerce_sort_timestamp(transcript.get("meeting_date") or transcript.get("created_at")),
-                "tags": tags,
-                "url": (
-                    build_stock_detail_deep_link(
-                        symbol=symbol,
-                        panel="transcripts",
-                        item_kind="transcript",
-                        item_id=str(transcript.get("id") or ""),
-                        anchor=f"transcript-{transcript.get('id')}",
-                    )
-                    if symbol
-                    else url_for("transcripts_page")
-                ),
-            }
-        )
-
-    for schedule_item in store.get("schedule_items", []):
-        if selected_kind and selected_kind != "schedule":
-            continue
-        tags = normalize_tag_list(schedule_item.get("tags", []))
-        symbol = str(schedule_item.get("symbol") or "")
-        search_text = " ".join(
-            [
-                symbol,
-                str(schedule_item.get("company") or ""),
-                str(schedule_item.get("title") or ""),
-                str(schedule_item.get("note") or ""),
-                str(schedule_item.get("location") or ""),
-                " ".join(tags),
-            ]
-        )
-        if normalized_symbol and symbol != normalized_symbol:
-            continue
-        if normalized_tag and not tag_match(tags, normalized_tag):
-            continue
-        if terms and not text_contains_all_terms(
-            search_text,
-            terms,
-            text_casefolded=search_text.casefold(),
-            folded_terms=folded_terms,
-        ):
-            continue
-
-        schedule_date = str(schedule_item.get("scheduled_date") or "")
-        results.append(
-            {
-                "kind": "schedule",
-                "kind_label": SEARCH_KIND_META["schedule"]["label"],
-                "kind_tone": SEARCH_KIND_META["schedule"]["tone"],
-                "title": str(schedule_item.get("title") or "未命名日程"),
-                "summary": build_match_excerpt(
-                    " ".join(
-                        [
-                            str(schedule_item.get("note") or ""),
-                            str(schedule_item.get("location") or ""),
-                            str(schedule_item.get("company") or ""),
-                        ]
-                    ),
-                    terms,
-                    summarize_text_block(
-                        str(schedule_item.get("note") or "")
-                        or str(schedule_item.get("location") or "")
-                        or build_schedule_time_label(schedule_item)
-                    ),
-                ),
-                "symbol": symbol,
-                "display_time": f"{schedule_date} 路 {build_schedule_time_label(schedule_item)}",
-                "sort_value": schedule_item_sort_datetime(schedule_item).timestamp(),
-                "tags": tags,
-                "url": (
-                    url_for("schedule_page", month=schedule_date[:7], date=schedule_date, focus=schedule_item["id"])
-                    + f"#schedule-item-{schedule_item['id']}"
-                ),
-            }
-        )
-
-    report_symbol_pattern = (
-        re.compile(rf"(?<![A-Z0-9]){re.escape(normalized_symbol)}(?![A-Z0-9])", re.IGNORECASE)
-        if normalized_symbol
-        else None
-    )
-    for report in reports:
-        if selected_kind and selected_kind != "report":
-            continue
-        content = str(report.get("content") or "") or read_report_text(REPORTS_DIR / report["filename"])
-        combined_text = " ".join([report["title"], report["summary"], report["filename"], content])
-        if normalized_symbol and report_symbol_pattern and not report_symbol_pattern.search(combined_text):
-            continue
-        if terms and not text_contains_all_terms(
-            combined_text,
-            terms,
-            text_casefolded=combined_text.casefold(),
-            folded_terms=folded_terms,
-        ):
-            continue
-        if normalized_tag:
-            continue
-
-        results.append(
-            {
-                "kind": "report",
-                "kind_label": SEARCH_KIND_META["report"]["label"],
-                "kind_tone": SEARCH_KIND_META["report"]["tone"],
-                "title": report["title"],
-                "summary": build_match_excerpt(content, terms, report["summary"]),
-                "symbol": normalized_symbol if normalized_symbol else "",
-                "display_time": report["report_date"],
-                "sort_value": float(report["sort_key"]),
-                "tags": [],
-                "url": url_for("index", report=report["filename"]),
-            }
-        )
-
-    results.sort(key=lambda item: (float(item["sort_value"]), item["title"]), reverse=True)
-    counts = Counter(item["kind"] for item in results)
-
-    return {
-        "query": query.strip(),
-        "selected_kind": selected_kind,
-        "selected_symbol": normalized_symbol,
-        "selected_tag": normalized_tag,
-        "results": results,
-        "result_count": len(results),
-        "result_counts": counts,
-        "kind_options": [{"value": "", "label": "全部"}]
-        + [
-            {"value": key, "label": meta["label"]}
-            for key, meta in SEARCH_KIND_META.items()
-            if key != "group"
-        ],
-        "stock_options": build_stock_selector_options(store),
-        "popular_tags": build_stock_tag_summary(store)[:14],
-    }
 
 
 @app.get("/transcripts")
@@ -32615,42 +32659,6 @@ def persist_stock_file_reader_state(symbol: str, file_id: str):
         )
 
 
-@app.post("/schedule/items/<item_id>/reader-state")
-def persist_schedule_reader_state(item_id: str):
-    payload = request.get_json(silent=True) or {}
-
-    with STOCK_STORE_LOCK:
-        store = load_stock_store()
-        item = get_schedule_item(store, item_id)
-        reader_text = str(item.get("note") or "").strip() or str(item.get("title") or "").strip()
-        reader_html = plain_text_to_html(reader_text)
-        try:
-            apply_reader_state_action(
-                item,
-                payload,
-                content_text=reader_text,
-                content_html=reader_html,
-            )
-        except ValueError as exc:
-            return jsonify({"ok": False, "message": str(exc)}), 400
-
-        save_stock_store(store)
-
-        return jsonify(
-            {
-                "ok": True,
-                "state": build_reader_state_payload(
-                    item,
-                    save_url=url_for("persist_schedule_reader_state", item_id=item_id),
-                    kind="schedule",
-                    item_id=item_id,
-                    content_text=reader_text,
-                    content_html=reader_html,
-                ),
-            }
-        )
-
-
 @app.post("/stocks/<symbol>/earnings/sync")
 def sync_stock_earnings(symbol: str):
     symbol = require_stock_symbol(symbol)
@@ -33297,15 +33305,66 @@ def raw_report(filename: str):
 def favicon():
     return send_from_directory(app.static_folder, "mindmap-studio-favicon.svg", mimetype="image/svg+xml")
 
+register_schedule_routes(
+    app,
+    SimpleNamespace(
+        load_stock_store=load_stock_store,
+        normalize_schedule_view=normalize_schedule_view,
+        is_visitor_mode=is_visitor_mode,
+        build_schedule_page_context=build_schedule_page_context,
+        build_stock_selector_options=build_stock_selector_options,
+        today_date_iso=today_date_iso,
+        build_navigation_context=build_navigation_context,
+        safe_next_url=safe_next_url,
+        normalize_schedule_item=normalize_schedule_item,
+        now_iso=now_iso,
+        save_stock_store=save_stock_store,
+        get_schedule_item=get_schedule_item,
+        SCHEDULE_STATUS_META=SCHEDULE_STATUS_META,
+        append_to_trash=append_to_trash,
+        create_trash_entry=create_trash_entry,
+        STOCK_STORE_LOCK=STOCK_STORE_LOCK,
+        plain_text_to_html=plain_text_to_html,
+        apply_reader_state_action=apply_reader_state_action,
+        build_reader_state_payload=build_reader_state_payload,
+    ),
+)
+
+register_trash_routes(
+    app,
+    SimpleNamespace(
+        load_stock_store=load_stock_store,
+        normalize_stock_symbol=normalize_stock_symbol,
+        normalize_tag_value=normalize_tag_value,
+        split_search_terms=split_search_terms,
+        build_trash_cards=build_trash_cards,
+        build_trash_stats=build_trash_stats,
+        tag_match=tag_match,
+        text_contains_all_terms=text_contains_all_terms,
+        collect_tag_counts=collect_tag_counts,
+        TRASH_KIND_META=TRASH_KIND_META,
+        build_stock_selector_options=build_stock_selector_options,
+        build_navigation_context=build_navigation_context,
+        get_trash_entry=get_trash_entry,
+        ensure_stock_entry=ensure_stock_entry,
+        ensure_unique_id=ensure_unique_id,
+        touch_stock=touch_stock,
+        stock_file_storage_symbol=stock_file_storage_symbol,
+        stock_file_linked_symbols=stock_file_linked_symbols,
+        touch_stock_symbols=touch_stock_symbols,
+        touch_transcript_stocks=touch_transcript_stocks,
+        REPORTS_DIR=REPORTS_DIR,
+        SIGNAL_MONITOR_REPORTS_DIR=SIGNAL_MONITOR_REPORTS_DIR,
+        save_stock_store=save_stock_store,
+        expects_json_response=expects_json_response,
+        permanently_delete_trash_entry=permanently_delete_trash_entry,
+        safe_next_url=safe_next_url,
+    ),
+)
+
 
 if __name__ == "__main__":
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STOCK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    maybe_start_stablecoin_monitor_scheduler()
-    maybe_start_cdn_monitor_scheduler()
-    maybe_start_gpu_price_monitor_scheduler()
+    initialize_runtime()
     host = os.getenv("HOST", "0.0.0.0")
     port = current_port()
     app.run(host=host, port=port, debug=False)

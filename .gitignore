@@ -11,6 +11,7 @@ reports/
 backups/
 logs/
 output/
+tmp/
 playwright-report/
 .pytest_cache/
 .mypy_cache/

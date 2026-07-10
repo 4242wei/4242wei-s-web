@@ -3,7 +3,13 @@
 
   function normalizeTab(value) {
     const raw = String(value || "").trim().toLowerCase();
-    return raw === "signals" ? "signals" : "info";
+    if (["signals", "signal", "bigv", "big-v", "big_v", "v"].includes(raw)) {
+      return "signals";
+    }
+    if (["security", "security-software", "security_software", "cyber", "cybersecurity", "secsoft"].includes(raw)) {
+      return "security";
+    }
+    return "info";
   }
 
   function buildNextUrl(tab) {
@@ -27,7 +33,7 @@
     }
 
     let activeTab = normalizeTab(root.getAttribute("data-active-tab") || "info");
-    let hideTimer = 0;
+    const hideTimers = new WeakMap();
 
     function syncTriggers() {
       triggers.forEach(function (trigger) {
@@ -60,6 +66,11 @@
       }
 
       if (isActive) {
+        const pendingTimer = hideTimers.get(panel);
+        if (pendingTimer) {
+          window.clearTimeout(pendingTimer);
+          hideTimers.delete(panel);
+        }
         panel.hidden = false;
         panel.classList.remove("is-hiding");
         window.requestAnimationFrame(function () {
@@ -70,16 +81,18 @@
 
       panel.classList.remove("is-active");
       panel.classList.add("is-hiding");
-      if (hideTimer) {
-        window.clearTimeout(hideTimer);
+      const pendingTimer = hideTimers.get(panel);
+      if (pendingTimer) {
+        window.clearTimeout(pendingTimer);
       }
-      hideTimer = window.setTimeout(function () {
+      const nextTimer = window.setTimeout(function () {
         if (!panel.classList.contains("is-active")) {
           panel.hidden = true;
           panel.classList.remove("is-hiding");
         }
-        hideTimer = 0;
+        hideTimers.delete(panel);
       }, TRANSITION_MS);
+      hideTimers.set(panel, nextTimer);
     }
 
     function syncPanels() {

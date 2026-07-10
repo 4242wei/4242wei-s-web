@@ -9,7 +9,7 @@
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
   <script src="{{ url_for('static', filename='report-sources.js', v='20260316-source-toggle') }}" defer></script>
 <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260411-reader-dom-stable1') }}" defer></script>
-  <script src="{{ url_for('static', filename='monitor-tabs.js', v='20260331-monitor-tabs1') }}" defer></script>
+  <script src="{{ url_for('static', filename='monitor-tabs.js', v='20260624-monitor-tabs-rootfix1') }}" defer></script>
   <script src="{{ url_for('static', filename='monitor-page.js', v='20260331-monitorreports2') }}" defer></script>
   <script src="{{ url_for('static', filename='signal-monitor-page.js', v='20260331-signalpanel1') }}" defer></script>
 </head>
@@ -51,6 +51,17 @@
           >
             大V监控
           </button>
+          <button
+            class="monitor-tab-button{% if monitor_active_tab == 'security' %} is-active{% endif %}"
+            type="button"
+            role="tab"
+            aria-selected="{{ 'true' if monitor_active_tab == 'security' else 'false' }}"
+            aria-controls="monitor-tab-panel-security"
+            id="monitor-tab-trigger-security"
+            data-monitor-tab-trigger="security"
+          >
+            安全软件监测
+          </button>
         </div>
       </div>
 
@@ -71,6 +82,14 @@
           <span class="mini-label">今日大V</span>
           <strong>{{ signal_today_reports|length }} 份</strong>
         </article>
+        <article class="mini-fact">
+          <span class="mini-label">安全公司</span>
+          <strong>{{ security_software_companies|length }} 个</strong>
+        </article>
+        <article class="mini-fact">
+          <span class="mini-label">监测面</span>
+          <strong>{{ security_software_monitor_tracks|length }} 类</strong>
+        </article>
       </aside>
     </section>
 
@@ -81,6 +100,10 @@
 
       <section class="monitor-tab-panel monitor-tab-panel-signals{% if monitor_active_tab == 'signals' %} is-active{% endif %}" id="monitor-tab-panel-signals" role="tabpanel" aria-labelledby="monitor-tab-trigger-signals" data-monitor-tab-panel="signals" {% if monitor_active_tab != 'signals' %}hidden{% endif %}>
         {% include "monitor_signals_panel.html" %}
+      </section>
+
+      <section class="monitor-tab-panel monitor-tab-panel-security{% if monitor_active_tab == 'security' %} is-active{% endif %}" id="monitor-tab-panel-security" role="tabpanel" aria-labelledby="monitor-tab-trigger-security" data-monitor-tab-panel="security" {% if monitor_active_tab != 'security' %}hidden{% endif %}>
+        {% include "monitor_security_panel.html" %}
       </section>
     </div>
   </div>

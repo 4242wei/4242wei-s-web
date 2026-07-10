@@ -83,3 +83,13 @@ http://192.168.1.8:5000
 ```
 
 Keep this program window open while the site is being used.
+
+## Cloudflare Tunnel
+
+For Cloudflare Tunnel, use the Waitress-backed origin instead of the Flask development server:
+
+```powershell
+.\start_tunnel.bat
+```
+
+Then point cloudflared to `http://127.0.0.1:5000`. See `docs/CLOUDFLARE_TUNNEL.md` for health checks and tunnel-specific settings.

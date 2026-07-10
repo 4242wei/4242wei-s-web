@@ -18,9 +18,7 @@
       <div class="stock-hero-copy">
         <p class="eyebrow">语音转录</p>
         <h2>转录中心</h2>
-        <p class="story-dek">
-          已完成内容优先展示，任务队列和系统参数放到后面。新建转录收进页内弹窗，阅读路径会更专注。
-        </p>
+        <p class="story-dek">会议录音、访谈和阅读材料转文字。</p>
         <div class="story-actions">
           {% if not is_visitor_mode %}
             <button class="button button-primary" type="button" data-compose-open>新建转录</button>
@@ -97,16 +95,16 @@
           <div>
             <p class="eyebrow">已完成内容</p>
             <h3>优先阅读的会议转录</h3>
-            <p class="section-caption">转录完成后会先进入这里。每条内容都能折叠展开，方便在当前页快速浏览，再决定要不要打开大阅读窗。</p>
+            <p class="section-caption">完成后进入阅读区。</p>
           </div>
           <span class="summary-count" data-transcript-completed-count>{{ completed_transcripts|length }}</span>
         </div>
 
         {% if completed_transcripts %}
-          <div class="transcript-featured-list" data-transcript-completed-list>
+          <div class="scroll-expander-list transcript-featured-list" data-transcript-completed-list>
             {% for transcript in completed_transcripts %}
               <details
-                class="expander transcript-content-expander"
+                class="expander scroll-expander-card transcript-content-expander"
                 data-transcript-card
                 data-transcript-id="{{ transcript.id }}"
                 data-transcript-group="completed"
@@ -114,7 +112,7 @@
                 data-transcript-status="{{ transcript.status }}"
                 data-transcript-linked="{{ 'true' if transcript.linked_symbols else 'false' }}"
               >
-                <summary class="expander-summary transcript-content-summary">
+                <summary class="expander-summary scroll-expander-summary transcript-content-summary">
                   <div>
                     <div class="card-inline-meta transcript-card-meta-row">
                       <span class="status-pill is-{{ transcript.status_tone }}">{{ transcript.status_label }}</span>
@@ -166,7 +164,7 @@
                   </div>
                 </div>
 
-                <div class="expander-body transcript-content-body">
+                <div class="expander-body scroll-expander-body transcript-content-body">
                   {% if transcript.tags %}
                     <div class="chip-row item-tag-row">
                       {% for tag in transcript.tags %}
@@ -273,13 +271,13 @@
             {% endfor %}
           </div>
           <div class="empty-card transcript-empty-primary" data-transcript-completed-empty hidden>
-            <p class="empty-title">这里以后会优先展示已完成的转录内容。</p>
-            <p>当前已经没有可读的转录。你可以先新建一条任务，等它完成后，这里会继续显示整理后的正文。</p>
+            <p class="empty-title">暂无可读转录。</p>
+            <p>新建任务后会显示正文。</p>
           </div>
         {% else %}
           <div class="empty-card transcript-empty-primary" data-transcript-completed-empty>
-            <p class="empty-title">这里以后会优先展示已完成的转录内容。</p>
-            <p>现在还没有可阅读的转录。你可以先新建一条任务，等它完成后，这里就会变成主阅读区。</p>
+            <p class="empty-title">暂无可读转录。</p>
+            <p>新建任务后会显示正文。</p>
             <div class="story-actions">
               <button class="button button-primary" type="button" data-compose-open>新建转录</button>
             </div>
@@ -293,7 +291,7 @@
           <div>
             <p class="eyebrow">任务队列</p>
             <h3>待提交、进行中与异常任务</h3>
-            <p class="section-caption">这里集中处理状态刷新、重新提交和排查问题。已完成内容会自动上移到上面的阅读区。</p>
+            <p class="section-caption">提交、刷新、排查。</p>
           </div>
           <div class="expander-meta">
             <span class="summary-count" data-transcript-queue-count>{{ queue_transcripts|length }}</span>
@@ -457,11 +455,11 @@
             {% endfor %}
           </div>
           <div class="empty-inline" data-transcript-queue-empty hidden>
-            <p>当前没有待处理任务。新的上传任务会先出现在这里，完成后再自动上移到上面的阅读区。</p>
+            <p>暂无待处理任务。</p>
           </div>
         {% else %}
           <div class="empty-inline" data-transcript-queue-empty>
-            <p>当前没有待处理任务。新的上传任务会先出现在这里，完成后再自动上移到上面的阅读区。</p>
+            <p>暂无待处理任务。</p>
           </div>
         {% endif %}
       </section>
@@ -473,8 +471,8 @@
           <summary class="expander-summary">
             <div>
               <p class="eyebrow">底层信息</p>
-              <h3>系统接入状与参数说明</h3>
-              <p class="section-caption">这部分平时不用频繁看，所以默认收起；只在排查或调参数时再展开即可。</p>
+              <h3>接入与参数</h3>
+              <p class="section-caption">排查时展开。</p>
             </div>
             <div class="expander-meta">
               <span class="summary-count">高级</span>

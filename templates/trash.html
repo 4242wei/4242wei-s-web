@@ -17,7 +17,7 @@
       <div class="stock-hero-copy">
         <p class="eyebrow">回收站</p>
         <h2>待恢复项</h2>
-        <p class="story-dek">恢复放在前面，永久删除留在最后一步。这样误删不会立刻把研究记录清空。</p>
+        <p class="story-dek">恢复、筛选和永久删除。</p>
       </div>
       <aside class="stock-hero-aside">
         <article class="mini-fact">
@@ -87,7 +87,7 @@
             <div>
               <p class="eyebrow">可恢复内容</p>
               <h3>回收站条目</h3>
-              <p class="section-caption">恢复会回到原来的模块位置；永久删除时才会真正清理本地文件和云端资源。</p>
+              <p class="section-caption">恢复或永久删除。</p>
             </div>
             <span class="summary-count" data-trash-filtered-count>{{ trash_stats.filtered_count }}</span>
           </div>
@@ -139,7 +139,7 @@
 
           <div class="empty-card" data-trash-empty-state {% if trash_items %}hidden{% endif %}>
             <p class="empty-title">回收站现在是空的</p>
-              <p>这是件好事。后面即使误删内容，也会先进入这里，而不是直接消失。</p>
+              <p>暂无待恢复内容。</p>
           </div>
         </section>
       </section>
@@ -148,14 +148,14 @@
         <section class="panel side-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">使用原则</p>
-              <h3>删除流程</h3>
+              <p class="eyebrow">删除</p>
+              <h3>流程</h3>
             </div>
           </div>
           <ul class="briefing-list">
-            <li>删除笔记、资料、会议转录和分组时，会先进入回收站。</li>
-            <li>恢复后会尽量回到原来的股票或模块，不需要手工重新整理。</li>
-            <li>只有在这里点“永久删除”，才会真正清理本地文件和云端附件。</li>
+            <li>先进入回收站。</li>
+            <li>恢复回原模块。</li>
+            <li>永久删除不可恢复。</li>
           </ul>
         </section>
       </aside>

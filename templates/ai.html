@@ -16,9 +16,7 @@
       <div class="ai-hero-copy">
         <p class="eyebrow">AI 研究助手</p>
         <h2>AI 问答</h2>
-        <p class="story-dek">
-          后端会先整理报告、个股笔记、研究资料、管理层电话会议和会议转录，再把当前范围内的知识正文交给只读模式的 Codex。它更适合回看时间线、找遗漏、做阶段对比，不会修改网页文件。
-        </p>
+        <p class="story-dek">只读读取网页知识库，用来回看、对比和查遗漏。</p>
       </div>
       <div class="ai-hero-scope">
         <article class="ai-scope-card ai-scope-card-hero" data-ai-scope-summary-card>
@@ -171,7 +169,7 @@
 
             {% if not chat_sessions %}
               <div class="empty-inline">
-                <p>你发出第一条消息后，历史对话会自动保存在这里，方便回看和继续追问。</p>
+                <p>第一条消息后会生成历史记录。</p>
               </div>
             {% endif %}
           </div>
@@ -188,9 +186,7 @@
               <div>
                 <p class="eyebrow">当前对话</p>
                 <h3>{{ active_session.title if active_session else "新对话" }}</h3>
-                <p class="section-caption">
-                  对话会自动带上当前知识范围。要做特定股票或某段时间的对比，可以先在顶部限定资料库。
-                </p>
+                <p class="section-caption">使用当前知识范围。</p>
               </div>
             </div>
           </div>
@@ -247,8 +243,8 @@
             </div>
           {% else %}
             <div class="empty-card ai-empty-state">
-              <p class="empty-title">这里会显示你的对话记录。</p>
-              <p>适合问“最近哪些判断变了”“某段时间窗口里资料有什么矛盾”“FTAI 和 GE 在同阶段的变化差在哪”。</p>
+              <p class="empty-title">开始一段研究问答。</p>
+              <p>适合做变化、矛盾和阶段对比。</p>
             </div>
           {% endif %}
         </div>
@@ -309,7 +305,7 @@
                 </button>
               </div>
             </div>
-            <p class="field-help">当前模式是只读问答。Codex 会读取当前范围内的网页知识正文，但不会修改网页文件。</p>
+            <p class="field-help">只读问答，不修改网页文件。</p>
           </div>
         </form>
       </section>
@@ -323,7 +319,7 @@
             <div>
               <p class="eyebrow">知识范围</p>
               <h3>限定 AI 会读取的资料范围</h3>
-              <p class="section-caption">先定股票范围，再加时间窗口。右侧会即时显示这个范围内每天有什么内容，方便做阶段对比。</p>
+              <p class="section-caption">股票、时间和内容类型。</p>
             </div>
             <button class="button button-ghost button-compact" type="button" data-ai-scope-close>关闭</button>
           </div>
@@ -342,7 +338,7 @@
                     <input type="checkbox" name="use_stock_scope" value="1" {% if ai_scope_settings.use_stock_scope %}checked{% endif %}>
                     <span>针对特定股票内容库</span>
                   </label>
-                  <p class="section-caption">勾选后，Codex 只会读取选中股票的日报、笔记、文件和会议转录。</p>
+                  <p class="section-caption">只读取选中股票资料。</p>
                   <div class="ai-scope-field-group" data-ai-scope-stock-group>
                     <label class="form-field">
                       <span class="field-label">筛选股票</span>
@@ -369,7 +365,7 @@
                     <input type="checkbox" name="use_date_scope" value="1" {% if ai_scope_settings.use_date_scope %}checked{% endif %}>
                     <span>限定资料时间窗口</span>
                   </label>
-                  <p class="section-caption">日期选择会直接使用浏览器的小浮窗，不会再弹出整页大日历。</p>
+                  <p class="section-caption">限定资料时间。</p>
                   <div class="ai-scope-field-group ai-scope-date-grid" data-ai-scope-date-group>
                     <label class="form-field">
                       <span class="field-label">起日期</span>
