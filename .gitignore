@@ -12,6 +12,7 @@ backups/
 logs/
 output/
 tmp/
+backend_skills/
 playwright-report/
 .pytest_cache/
 .mypy_cache/

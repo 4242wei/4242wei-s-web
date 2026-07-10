@@ -2,17 +2,17 @@
 
 This project turns a folder of Markdown files into a simple website.
 
-By default, `start.bat` points the site at:
+By default, the site reads reports from the project-local folder:
 
 ```text
-D:\工作\FTAI\reports
+reports/
 ```
 
-So you do not need to copy files into this project manually.
+You can point it at any machine-specific folder with `REPORTS_DIR` in `.env.local`.
 
 ## What it does
 
-- Reads Markdown files from `D:\工作\FTAI\reports`
+- Reads Markdown files from `reports/` or your local `REPORTS_DIR`
 - Shows a report list on the left
 - Renders the selected report on the right
 - Sorts newest reports first using the date in the filename when possible
@@ -22,7 +22,7 @@ So you do not need to copy files into this project manually.
 ## First run
 
 ```powershell
-cd "D:\工作\网页"
+cd path\to\4242wei-s-web
 .\start.bat
 ```
 
@@ -30,7 +30,7 @@ Then open `http://127.0.0.1:5000`.
 
 ## Add new reports
 
-1. Put your generated `.md` files into `D:\工作\FTAI\reports`
+1. Put your generated `.md` files into `reports/`, or set `REPORTS_DIR` in `.env.local`
 2. Refresh the browser
 3. The newest file will appear near the top automatically
 

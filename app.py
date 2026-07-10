@@ -80,7 +80,6 @@ FILENAME_DATETIME_PATTERNS = [
     (re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})"), "%Y-%m-%d", False),
     (re.compile(r"(?P<date>\d{8})"), "%Y%m%d", False),
 ]
-DEFAULT_EXTERNAL_REPORTS_DIR = Path(r"D:\工作\FTAI\reports")
 STOCK_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 SYMBOL_SPLIT_PATTERN = re.compile(r"[\s,，;；/]+")
 TEXT_PREVIEW_SUFFIXES = {
@@ -614,10 +613,7 @@ def resolve_app_path(env_name: str, fallback: Path) -> Path:
 
 
 FALLBACK_REPORTS_DIR = BASE_DIR / "reports"
-REPORTS_DIR = resolve_app_path(
-    "REPORTS_DIR",
-    DEFAULT_EXTERNAL_REPORTS_DIR if DEFAULT_EXTERNAL_REPORTS_DIR.exists() else FALLBACK_REPORTS_DIR,
-)
+REPORTS_DIR = resolve_app_path("REPORTS_DIR", FALLBACK_REPORTS_DIR)
 STOCK_STORE_PATH = resolve_app_path("STOCKS_DATA_PATH", BASE_DIR / "data" / "stocks.json")
 STOCK_SETUPS_DIR = resolve_app_path("STOCK_SETUPS_DIR", BASE_DIR / "data" / "stock_setups")
 STOCK_UPLOADS_DIR = resolve_app_path("STOCKS_UPLOADS_DIR", BASE_DIR / "uploads" / "stocks")
@@ -739,8 +735,11 @@ PDF_READER_CLASS: Any | None = None
 DOCX_DOCUMENT_CLASS: Any | None = None
 OSS_CLIENT_API: dict[str, Any] | None = None
 TINGWU_CLIENT_API: dict[str, Any] | None = None
-DEFAULT_MONITOR_SOURCE_DIR = Path(r"D:\工作\FTAI")
-ORIGINAL_MONITOR_CONFIG_PATH = DEFAULT_MONITOR_SOURCE_DIR / "stock_monitor_config.json"
+DEFAULT_MONITOR_SOURCE_DIR = resolve_app_path("MONITOR_SOURCE_DIR", BASE_DIR)
+ORIGINAL_MONITOR_CONFIG_PATH = resolve_app_path(
+    "ORIGINAL_MONITOR_CONFIG_PATH",
+    DEFAULT_MONITOR_SOURCE_DIR / "stock_monitor_config.json",
+)
 MONITOR_DATA_DIR = BASE_DIR / "data" / "monitor"
 MONITOR_CONFIG_PATH = MONITOR_DATA_DIR / "config.json"
 MONITOR_RUNTIME_PATH = MONITOR_DATA_DIR / "runtime.json"
@@ -953,18 +952,20 @@ SIGNAL_MONITOR_DEFAULT_CATEGORY = "通用监控"
 SECURITY_SOFTWARE_MONITOR_DATA_DIR = BASE_DIR / "data" / "security_software_monitor"
 SECURITY_SOFTWARE_MONITOR_CONFIG_PATH = SECURITY_SOFTWARE_MONITOR_DATA_DIR / "config.json"
 SECURITY_SOFTWARE_MONITOR_STATE_PATH = SECURITY_SOFTWARE_MONITOR_DATA_DIR / "state.json"
-SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR = BASE_DIR / "backend_skills" / "security-software-daily-writer"
+SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR = resolve_app_path(
+    "SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR",
+    BASE_DIR / "backend_skills" / "security-software-daily-writer",
+)
 SECURITY_SOFTWARE_DAILY_WRITER_SKILL_PATH = SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR / "SKILL.md"
 SECURITY_SOFTWARE_DAILY_WRITER_FRAMEWORK_PATH = SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR / "references" / "writing-framework.md"
-AGENT_PAYMENT_DIR = Path(os.environ.get("AGENT_PAYMENT_DIR", r"D:\工作\Agent支付"))
-AISA_X402_SKILL_SCRIPT_PATH = Path(
-    os.environ.get(
-        "AISA_X402_SKILL_SCRIPT",
-        r"C:\Users\user1\.codex\skills\agent-market-x402-payments\scripts\aisa_x402_probe.py",
-    )
+AGENT_PAYMENT_DIR = resolve_app_path("AGENT_PAYMENT_DIR", BASE_DIR)
+AISA_X402_SKILL_SCRIPT_PATH = resolve_app_path(
+    "AISA_X402_SKILL_SCRIPT",
+    Path.home() / ".codex" / "skills" / "agent-market-x402-payments" / "scripts" / "aisa_x402_probe.py",
 )
-AISA_X402_PYTHON_PATH = Path(
-    os.environ.get("AISA_X402_PYTHON", str(AGENT_PAYMENT_DIR / ".venv" / "Scripts" / "python.exe"))
+AISA_X402_PYTHON_PATH = resolve_app_path(
+    "AISA_X402_PYTHON",
+    AGENT_PAYMENT_DIR / ".venv" / "Scripts" / "python.exe",
 )
 SIGNAL_MONITOR_DEFAULT_SOURCES = [
     {
@@ -5854,7 +5855,7 @@ def build_security_software_daily_report(config: dict[str, Any], state: dict[str
                 "companies": ["CSCO", "CHKP", "ZS", "NET", "PANW", "FTNT", "TENB", "QLYS", "RPD"],
                 "sources": [
                     {"label": "CISA Known Exploited Vulnerabilities Catalog", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"},
-                    {"label": "local raw KEV snapshot", "url": "D:\\工作\\网页\\data\\security_software_monitor\\kev_latest.json"},
+                    {"label": "local raw KEV snapshot", "url": "data/security_software_monitor/kev_latest.json"},
                 ],
             },
         ],
@@ -5868,10 +5869,10 @@ def build_security_software_daily_report(config: dict[str, Any], state: dict[str
             {"label": "CISA Known Exploited Vulnerabilities Catalog", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"},
             {"label": "SecurityWeek: Accenture OT cybersecurity push", "url": "https://www.securityweek.com/accenture-to-acquire-majority-stake-in-dragos-all-of-runzero-netrise-in-4-1-billion-ot-cybersecurity-push/"},
             {"label": "CyberScoop: Accenture industrial cybersecurity acquisition", "url": "https://cyberscoop.com/accenture-industrial-cybersecurity-acquisition-dragos-netrise-runzero/"},
-            {"label": "Paid X: RBRK Claude Code latest", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\rbrk_claude_code_latest.json"},
-            {"label": "Paid X: Claude Code CI/CD security top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\claude_code_cicd_security_top.json"},
-            {"label": "Paid X: Glasswing vulnerability remediation top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\glasswing_vuln_remediation_top.json"},
-            {"label": "Paid X: OT Dragos runZero NetRise top", "url": "D:\\工作\\网页\\data\\security_software_monitor\\paid_x\\daily_20260629_20260629_142611\\ot_dragos_runzero_netrise_top.json; paid_cost_usdc≈0.0088 total"},
+            {"label": "Paid X: RBRK Claude Code latest", "url": "data/security_software_monitor/paid_x/<run_id>/rbrk_claude_code_latest.json"},
+            {"label": "Paid X: Claude Code CI/CD security top", "url": "data/security_software_monitor/paid_x/<run_id>/claude_code_cicd_security_top.json"},
+            {"label": "Paid X: Glasswing vulnerability remediation top", "url": "data/security_software_monitor/paid_x/<run_id>/glasswing_vulnerability_remediation_top.json"},
+            {"label": "Paid X: OT Dragos runZero NetRise top", "url": "data/security_software_monitor/paid_x/<run_id>/ot_dragos_runzero_netrise_top.json; paid_cost_usdc≈0.0088 total"},
         ],
     }
 
@@ -14858,12 +14859,35 @@ def apply_reader_state_action(
 
 
 TRANSCRIPT_PDF_FONT_CACHE: str | None = None
-TRANSCRIPT_PDF_FONT_CANDIDATES = [
-    ("TranscriptPDFHei", Path(r"C:\Windows\Fonts\simhei.ttf")),
-    ("TranscriptPDFKai", Path(r"C:\Windows\Fonts\simkai.ttf")),
-    ("TranscriptPDFFang", Path(r"C:\Windows\Fonts\STFANGSO.TTF")),
-    ("TranscriptPDFSong", Path(r"C:\Windows\Fonts\simsunb.ttf")),
-]
+
+
+def transcript_pdf_font_candidates() -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    configured_paths = str(os.getenv("TRANSCRIPT_PDF_FONT_PATHS", "") or "").strip()
+    for index, raw_path in enumerate(configured_paths.split(os.pathsep)):
+        if raw_path.strip():
+            candidates.append((f"TranscriptPDFCustom{index}", Path(raw_path).expanduser()))
+
+    windows_dir = str(os.getenv("WINDIR", "") or "").strip()
+    if windows_dir:
+        fonts_dir = Path(windows_dir) / "Fonts"
+        candidates.extend(
+            [
+                ("TranscriptPDFHei", fonts_dir / "simhei.ttf"),
+                ("TranscriptPDFKai", fonts_dir / "simkai.ttf"),
+                ("TranscriptPDFFang", fonts_dir / "STFANGSO.TTF"),
+                ("TranscriptPDFSong", fonts_dir / "simsunb.ttf"),
+            ]
+        )
+
+    candidates.extend(
+        [
+            ("TranscriptPDFNotoSansCJK", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")),
+            ("TranscriptPDFNotoSerifCJK", Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc")),
+            ("TranscriptPDFPingFang", Path("/System/Library/Fonts/PingFang.ttc")),
+        ]
+    )
+    return candidates
 
 
 def normalize_pdf_text(value: str) -> str:
@@ -14897,7 +14921,7 @@ def ensure_transcript_pdf_font() -> str:
     except ModuleNotFoundError as exc:
         raise RuntimeError("当前环境缺少 reportlab，暂时无法导出 PDF。") from exc
 
-    for font_name, font_path in TRANSCRIPT_PDF_FONT_CANDIDATES:
+    for font_name, font_path in transcript_pdf_font_candidates():
         if font_path.exists():
             pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
             TRANSCRIPT_PDF_FONT_CACHE = font_name

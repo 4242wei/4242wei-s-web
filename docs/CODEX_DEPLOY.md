@@ -19,6 +19,7 @@ These paths are intentionally local and should stay untracked:
 - `logs/`
 - `backups/`
 - `output/`
+- `backend_skills/`
 - `.env`
 - `.env.local`
 - `.venv/`
@@ -65,6 +66,13 @@ STOCKS_UPLOADS_DIR=
 TRANSCRIPT_UPLOADS_DIR=
 AI_CHAT_DATA_PATH=
 AI_CONTEXT_DIR=
+MONITOR_SOURCE_DIR=
+ORIGINAL_MONITOR_CONFIG_PATH=
+SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR=
+AGENT_PAYMENT_DIR=
+AISA_X402_SKILL_SCRIPT=
+AISA_X402_PYTHON=
+TRANSCRIPT_PDF_FONT_PATHS=
 ```
 
 Recommended rule:
@@ -72,6 +80,7 @@ Recommended rule:
 - keep project structure in Git
 - keep user data outside Git
 - prefer absolute local paths for data if the machine already has a data layout
+- point `SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR` at a private skills checkout when the production skill should stay outside this public web repo
 
 ## Optional API Credentials
 
@@ -121,6 +130,7 @@ Expected behavior on a fresh machine:
 - the workspace may be empty
 - stock notes / uploads / transcript history may be empty
 - AI and transcription features may be limited until local config is provided
+- private skill-backed features may be limited until `SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR` points at a private skills checkout
 
 ## Safe Rules For Codex
 

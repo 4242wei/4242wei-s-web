@@ -5,7 +5,7 @@ Use `start_tunnel.bat` when exposing this app through Cloudflare Tunnel. It runs
 ## Start the local origin
 
 ```powershell
-cd "D:\工作\网页"
+cd path\to\4242wei-s-web
 .\start_tunnel.bat
 ```
 

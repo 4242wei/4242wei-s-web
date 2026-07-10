@@ -28,6 +28,7 @@ These paths are intentionally local-only and should not be committed:
 - `backups/`
 - `logs/`
 - `output/`
+- `backend_skills/`
 - `.venv/`
 
 That means Git will not carry:
@@ -39,6 +40,7 @@ That means Git will not carry:
 - stock workspace local data
 - API credentials
 - local screenshots, logs, and temporary outputs
+- private Codex/backend skills
 
 ## Recommended Update Flow
 
@@ -79,6 +81,7 @@ STOCKS_UPLOADS_DIR=D:\their\web-data\uploads\stocks
 TRANSCRIPT_UPLOADS_DIR=D:\their\web-data\uploads\transcripts
 AI_CHAT_DATA_PATH=D:\their\web-data\ai_chats.json
 AI_CONTEXT_DIR=D:\their\web-data\ai_context
+SECURITY_SOFTWARE_DAILY_WRITER_SKILL_DIR=D:\their\private-skills\skills\security-software-daily-writer
 ```
 
 These should stay local and should not be committed.
