@@ -210,10 +210,12 @@
     }
 
     window.addEventListener("pageshow", function () {
-      poll();
+      if (panel.getAttribute("data-stablecoin-running") === "true") {
+        start();
+      }
     });
 
-    return { start: start };
+    return { start: start, stop: stop, poll: poll };
   }
 
   function setupRefresh(poller) {
@@ -375,10 +377,12 @@
     }
 
     window.addEventListener("pageshow", function () {
-      poll();
+      if (panel.getAttribute("data-cdn-running") === "true") {
+        start();
+      }
     });
 
-    return { start: start };
+    return { start: start, stop: stop, poll: poll };
   }
 
   function setupCdnRefresh(poller) {
@@ -2884,6 +2888,12 @@
           "GPU price index already has today's result. Refresh anyway and keep only the newest daily result?";
         if (hasFreshToday && typeof window.confirm === "function" && !window.confirm(message)) {
           event.preventDefault();
+          return;
+        }
+        const button = form.querySelector("button[type='submit']");
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = true;
+          button.textContent = "更新中";
         }
       });
     });
@@ -3488,5 +3498,15 @@
     }
 
     scheduleCdnTrendVisualInitialization();
+  });
+
+  window.addEventListener("pagehide", function () {
+    if (activeApplovinPoller && typeof activeApplovinPoller.stop === "function") {
+      activeApplovinPoller.stop();
+    }
+    if (applovinRequestController) {
+      applovinRequestController.abort();
+      applovinRequestController = null;
+    }
   });
 })();

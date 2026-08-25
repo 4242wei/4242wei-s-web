@@ -390,6 +390,214 @@
     renderFiles(input.files);
   }
 
+  function waitForTranscriptUploadRetry(delayMs) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, delayMs);
+    });
+  }
+
+  function uploadTranscriptFileToOss(file, prepared, onProgress) {
+    return new Promise(function (resolve, reject) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", prepared.upload_url, true);
+      xhr.timeout = 30 * 60 * 1000;
+      Object.entries(prepared.upload_headers || {}).forEach(function (entry) {
+        xhr.setRequestHeader(entry[0], entry[1]);
+      });
+      xhr.upload.addEventListener("progress", function (event) {
+        if (event.lengthComputable && typeof onProgress === "function") {
+          onProgress(event.loaded, event.total);
+        }
+      });
+      xhr.addEventListener("load", function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+          return;
+        }
+        reject(new Error(`OSS 返回 HTTP ${xhr.status || "错误"}`));
+      });
+      xhr.addEventListener("error", function () {
+        reject(new Error("浏览器连接 OSS 失败，请检查网络后重试。"));
+      });
+      xhr.addEventListener("timeout", function () {
+        reject(new Error("浏览器直传 OSS 超时，请检查网络后重试。"));
+      });
+      xhr.send(file);
+    });
+  }
+
+  async function uploadTranscriptFileWithRetry(file, prepared, onProgress) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await uploadTranscriptFileToOss(file, prepared, onProgress);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) {
+          await waitForTranscriptUploadRetry(attempt * 900);
+        }
+      }
+    }
+    throw lastError || new Error("浏览器直传 OSS 失败。")
+  }
+
+  function setupDirectTranscriptUpload(form) {
+    if (form.dataset.directUploadEnabled !== "true") {
+      return;
+    }
+
+    const prepareUrl = String(form.dataset.directUploadPrepareUrl || "").trim();
+    const mediaInput = form.querySelector("[data-transcript-upload-input]");
+    const progressNode = form.querySelector("[data-direct-upload-progress]");
+    const submitButton = form.querySelector("button[type='submit']");
+    if (!prepareUrl || !(mediaInput instanceof HTMLInputElement)) {
+      return;
+    }
+
+    let stagedFingerprint = "";
+    let stagedUploads = [];
+
+    const fileListFingerprint = function (files) {
+      return files
+        .map(function (file) {
+          return `${file.name}:${file.size}:${file.lastModified}:${file.type}`;
+        })
+        .join("|");
+    };
+
+    const setProgress = function (message) {
+      if (!(progressNode instanceof HTMLElement)) {
+        return;
+      }
+      progressNode.hidden = false;
+      progressNode.textContent = message;
+    };
+
+    mediaInput.addEventListener("change", function () {
+      stagedFingerprint = "";
+      stagedUploads = [];
+      if (progressNode instanceof HTMLElement) {
+        progressNode.hidden = true;
+        progressNode.textContent = "";
+      }
+    });
+
+    form.addEventListener("submit", async function (event) {
+      if (event.defaultPrevented || form.dataset.directUploadSubmitting === "true") {
+        return;
+      }
+
+      const files = Array.from(mediaInput.files || []);
+      if (!files.length) {
+        return;
+      }
+
+      event.preventDefault();
+      form.dataset.directUploadSubmitting = "true";
+      const originalButtonText = submitButton instanceof HTMLButtonElement ? submitButton.textContent : "";
+      if (submitButton instanceof HTMLButtonElement) {
+        submitButton.disabled = true;
+        submitButton.textContent = "稳定上传中";
+      }
+
+      try {
+        const currentFingerprint = fileListFingerprint(files);
+        if (stagedFingerprint !== currentFingerprint || stagedUploads.length !== files.length) {
+          stagedUploads = [];
+          stagedFingerprint = "";
+          const totalBytes = files.reduce(function (sum, file) {
+            return sum + file.size;
+          }, 0);
+          let completedBytes = 0;
+
+          for (let index = 0; index < files.length; index += 1) {
+            const file = files[index];
+            setProgress(`正在为第 ${index + 1}/${files.length} 个文件准备 OSS 直传...`);
+            const prepareResponse = await fetch(prepareUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+              },
+              cache: "no-store",
+              body: JSON.stringify({
+                filename: file.name,
+                size: file.size,
+                content_type: file.type || "application/octet-stream",
+                client_fingerprint: `${file.name}:${file.size}:${file.lastModified}:${file.type}`,
+              }),
+            });
+            const prepared = await prepareResponse.json().catch(function () {
+              return null;
+            });
+            if (!prepareResponse.ok || !prepared || prepared.ok !== true) {
+              throw new Error((prepared && prepared.message) || "无法取得 OSS 直传地址。")
+            }
+
+            await uploadTranscriptFileWithRetry(file, prepared, function (loaded) {
+              const uploadedBytes = Math.min(totalBytes, completedBytes + loaded);
+              const percentage = totalBytes ? Math.round((uploadedBytes / totalBytes) * 100) : 0;
+              setProgress(
+                `正在直传 OSS：第 ${index + 1}/${files.length} 个文件，整体 ${percentage}%`
+              );
+            });
+            completedBytes += file.size;
+            stagedUploads.push({ token: prepared.token });
+          }
+          stagedFingerprint = currentFingerprint;
+        }
+
+        setProgress("OSS 上传完成，正在让 Mac 登记任务并开始本地归档...");
+        const finalizeData = new FormData(form);
+        finalizeData.delete("transcript_media");
+        finalizeData.set("direct_upload_payload", JSON.stringify(stagedUploads));
+
+        let finalResponse = null;
+        let finalizeError = null;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            finalResponse = await fetch(form.action, {
+              method: "POST",
+              body: finalizeData,
+              headers: {
+                "X-Requested-With": "XMLHttpRequest",
+              },
+              cache: "no-store",
+              redirect: "follow",
+            });
+            if (finalResponse.ok) {
+              break;
+            }
+            throw new Error(`Mac 返回 HTTP ${finalResponse.status}`);
+          } catch (error) {
+            finalizeError = error;
+            if (attempt < 3) {
+              setProgress(`Mac 任务登记暂时失败，正在自动重试 ${attempt}/2...`);
+              await waitForTranscriptUploadRetry(attempt * 900);
+            }
+          }
+        }
+        if (!finalResponse || !finalResponse.ok) {
+          throw finalizeError || new Error("文件已在 OSS，但 Mac 暂时没有登记成功，请直接再次点击保存重试。")
+        }
+
+        setProgress("任务登记完成，正在打开转录列表...");
+        window.location.assign(finalResponse.url || form.querySelector("[name='next_url']")?.value || "/transcripts");
+      } catch (error) {
+        form.dataset.directUploadSubmitting = "";
+        if (submitButton instanceof HTMLButtonElement) {
+          submitButton.disabled = false;
+          submitButton.textContent = originalButtonText || "保存转录任务";
+        }
+        const message = error instanceof Error ? error.message : "稳定上传失败，请稍后重试。";
+        setProgress(`${message} 文件不会从你的电脑或 OSS 自动删除。`);
+        showFlash("error", message);
+      }
+    });
+  }
+
   function bindTranscriptValidation(form) {
     const knownSymbols = new Set(parseSymbolList(form.dataset.knownStockSymbols || ""));
     const linkToggle = form.querySelector("[name='link_to_stock']");
@@ -1344,6 +1552,7 @@
       setupTranscriptUpload(form);
       bindStockLinkMode(form);
       bindTranscriptValidation(form);
+      setupDirectTranscriptUpload(form);
       bindToggle(form, "diarization_enabled", "speaker-fields");
       bindToggle(form, "meeting_assistance_enabled", "meeting-assistance-fields");
       bindToggle(form, "summarization_enabled", "summarization-fields");
@@ -1356,5 +1565,18 @@
     setupDeleteForms();
     syncTranscriptStats();
     setupAutoSyncPolling();
+
+    if (window.location.hash.startsWith("#transcript-")) {
+      const focusedTranscript = document.querySelector(window.location.hash);
+      if (focusedTranscript instanceof HTMLDetailsElement) {
+        focusedTranscript.open = true;
+      }
+      if (focusedTranscript instanceof HTMLElement) {
+        focusedTranscript.classList.add("is-linked-focus");
+        window.requestAnimationFrame(function () {
+          focusedTranscript.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
+    }
   });
 })();

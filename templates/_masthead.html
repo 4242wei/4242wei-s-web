@@ -1,5 +1,6 @@
 {% set page_titles = {
   "archive": "报告归档",
+  "expert_portfolio": "专家组合",
   "monitor": "Monitor",
   "data_monitor": "数据监控",
   "signals": "信息监控",
@@ -15,6 +16,7 @@
   "trash": "回收站",
 } %}
 {% set nav_items = [
+  {"key": "expert_portfolio", "label": "专家组合", "short": "组", "href": url_for("expert_portfolio_page")},
   {"key": "monitor", "label": "Monitor", "short": "监", "href": url_for("monitor_page")},
   {"key": "data_monitor", "label": "数据监控", "short": "数", "href": url_for("data_monitor_page")},
   {"key": "stocks", "label": "股票工作台", "short": "股", "href": url_for("stocks_workspace")},
@@ -28,7 +30,7 @@
   {"key": "trash", "label": "回收站", "short": "回", "href": url_for("trash_page")},
 ] %}
 {% if is_visitor_mode %}
-  {% set visitor_nav_keys = ["monitor", "data_monitor", "stocks", "schedule", "experts", "transcripts", "search"] %}
+  {% set visitor_nav_keys = ["expert_portfolio", "monitor", "data_monitor", "stocks", "schedule", "experts", "transcripts", "search"] %}
   {% set visitor_nav_items = namespace(items=[]) %}
   {% for item in nav_items %}
     {% if item.key in visitor_nav_keys %}
@@ -44,18 +46,18 @@
   {"key": "summer-night-breeze", "label": "夏夜晚风", "caption": "深蓝天幕压低，余晖只留在街口和纸页边。", "swatches": ["#f6f9ff", "#f1a060", "#6e8fc8", "#223d68", "#0f1a31"]},
   {"key": "seaside-blue-hour", "label": "海风蓝调", "caption": "潮声压低、海雾带着一线珊瑚余晖，盐白纸面慢慢沉进深蓝。", "swatches": ["#f8fcff", "#bbe2f2", "#7ebddd", "#3f6eaf", "#16345b"]},
   {"key": "westlake-snow", "label": "西湖雪日白", "caption": "晴雪天光、雾蓝远山、冰湖留白和冷静纸面。", "swatches": ["#fbfdff", "#eef5fd", "#dee9f6", "#b6c7dc", "#70849e"]},
-  {"key": "spring-moss", "label": "春色新绿", "caption": "晨光穿过树梢，新芽、苔痕和一层更有分量的春荫。", "swatches": ["#fbfcf2", "#d8e682", "#9fbe6b", "#5f8f52", "#35583b"]},
-  {"key": "plum-rain", "label": "梅雨青岚", "caption": "乌瓦潮气、灰蓝天色和一层柔紫湿雾。", "swatches": ["#f9fbfd", "#dfe4ef", "#a7b2c7", "#887d9b"]},
-  {"key": "jiangnan-drizzle", "label": "江南烟雨", "caption": "空濛湖面、灰蓝檐线、雨巷伞影和一层淡淡的丁香雾。", "swatches": ["#fbfcfc", "#e6ecef", "#c4cddd", "#9c99af", "#586b7d"]},
+  {"key": "cherry-picnic", "label": "樱桃野餐", "caption": "奶油晴光、樱桃红和草地新绿，花瓣光点在野餐布外轻轻掠过。", "swatches": ["#fffdf7", "#ffced1", "#ef5366", "#92d69c", "#347a61"]},
+  {"key": "tidal-spark", "label": "海盐闪光", "caption": "透亮海蓝、薄荷浪花和一束柠檬日光，水面闪点缓慢漂移。", "swatches": ["#f8ffff", "#87e1df", "#48b8e8", "#ffe27a", "#176fa8"]},
+  {"key": "lavender-soda", "label": "薰衣汽水", "caption": "薰衣草紫、莓果粉与薄荷气泡，清亮圆点像汽水一样向上游动。", "swatches": ["#fdfaff", "#d1b8ff", "#ef8fbd", "#91e0ce", "#6550bd"]},
   {"key": "golden-mist", "label": "金风晴岚", "caption": "淡天青、远山蓝和银杏金，像秋日薄光落在雾里。", "swatches": ["#eef6fb", "#fffdf6", "#ebd06a"]},
   {"key": "starlit-nebula", "label": "星云静夜", "caption": "深蓝边缘、银紫星雾和安静纸白。", "swatches": ["#eef2ff", "#fbfcff", "#cfcff8"]},
   {"key": "starry-night", "label": "星月夜", "caption": "钴蓝夜空、旋涡云流和金色星月，灵感取自《星月夜》。", "swatches": ["#0f274f", "#1d4776", "#f1d27d", "#fbf7eb"]},
   {"key": "autumn-amber", "label": "秋山暖茶", "caption": "茶棕、栗金和轻暖米纸。", "swatches": ["#fbf0e3", "#fffaf2", "#d8b78b"]},
   {"key": "monet-parasol", "label": "莫奈晴风", "caption": "高空云白、伞面柔粉、草地新绿和被风抬起的午后蓝，灵感取自《撑阳伞的女人》。", "swatches": ["#fbfdf7", "#d9eef8", "#81abd2", "#9dc986", "#f2c4c2"]},
   {"key": "impression-sunrise", "label": "印象日出", "caption": "港口晨雾、蓝灰水面、橙色日轮和薄雾里的反光，灵感取自《印象·日出》。", "swatches": ["#f7faf8", "#d8e7ea", "#89a7bd", "#5d748d", "#ef9357"]},
-  {"key": "harbor-mist", "label": "雾港晨灰", "caption": "潮雾、钢蓝和一点暖砂，像清晨码头刚亮灯的纸面。", "swatches": ["#fbfbf7", "#dce7ea", "#9fb2bc", "#5a717d", "#263844"]},
-  {"key": "verdigris-studio", "label": "铜绿书房", "caption": "旧铜器的绿、亚麻纸的暖白和一点陶土边光。", "swatches": ["#fbf6ed", "#d7e2da", "#8aa79a", "#4f746d", "#c67b4e"]},
-  {"key": "midnight-ember", "label": "午夜余烬", "caption": "墨蓝放映厅、黄铜边灯和暗火余温，整体更克制也更聚焦。", "swatches": ["#141b24", "#243144", "#c48a45", "#f2e5cf", "#9f5538"]},
+  {"key": "citrus-bloom", "label": "柑橘花园", "caption": "柠檬晨光、橘子汽水和新叶绿，柔软色雾像延时云层般交融流动。", "swatches": ["#fffdf2", "#ffe48b", "#ff9d5c", "#78c89a", "#287d71"]},
+  {"key": "sky-confetti", "label": "晴空彩屑", "caption": "清亮天蓝、珊瑚粉与葡萄紫，彩色云雾在晴空里舒展、交融和分离。", "swatches": ["#f7fcff", "#8bd5ff", "#ff8fa3", "#a88cff", "#2878d0"]},
+  {"key": "aurora-glass", "label": "极光玻璃", "caption": "薄荷青、极光紫和蜜桃光穿过透明玻璃，极光云带缓慢卷动。", "swatches": ["#f9ffff", "#8de9dc", "#b8a6ff", "#ffb6c9", "#3978c7"]},
 ] %}
 {% set current_page_title = page_titles.get(active_page, "Monitor") %}
 
@@ -149,7 +151,21 @@
             <h3>换一种空气和纸面</h3>
             <p class="section-caption">保留现在这套留白和阅读感，只替网页换一种光线、纸面和边缘气氛。</p>
           </div>
-          <button class="icon-button" type="button" aria-label="关闭配色面板" data-theme-close>×</button>
+          <div class="theme-switcher-head-actions">
+            <button
+              class="theme-motion-toggle is-enabled"
+              type="button"
+              aria-pressed="true"
+              aria-label="切换主题动态效果"
+              title="开启或关闭主题背景动态效果"
+              data-theme-motion-toggle
+            >
+              <span class="theme-motion-toggle-dot" aria-hidden="true"></span>
+              <span>动态效果</span>
+              <strong data-theme-motion-state>开</strong>
+            </button>
+            <button class="icon-button" type="button" aria-label="关闭配色面板" data-theme-close>×</button>
+          </div>
         </div>
 
         <div class="theme-switcher-grid">
@@ -294,6 +310,7 @@
 <script src="{{ static_asset_url('masthead-stock-search.js') }}" defer></script>
 <script src="{{ static_asset_url('theme-switcher.js') }}" defer></script>
 <script src="{{ static_asset_url('workspace-rail.js') }}" defer></script>
+<script src="{{ static_asset_url('instant-navigation.js') }}" defer></script>
 {% if is_admin_mode %}
   <script src="{{ static_asset_url('clipboard-modal.js') }}" defer></script>
 {% endif %}

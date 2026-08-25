@@ -34,6 +34,12 @@ SNAPSHOT_TARGETS = [
     "signal_monitor_runner.py",
     "oss_client.py",
     "tingwu_client.py",
+    "outlook_calendar_sync.py",
+    "expert_interview_linker.py",
+    "interview_summary.py",
+    "interview_quota_export.py",
+    "region_normalization.py",
+    "app_routes",
     "templates",
     "static",
 ]
@@ -63,6 +69,9 @@ def build_snapshot() -> Path:
 def run_smoke_check() -> list[tuple[str, int]]:
     from app import app
 
+    # Smoke checks must be read-only.  In particular they must not start the
+    # calendar/transcript background worker against the production data files.
+    app.config["TESTING"] = True
     client = app.test_client()
     results: list[tuple[str, int]] = []
     for route in ROUTES:

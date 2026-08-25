@@ -54,3 +54,36 @@ For a quick local test:
 ```powershell
 cloudflared tunnel --url http://127.0.0.1:5000
 ```
+
+## macOS local deployment
+
+On this Mac, port `5000` is reserved by Control Center. The local
+`start.command`, `start_tunnel.command`, and Cloudflare ingress configuration
+therefore use `http://127.0.0.1:8000` by default.
+
+The public site is managed by the per-user LaunchAgent
+`com.4242wei.web-tunnel`. It starts at login and restarts the origin and Tunnel
+if they exit unexpectedly. While the Tunnel is running, `caffeinate -i`
+prevents idle system sleep but still allows the display to sleep normally.
+The real application directory is `~/.local/share/4242wei-web`; the original
+`~/Desktop/网页` location is retained as a symlink for normal editing.
+
+## Stable transcript uploads
+
+Large transcript media can bypass the Cloudflare request timeout by uploading
+directly from the browser to OSS. The origin then records the task immediately,
+downloads an atomic local copy in the background, and submits Tingwu without
+holding the browser request open.
+
+Enable the isolated transcript feature flags in `.env.local`:
+
+```text
+TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED=1
+TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED=1
+TRANSCRIPT_PDF_ARCHIVE_DIR=/absolute/path/to/transcript-pdfs
+```
+
+Rollback does not require reverting code or data. Set the first two values to
+`0` and restart the LaunchAgent; the original local multipart upload path stays
+available. Disabling the flags does not remove local media, archived PDFs, or
+OSS objects.

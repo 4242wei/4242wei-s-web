@@ -47,9 +47,12 @@ from flask import (
     send_from_directory,
     url_for,
 )
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from app_routes.expert_portfolio_routes import register_expert_portfolio_routes
+from app_routes.expert_intake_routes import register_expert_intake_routes
 from app_routes.schedule_routes import register_schedule_routes
 from app_routes.trash_routes import register_trash_routes
 from app_support.json_documents import (
@@ -615,6 +618,26 @@ def resolve_app_path(env_name: str, fallback: Path) -> Path:
 FALLBACK_REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR = resolve_app_path("REPORTS_DIR", FALLBACK_REPORTS_DIR)
 STOCK_STORE_PATH = resolve_app_path("STOCKS_DATA_PATH", BASE_DIR / "data" / "stocks.json")
+EXPERT_PORTFOLIO_STORE_PATH = resolve_app_path(
+    "EXPERT_PORTFOLIO_DATA_PATH",
+    BASE_DIR / "data" / "expert_portfolio.json",
+)
+EXPERT_INTAKE_PROVIDER_CONFIG_PATH = resolve_app_path(
+    "EXPERT_INTAKE_PROVIDER_CONFIG",
+    BASE_DIR / "config" / "llm_providers.json",
+)
+OUTLOOK_CALENDAR_CONFIG_PATH = resolve_app_path(
+    "OUTLOOK_CALENDAR_CONFIG_PATH",
+    BASE_DIR / "data" / "outlook_calendar_config.json",
+)
+OUTLOOK_CALENDAR_CACHE_PATH = resolve_app_path(
+    "OUTLOOK_CALENDAR_CACHE_PATH",
+    BASE_DIR / "data" / "outlook_calendar_cache.json",
+)
+EXPERT_INTERVIEW_LINK_CACHE_PATH = resolve_app_path(
+    "EXPERT_INTERVIEW_LINK_CACHE_PATH",
+    BASE_DIR / "data" / "expert_interview_link_cache.json",
+)
 STOCK_SETUPS_DIR = resolve_app_path("STOCK_SETUPS_DIR", BASE_DIR / "data" / "stock_setups")
 STOCK_UPLOADS_DIR = resolve_app_path("STOCKS_UPLOADS_DIR", BASE_DIR / "uploads" / "stocks")
 TRANSCRIPT_UPLOADS_DIR = resolve_app_path("TRANSCRIPT_UPLOADS_DIR", BASE_DIR / "uploads" / "transcripts")
@@ -643,6 +666,20 @@ TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("TRANSCRIPT_STATUS_POLL_
 TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT = str(
     os.getenv("TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT", "0")
 ).strip().lower() in {"1", "true", "on", "yes"}
+TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED = str(
+    os.getenv("TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED", "0")
+).strip().lower() in {"1", "true", "on", "yes"}
+TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED = str(
+    os.getenv("TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED", "0")
+).strip().lower() in {"1", "true", "on", "yes"}
+TRANSCRIPT_DIRECT_UPLOAD_TOKEN_MAX_AGE_SECONDS = max(
+    300,
+    int(os.getenv("TRANSCRIPT_DIRECT_UPLOAD_TOKEN_MAX_AGE_SECONDS", "7200")),
+)
+TRANSCRIPT_PDF_ARCHIVE_DIR = resolve_app_path(
+    "TRANSCRIPT_PDF_ARCHIVE_DIR",
+    TRANSCRIPT_UPLOADS_DIR / "pdf",
+)
 AI_PROMPT_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("AI_PROMPT_KNOWLEDGE_CHAR_LIMIT", "40000"))
 MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_PLAN_KNOWLEDGE_CHAR_LIMIT", "22000"))
 MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT = int(os.getenv("MINDMAP_FINAL_KNOWLEDGE_CHAR_LIMIT", "32000"))
@@ -679,6 +716,11 @@ AI_NATIVE_INDEX_LOCK = threading.RLock()
 STOCK_STORE_LOCK = threading.RLock()
 STOCK_STORE_CACHE_LOCK = threading.RLock()
 STOCK_STORE_CACHE: dict[str, Any] = {"signature": None, "data": None}
+TRANSCRIPT_PIPELINE_LOCK = threading.RLock()
+TRANSCRIPT_PIPELINE_ACTIVE_IDS: set[str] = set()
+TRANSCRIPT_PIPELINE_SEMAPHORE = threading.BoundedSemaphore(2)
+TRANSCRIPT_PIPELINE_SCHEDULER_THREAD: threading.Thread | None = None
+TRANSCRIPT_PIPELINE_SCHEDULER_STARTED = False
 STABLECOIN_MONITOR_ACTIVE_THREAD: threading.Thread | None = None
 STABLECOIN_MONITOR_SCHEDULER_THREAD: threading.Thread | None = None
 STABLECOIN_MONITOR_SCHEDULER_STARTED = False
@@ -771,6 +813,9 @@ def get_oss_client_api() -> dict[str, Any]:
             build_oss_status as build_oss_status_impl,
             build_signed_url as build_signed_url_impl,
             delete_uploaded_object as delete_uploaded_object_impl,
+            download_uploaded_object as download_uploaded_object_impl,
+            inspect_uploaded_object as inspect_uploaded_object_impl,
+            prepare_browser_upload as prepare_browser_upload_impl,
             probe_oss_bridge as probe_oss_bridge_impl,
             upload_file_for_tingwu as upload_file_for_tingwu_impl,
         )
@@ -779,6 +824,9 @@ def get_oss_client_api() -> dict[str, Any]:
             "build_oss_status": build_oss_status_impl,
             "build_signed_url": build_signed_url_impl,
             "delete_uploaded_object": delete_uploaded_object_impl,
+            "download_uploaded_object": download_uploaded_object_impl,
+            "inspect_uploaded_object": inspect_uploaded_object_impl,
+            "prepare_browser_upload": prepare_browser_upload_impl,
             "probe_oss_bridge": probe_oss_bridge_impl,
             "upload_file_for_tingwu": upload_file_for_tingwu_impl,
         }
@@ -795,6 +843,43 @@ def build_signed_url(*, bucket_name: str, object_key: str) -> dict[str, Any]:
 
 def delete_uploaded_object(*, bucket_name: str, object_key: str) -> None:
     get_oss_client_api()["delete_uploaded_object"](bucket_name=bucket_name, object_key=object_key)
+
+
+def prepare_browser_upload(
+    *,
+    original_name: str,
+    transcript_id: str,
+    content_type: str,
+    origin: str,
+) -> dict[str, Any]:
+    return get_oss_client_api()["prepare_browser_upload"](
+        original_name=original_name,
+        transcript_id=transcript_id,
+        content_type=content_type,
+        origin=origin,
+    )
+
+
+def inspect_uploaded_object(*, bucket_name: str, object_key: str) -> dict[str, Any]:
+    return get_oss_client_api()["inspect_uploaded_object"](
+        bucket_name=bucket_name,
+        object_key=object_key,
+    )
+
+
+def download_uploaded_object(
+    *,
+    bucket_name: str,
+    object_key: str,
+    target_path: Path,
+    expected_size: int = 0,
+) -> dict[str, Any]:
+    return get_oss_client_api()["download_uploaded_object"](
+        bucket_name=bucket_name,
+        object_key=object_key,
+        target_path=target_path,
+        expected_size=expected_size,
+    )
 
 
 def probe_oss_bridge() -> dict[str, Any]:
@@ -1330,14 +1415,17 @@ app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH", str(1024 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 STATIC_ASSET_VERSIONS = {
-    "style.css": "20260624-scroll-expander-component1",
+    "style.css": "20260817-quota-modal1",
     "flash-messages.js": "20260330-access-gate",
     "calendar-modal.js": "20260316-modalfix1",
     "confirm-modal.js": "20260315-confirmfix",
     "masthead-stock-search.js": "20260331-stockjump1",
-    "theme-switcher.js": "20260325-seabreeze1",
+    "theme-switcher.js": "20260813-theme-prune1",
+    "instant-navigation.js": "20260808-native-prefetch1",
     "workspace-rail.js": "20260317-railfold",
     "clipboard-modal.js": "20260401-clipboard1",
+    "expert-portfolio.js": "20260817-quota-modal1",
+    "data-monitor-page.js": "20260813-pollingfix1",
 }
 
 
@@ -1356,11 +1444,14 @@ def current_local_url() -> str:
 def initialize_runtime() -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     STOCK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EXPERT_PORTFOLIO_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STOCK_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPT_PDF_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     maybe_start_stablecoin_monitor_scheduler()
     maybe_start_cdn_monitor_scheduler()
     maybe_start_gpu_price_monitor_scheduler()
+    maybe_resume_transcript_pipeline_jobs()
 
 
 def path_is_within(child: Path, parent: Path) -> bool:
@@ -2033,11 +2124,27 @@ def trim_note_content(value: str, limit: int = MAX_NOTE_CONTENT_CHARS) -> str:
 
 
 def summarize_text_block(value: str, limit: int = 180) -> str:
-    compact = re.sub(r"\s+", " ", value).strip()
-    if len(compact) <= limit:
-        return compact
+    # Search result cards only need the beginning of long notes/transcripts.  Build
+    # that prefix incrementally so a landing page does not normalize every byte of
+    # a multi-megabyte transcript merely to show a 180-character preview.
+    compact_chars: list[str] = []
+    pending_space = False
 
-    return compact[: limit - 3].rstrip() + "..."
+    for character in value:
+        if character.isspace():
+            pending_space = bool(compact_chars)
+            continue
+
+        if pending_space:
+            compact_chars.append(" ")
+            pending_space = False
+
+        compact_chars.append(character)
+        if len(compact_chars) > limit:
+            compact = "".join(compact_chars)
+            return compact[: limit - 3].rstrip() + "..."
+
+    return "".join(compact_chars)
 
 
 def plain_text_to_html(value: str) -> str:
@@ -3047,10 +3154,23 @@ def build_transcript_source_meta(entry: dict[str, Any]) -> dict[str, str]:
     manual_url = str(entry.get("file_url_hint") or "").strip()
 
     if source_bucket_name and source_object_key:
+        local_archive_status = str(entry.get("local_archive_status") or "ready")
+        if local_archive_status == "ready" and transcript_local_path(entry).exists():
+            label = "OSS 已上传 · Mac 已归档"
+            detail = f"本地音频可下载；Bucket {source_bucket_name}"
+        elif local_archive_status == "failed":
+            label = "OSS 已上传 · Mac 回存失败"
+            detail = str(entry.get("local_archive_error") or "可以重新执行本地归档")[:180]
+        elif local_archive_status == "ready":
+            label = "OSS 源文件可用"
+            detail = f"这条历史记录没有 Mac 本地音频；Bucket {source_bucket_name}"
+        else:
+            label = "OSS 已上传 · Mac 归档中"
+            detail = f"云端副本安全，正在回存本机；Bucket {source_bucket_name}"
         return {
             "mode": "oss_auto",
-            "label": "已自动上传到 OSS",
-            "detail": f"Bucket {source_bucket_name}",
+            "label": label,
+            "detail": detail,
         }
 
     if manual_url:
@@ -3071,6 +3191,75 @@ def build_transcript_source_meta(entry: dict[str, Any]) -> dict[str, str]:
 
 def transcript_local_path(entry: dict[str, Any]) -> Path:
     return TRANSCRIPT_UPLOADS_DIR / str(entry.get("stored_name") or "").strip()
+
+
+def build_transcript_stored_name(original_name: str) -> str:
+    cleaned_name = str(original_name or "").strip()
+    safe_name = secure_filename(cleaned_name)
+    original_suffix = Path(cleaned_name).suffix.lower()
+    if not safe_name:
+        safe_name = f"meeting-recording{original_suffix or '.bin'}"
+    elif original_suffix and not safe_name.lower().endswith(original_suffix):
+        safe_name = f"{Path(safe_name).stem}{original_suffix}"
+    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{safe_name}"
+
+
+def transcript_direct_upload_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(
+        str(app.secret_key),
+        salt="transcript-direct-oss-upload-v1",
+    )
+
+
+def sign_transcript_direct_upload(payload: dict[str, Any]) -> str:
+    return transcript_direct_upload_serializer().dumps(payload)
+
+
+def load_transcript_direct_upload_token(token: str) -> dict[str, Any]:
+    try:
+        payload = transcript_direct_upload_serializer().loads(
+            str(token or ""),
+            max_age=TRANSCRIPT_DIRECT_UPLOAD_TOKEN_MAX_AGE_SECONDS,
+        )
+    except SignatureExpired as exc:
+        raise ValueError("OSS 直传凭证已经过期，请重新选择文件上传。") from exc
+    except BadSignature as exc:
+        raise ValueError("OSS 直传凭证无效，请重新选择文件上传。") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("OSS 直传凭证内容无效。")
+    return payload
+
+
+def parse_transcript_direct_upload_items(raw_value: str) -> list[dict[str, Any]]:
+    raw_text = str(raw_value or "").strip()
+    if not raw_text:
+        return []
+    try:
+        raw_items = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("OSS 直传结果无法识别，请重新上传。") from exc
+    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 40:
+        raise ValueError("OSS 直传文件列表无效。")
+
+    items: list[dict[str, Any]] = []
+    seen_upload_ids: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("OSS 直传文件信息无效。")
+        payload = load_transcript_direct_upload_token(str(raw_item.get("token") or ""))
+        upload_id = str(payload.get("upload_id") or "").strip()
+        if not upload_id or upload_id in seen_upload_ids:
+            raise ValueError("OSS 直传文件标识重复或缺失。")
+        seen_upload_ids.add(upload_id)
+        items.append(payload)
+    return items
+
+
+def transcript_pdf_archive_path(entry: dict[str, Any]) -> Path:
+    stored_name = str(entry.get("pdf_stored_name") or "").strip()
+    if not stored_name:
+        stored_name = f"transcript-{str(entry.get('id') or '').strip()}.pdf"
+    return TRANSCRIPT_PDF_ARCHIVE_DIR / secure_filename(stored_name)
 
 
 def refresh_transcript_source_url(entry: dict[str, Any]) -> str:
@@ -3179,6 +3368,10 @@ def build_transcript_card(
     has_remote_task = bool(entry.get("provider_task_id"))
     has_file_url = bool(str(entry.get("file_url_hint") or "").strip())
     source_meta = build_transcript_source_meta(entry)
+    local_source_path = transcript_local_path(entry)
+    has_local_source = local_source_path.exists() and local_source_path.is_file()
+    pdf_path = transcript_pdf_archive_path(entry)
+    has_local_pdf = pdf_path.exists() and pdf_path.is_file()
     category_meta = build_transcript_category_payload(entry.get("category"))
     linked_symbols = transcript_linked_symbols(entry)
     linked_symbol = linked_symbols[0] if linked_symbols else ""
@@ -3239,6 +3432,10 @@ def build_transcript_card(
         "source_mode": source_meta["mode"],
         "source_status_label": source_meta["label"],
         "source_status_detail": source_meta["detail"],
+        "has_local_source": has_local_source,
+        "has_local_pdf": has_local_pdf,
+        "local_archive_status": str(entry.get("local_archive_status") or ("ready" if has_local_source else "pending")),
+        "pdf_archive_status": str(entry.get("pdf_archive_status") or ("ready" if has_local_pdf else "pending")),
         "reader_annotations": reader_annotations,
         "reader_activity": reader_activity,
         "reader_content_signature": reader_content_signature,
@@ -3680,6 +3877,12 @@ def sync_transcript_job_from_tingwu(transcript: dict[str, Any]) -> dict[str, Any
         if content_text:
             transcript["transcript_html"] = content_html
             transcript["transcript_text"] = content_text
+            try:
+                archive_transcript_pdf(transcript)
+            except Exception as exc:
+                transcript["pdf_archive_status"] = "failed"
+                transcript["pdf_archive_error"] = str(exc)[:2000]
+                transcript["updated_at"] = now_iso()
         elif transcript.get("last_error"):
             transcript["status"] = "failed"
         else:
@@ -3706,6 +3909,17 @@ TRANSCRIPT_CLOUD_MUTATION_FIELDS = (
     "source_endpoint",
     "source_region_id",
     "source_url_expires_at",
+    "source_file_size",
+    "source_file_etag",
+    "local_archive_status",
+    "local_archive_attempts",
+    "local_archived_at",
+    "local_archive_error",
+    "auto_process_requested",
+    "pdf_stored_name",
+    "pdf_archive_status",
+    "pdf_archived_at",
+    "pdf_archive_error",
     "transcript_html",
     "transcript_text",
     "updated_at",
@@ -11021,6 +11235,21 @@ def normalize_transcript_entry(raw_transcript: Any, *, trust_saved_html: bool = 
     if status not in TRANSCRIPT_STATUS_META:
         status = normalize_provider_task_status(status)
 
+    local_archive_status = str(raw_transcript.get("local_archive_status") or "ready").strip()
+    if local_archive_status not in {"pending", "downloading", "ready", "failed"}:
+        local_archive_status = "ready"
+    pdf_archive_status = str(raw_transcript.get("pdf_archive_status") or "pending").strip()
+    if pdf_archive_status not in {"pending", "ready", "failed"}:
+        pdf_archive_status = "pending"
+    try:
+        source_file_size = max(0, int(raw_transcript.get("source_file_size") or 0))
+    except (TypeError, ValueError):
+        source_file_size = 0
+    try:
+        local_archive_attempts = max(0, int(raw_transcript.get("local_archive_attempts") or 0))
+    except (TypeError, ValueError):
+        local_archive_attempts = 0
+
     linked_symbols = transcript_linked_symbols(
         {
             "linked_symbols": raw_transcript.get("linked_symbols", []),
@@ -11058,6 +11287,18 @@ def normalize_transcript_entry(raw_transcript: Any, *, trust_saved_html: bool = 
         "source_endpoint": str(raw_transcript.get("source_endpoint") or "").strip()[:200],
         "source_region_id": str(raw_transcript.get("source_region_id") or "").strip()[:40],
         "source_url_expires_at": str(raw_transcript.get("source_url_expires_at") or "").strip()[:40],
+        "direct_upload_id": str(raw_transcript.get("direct_upload_id") or "").strip()[:80],
+        "source_file_size": source_file_size,
+        "source_file_etag": str(raw_transcript.get("source_file_etag") or "").strip()[:160],
+        "local_archive_status": local_archive_status,
+        "local_archive_attempts": local_archive_attempts,
+        "local_archived_at": str(raw_transcript.get("local_archived_at") or "").strip()[:40],
+        "local_archive_error": str(raw_transcript.get("local_archive_error") or "").strip()[:2000],
+        "auto_process_requested": bool(raw_transcript.get("auto_process_requested")),
+        "pdf_stored_name": secure_filename(str(raw_transcript.get("pdf_stored_name") or ""))[:240],
+        "pdf_archive_status": pdf_archive_status,
+        "pdf_archived_at": str(raw_transcript.get("pdf_archived_at") or "").strip()[:40],
+        "pdf_archive_error": str(raw_transcript.get("pdf_archive_error") or "").strip()[:2000],
         "linked_symbol": linked_symbol or "",
         "linked_symbols": linked_symbols,
         "category": category,
@@ -11811,8 +12052,10 @@ def readyz():
     checks = {
         "reports_dir": REPORTS_DIR.exists(),
         "stock_store_parent": STOCK_STORE_PATH.parent.exists(),
+        "expert_portfolio_parent": EXPERT_PORTFOLIO_STORE_PATH.parent.exists(),
         "uploads_dir": STOCK_UPLOADS_DIR.exists(),
         "transcript_uploads_dir": TRANSCRIPT_UPLOADS_DIR.exists(),
+        "transcript_pdf_archive_dir": TRANSCRIPT_PDF_ARCHIVE_DIR.exists(),
     }
     status_code = 200 if all(checks.values()) else 503
     return jsonify({"ok": status_code == 200, "checks": checks}), status_code
@@ -13769,11 +14012,12 @@ def text_contains_all_terms(
 
 
 def build_match_excerpt(text: str, terms: list[str], fallback: str, limit: int = 180) -> str:
+    if not terms:
+        return summarize_text_block(text, limit=limit) or fallback
+
     compact = re.sub(r"\s+", " ", text).strip()
     if not compact:
         return fallback
-    if not terms:
-        return summarize_text_block(compact, limit=limit)
 
     lower_compact = compact.casefold()
     first_index = min(
@@ -14241,6 +14485,9 @@ def permanently_delete_trash_entry(trash_entry: dict[str, Any]) -> None:
         target_path = transcript_local_path(payload)
         if target_path.exists():
             target_path.unlink()
+        pdf_path = transcript_pdf_archive_path(payload)
+        if pdf_path.exists():
+            pdf_path.unlink()
         bucket_name = str(payload.get("source_bucket_name") or "").strip()
         object_key = str(payload.get("source_object_key") or "").strip()
         if bucket_name and object_key:
@@ -14351,6 +14598,9 @@ def permanently_delete_trash_entry(trash_entry: dict[str, Any]) -> None:
         target_path = transcript_local_path(payload)
         if target_path.exists():
             target_path.unlink()
+        pdf_path = transcript_pdf_archive_path(payload)
+        if pdf_path.exists():
+            pdf_path.unlink()
         bucket_name = str(payload.get("source_bucket_name") or "").strip()
         object_key = str(payload.get("source_object_key") or "").strip()
         if bucket_name and object_key:
@@ -14859,6 +15109,7 @@ def apply_reader_state_action(
 
 
 TRANSCRIPT_PDF_FONT_CACHE: str | None = None
+TRANSCRIPT_PDF_FONT_LOCK = threading.RLock()
 
 
 def transcript_pdf_font_candidates() -> list[tuple[str, Path]]:
@@ -14912,20 +15163,21 @@ def transcript_export_text(entry: dict[str, Any]) -> str:
 def ensure_transcript_pdf_font() -> str:
     global TRANSCRIPT_PDF_FONT_CACHE
 
-    if TRANSCRIPT_PDF_FONT_CACHE:
-        return TRANSCRIPT_PDF_FONT_CACHE
+    with TRANSCRIPT_PDF_FONT_LOCK:
+        if TRANSCRIPT_PDF_FONT_CACHE:
+            return TRANSCRIPT_PDF_FONT_CACHE
 
-    try:
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("当前环境缺少 reportlab，暂时无法导出 PDF。") from exc
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("当前环境缺少 reportlab，暂时无法导出 PDF。") from exc
 
-    for font_name, font_path in transcript_pdf_font_candidates():
-        if font_path.exists():
-            pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
-            TRANSCRIPT_PDF_FONT_CACHE = font_name
-            return font_name
+        for font_name, font_path in transcript_pdf_font_candidates():
+            if font_path.exists():
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+                TRANSCRIPT_PDF_FONT_CACHE = font_name
+                return font_name
 
     raise RuntimeError("当前电脑没有可用的中文字体文件，暂时无法导出 PDF。")
 
@@ -15034,6 +15286,211 @@ def build_transcript_pdf_buffer(entry: dict[str, Any]) -> tuple[io.BytesIO, str]
     doc.build(story)
     buffer.seek(0)
     return buffer, f"{filename_stem}.pdf"
+
+
+def archive_transcript_pdf(entry: dict[str, Any]) -> Path | None:
+    if not str(entry.get("transcript_text") or "").strip() and not str(entry.get("transcript_html") or "").strip():
+        return None
+
+    pdf_buffer, _ = build_transcript_pdf_buffer(entry)
+    archive_name = f"transcript-{str(entry.get('id') or '').strip()}.pdf"
+    archive_path = TRANSCRIPT_PDF_ARCHIVE_DIR / archive_name
+    TRANSCRIPT_PDF_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        temporary_path.write_bytes(pdf_buffer.getvalue())
+        os.replace(temporary_path, archive_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    entry["pdf_stored_name"] = archive_name
+    entry["pdf_archive_status"] = "ready"
+    entry["pdf_archived_at"] = now_iso()
+    entry["pdf_archive_error"] = ""
+    entry["updated_at"] = now_iso()
+    return archive_path
+
+
+def run_transcript_background_pipeline(transcript_id: str) -> None:
+    TRANSCRIPT_PIPELINE_SEMAPHORE.acquire()
+    try:
+        transcript = load_transcript_entry_snapshot(transcript_id)
+        local_path = transcript_local_path(transcript)
+
+        requires_local_archive = bool(transcript.get("direct_upload_id"))
+
+        if not local_path.exists() and requires_local_archive:
+            bucket_name = str(transcript.get("source_bucket_name") or "").strip()
+            object_key = str(transcript.get("source_object_key") or "").strip()
+            if not bucket_name or not object_key:
+                raise RuntimeError("当前任务既没有本地源文件，也没有可回存的 OSS 对象。")
+
+            transcript["local_archive_status"] = "downloading"
+            transcript["local_archive_attempts"] = int(transcript.get("local_archive_attempts") or 0) + 1
+            transcript["local_archive_error"] = ""
+            transcript["updated_at"] = now_iso()
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+
+            download_payload = download_uploaded_object(
+                bucket_name=bucket_name,
+                object_key=object_key,
+                target_path=local_path,
+                expected_size=int(transcript.get("source_file_size") or 0),
+            )
+            transcript["source_file_size"] = int(download_payload.get("content_length") or local_path.stat().st_size)
+
+        if local_path.exists():
+            transcript["local_archive_status"] = "ready"
+            transcript["local_archived_at"] = transcript.get("local_archived_at") or now_iso()
+            transcript["local_archive_error"] = ""
+            transcript["updated_at"] = now_iso()
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+
+        if bool(transcript.get("auto_process_requested")) and not transcript.get("provider_task_id"):
+            submit_transcript_job_to_tingwu(transcript)
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+        elif (
+            bool(transcript.get("auto_process_requested"))
+            and transcript.get("provider_task_id")
+            and transcript.get("status") in {"queued", "processing"}
+        ):
+            sync_transcript_job_from_tingwu(transcript)
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+
+        if transcript.get("status") == "completed":
+            try:
+                archive_transcript_pdf(transcript)
+            except Exception as exc:
+                transcript["pdf_archive_status"] = "failed"
+                transcript["pdf_archive_error"] = str(exc)[:2000]
+                transcript["updated_at"] = now_iso()
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+    except Exception as exc:
+        try:
+            transcript = load_transcript_entry_snapshot(transcript_id)
+            if transcript.get("direct_upload_id") and not transcript_local_path(transcript).exists():
+                transcript["local_archive_status"] = "failed"
+                transcript["local_archive_error"] = str(exc)[:2000]
+            transcript["last_error"] = str(exc)[:2000]
+            transcript["updated_at"] = now_iso()
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+        except Exception:
+            pass
+    finally:
+        TRANSCRIPT_PIPELINE_SEMAPHORE.release()
+        with TRANSCRIPT_PIPELINE_LOCK:
+            TRANSCRIPT_PIPELINE_ACTIVE_IDS.discard(transcript_id)
+
+
+def queue_transcript_background_pipeline(transcript_id: str) -> bool:
+    normalized_id = str(transcript_id or "").strip()
+    if not normalized_id:
+        return False
+    with TRANSCRIPT_PIPELINE_LOCK:
+        if normalized_id in TRANSCRIPT_PIPELINE_ACTIVE_IDS:
+            return False
+        TRANSCRIPT_PIPELINE_ACTIVE_IDS.add(normalized_id)
+
+    worker = threading.Thread(
+        target=run_transcript_background_pipeline,
+        args=(normalized_id,),
+        daemon=True,
+        name=f"transcript-pipeline-{normalized_id}",
+    )
+    worker.start()
+    return True
+
+
+def maybe_resume_transcript_pipeline_jobs() -> None:
+    if not TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED:
+        return
+    try:
+        with STOCK_STORE_LOCK:
+            store = load_stock_store()
+            reconciled = False
+            for transcript in store.get("transcripts", []):
+                local_path = transcript_local_path(transcript)
+                if transcript.get("direct_upload_id") and local_path.is_file() and transcript.get("local_archive_status") != "ready":
+                    transcript["local_archive_status"] = "ready"
+                    transcript["local_archived_at"] = transcript.get("local_archived_at") or now_iso()
+                    transcript["local_archive_error"] = ""
+                    transcript["updated_at"] = now_iso()
+                    reconciled = True
+
+                pdf_path = transcript_pdf_archive_path(transcript)
+                if pdf_path.is_file() and transcript.get("pdf_archive_status") != "ready":
+                    transcript["pdf_stored_name"] = pdf_path.name
+                    transcript["pdf_archive_status"] = "ready"
+                    transcript["pdf_archived_at"] = transcript.get("pdf_archived_at") or now_iso()
+                    transcript["pdf_archive_error"] = ""
+                    transcript["updated_at"] = now_iso()
+                    reconciled = True
+            if reconciled:
+                save_stock_store(store)
+    except Exception:
+        return
+
+    for transcript in store.get("transcripts", []):
+        transcript_id = str(transcript.get("id") or "").strip()
+        needs_local_archive = (
+            bool(transcript.get("direct_upload_id"))
+            and str(transcript.get("local_archive_status") or "pending") != "ready"
+            and bool(transcript.get("source_bucket_name") and transcript.get("source_object_key"))
+            and not transcript_local_path(transcript).exists()
+        )
+        needs_submit = bool(transcript.get("auto_process_requested")) and not transcript.get("provider_task_id")
+        needs_sync = (
+            bool(transcript.get("auto_process_requested"))
+            and bool(transcript.get("provider_task_id"))
+            and transcript.get("status") in {"queued", "processing"}
+        )
+        needs_pdf = (
+            transcript.get("status") == "completed"
+            and bool(transcript.get("transcript_text") or transcript.get("transcript_html"))
+            and not transcript_pdf_archive_path(transcript).exists()
+        )
+        if transcript_id and (needs_local_archive or needs_submit or needs_sync or needs_pdf):
+            queue_transcript_background_pipeline(transcript_id)
+
+    maybe_start_transcript_pipeline_scheduler()
+
+
+def maybe_start_transcript_pipeline_scheduler() -> None:
+    global TRANSCRIPT_PIPELINE_SCHEDULER_STARTED, TRANSCRIPT_PIPELINE_SCHEDULER_THREAD
+
+    if not TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED:
+        return
+    with TRANSCRIPT_PIPELINE_LOCK:
+        if TRANSCRIPT_PIPELINE_SCHEDULER_STARTED:
+            return
+
+        def scheduler_loop() -> None:
+            while True:
+                time.sleep(max(15, TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS))
+                try:
+                    with STOCK_STORE_LOCK:
+                        store = load_stock_store()
+                        active_ids = [
+                            str(transcript.get("id") or "").strip()
+                            for transcript in store.get("transcripts", [])
+                            if transcript.get("auto_process_requested")
+                            and transcript.get("provider_task_id")
+                            and transcript.get("status") in {"queued", "processing"}
+                        ]
+                    for transcript_id in active_ids:
+                        if transcript_id:
+                            queue_transcript_background_pipeline(transcript_id)
+                except Exception:
+                    pass
+
+        worker = threading.Thread(
+            target=scheduler_loop,
+            daemon=True,
+            name="transcript-pipeline-scheduler",
+        )
+        TRANSCRIPT_PIPELINE_SCHEDULER_THREAD = worker
+        TRANSCRIPT_PIPELINE_SCHEDULER_STARTED = True
+        worker.start()
 
 
 def build_navigation_context(
@@ -31822,12 +32279,79 @@ def transcripts_page() -> str:
         transcript_category_options=TRANSCRIPT_CATEGORY_OPTIONS,
         transcript_status_poll_seconds=TRANSCRIPT_STATUS_POLL_INTERVAL_SECONDS,
         transcript_auto_process_default=TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT,
+        transcript_direct_upload_enabled=(
+            TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED and bool(oss_status.get("is_ready"))
+        ),
+        transcript_background_pipeline_enabled=TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED,
         supported_format_hint=(
             "音频支持 mp3 / wav / m4a / aac / amr / flac，"
             "视频支持 mp4 / mov / mkv / webm / avi 等格式。保存后会先落本机；只有勾选自动处理时才会继续连接 OSS / 听悟。"
         ),
         **page_context,
         **build_navigation_context(active_page="transcripts", stock_store=store),
+    )
+
+
+@app.post("/transcripts/direct-upload/prepare")
+def prepare_transcript_direct_upload():
+    if not TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED:
+        return jsonify({"ok": False, "message": "OSS 浏览器直传当前未启用。"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    original_name = str(payload.get("filename") or "").strip()[:240]
+    content_type = str(payload.get("content_type") or "application/octet-stream").strip()[:160]
+    try:
+        file_size = int(payload.get("size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+
+    if not original_name or not is_transcript_source_allowed(original_name):
+        return jsonify({"ok": False, "message": "文件名或音视频格式不受支持。"}), 400
+    if file_size <= 0 or file_size > int(app.config["MAX_CONTENT_LENGTH"]):
+        return jsonify({"ok": False, "message": "文件大小无效或超过当前上传上限。"}), 400
+
+    origin = str(request.headers.get("Origin") or request.host_url).strip().rstrip("/")
+    parsed_origin = urlparse(origin)
+    if parsed_origin.scheme not in {"http", "https"} or parsed_origin.netloc != request.host:
+        return jsonify({"ok": False, "message": "当前网页来源不允许申请 OSS 上传地址。"}), 403
+
+    transcript_id = uuid.uuid4().hex[:10]
+    upload_id = uuid.uuid4().hex
+    stored_name = build_transcript_stored_name(original_name)
+    try:
+        prepared = prepare_browser_upload(
+            original_name=original_name,
+            transcript_id=transcript_id,
+            content_type=content_type,
+            origin=origin,
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 502
+
+    token_payload = {
+        "version": 1,
+        "upload_id": upload_id,
+        "transcript_id": transcript_id,
+        "stored_name": stored_name,
+        "original_name": original_name,
+        "content_type": content_type,
+        "file_size": file_size,
+        "client_fingerprint": str(payload.get("client_fingerprint") or "").strip()[:240],
+        "bucket_name": str(prepared.get("bucket_name") or ""),
+        "object_key": str(prepared.get("object_key") or ""),
+        "endpoint": str(prepared.get("endpoint") or ""),
+        "region_id": str(prepared.get("region_id") or ""),
+        "prepared_at": now_iso(),
+    }
+    return jsonify(
+        {
+            "ok": True,
+            "upload_id": upload_id,
+            "upload_url": prepared["upload_url"],
+            "upload_headers": prepared.get("upload_headers") or {},
+            "expires_at": prepared.get("expires_at") or "",
+            "token": sign_transcript_direct_upload(token_payload),
+        }
     )
 
 
@@ -31841,14 +32365,35 @@ def create_transcript_job():
     ]
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
-    if not uploaded_files:
+    try:
+        direct_upload_items = parse_transcript_direct_upload_items(
+            request.form.get("direct_upload_payload", "")
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(next_url)
+
+    if direct_upload_items and uploaded_files:
+        flash("直传结果和本地文件不能在同一次请求里混用，请重新选择文件。", "error")
+        return redirect(next_url)
+
+    if direct_upload_items and not TRANSCRIPT_DIRECT_OSS_UPLOAD_ENABLED:
+        flash("OSS 浏览器直传当前未启用，请刷新页面后按本地保存方式上传。", "error")
+        return redirect(next_url)
+
+    if not uploaded_files and not direct_upload_items:
         flash("请先选择要上传的音频或视频文件。", "error")
         return redirect(next_url)
 
-    invalid_filenames = [
+    source_filenames = [
         str(uploaded.filename or "").strip()
         for uploaded in uploaded_files
-        if not is_transcript_source_allowed(str(uploaded.filename or ""))
+    ] or [str(item.get("original_name") or "").strip() for item in direct_upload_items]
+
+    invalid_filenames = [
+        filename
+        for filename in source_filenames
+        if not is_transcript_source_allowed(filename)
     ]
     if invalid_filenames:
         preview_names = "; ".join(invalid_filenames[:3])
@@ -31857,7 +32402,7 @@ def create_transcript_job():
         return redirect(next_url)
 
     file_url_hint = request.form.get("file_url_hint", "").strip()[:2000]
-    if file_url_hint and len(uploaded_files) > 1:
+    if file_url_hint and (len(source_filenames) > 1 or bool(direct_upload_items)):
         flash("批量上传本地文件时，请不要同时填写公网文件地址。这个高级选项目前只适合单个文件。", "error")
         return redirect(next_url)
 
@@ -31922,7 +32467,7 @@ def create_transcript_job():
         summarization_types = ["Paragraph"]
 
     base_title = request.form.get("transcript_title", "").strip()[:160]
-    first_filename_date = infer_date_from_filename(uploaded_files[0].filename)
+    first_filename_date = infer_date_from_filename(source_filenames[0])
     meeting_date_is_manual = request.form.get("meeting_date_is_manual") == "1"
     submitted_meeting_date = normalize_date_field(request.form.get("meeting_date"))
     meeting_date_has_custom_value = bool(submitted_meeting_date and submitted_meeting_date != today_date_iso())
@@ -31931,7 +32476,7 @@ def create_transcript_job():
         if meeting_date_is_manual or meeting_date_has_custom_value
         else (first_filename_date or submitted_meeting_date)
     ) or today_date_iso()
-    is_batch_upload = len(uploaded_files) > 1
+    is_batch_upload = len(source_filenames) > 1
     auto_process_after_upload_raw = request.form.get("auto_process_after_upload")
     auto_process_after_upload = (
         TRANSCRIPT_AUTO_PROCESS_ON_CREATE_DEFAULT
@@ -31955,6 +32500,18 @@ def create_transcript_job():
         "source_endpoint": "",
         "source_region_id": "",
         "source_url_expires_at": "",
+        "direct_upload_id": "",
+        "source_file_size": 0,
+        "source_file_etag": "",
+        "local_archive_status": "ready",
+        "local_archive_attempts": 0,
+        "local_archived_at": now_iso(),
+        "local_archive_error": "",
+        "auto_process_requested": auto_process_after_upload,
+        "pdf_stored_name": "",
+        "pdf_archive_status": "pending",
+        "pdf_archived_at": "",
+        "pdf_archive_error": "",
         "linked_symbol": linked_symbols[0] if linked_symbols else "",
         "linked_symbols": linked_symbols,
         "category": transcript_category,
@@ -31978,28 +32535,63 @@ def create_transcript_job():
         "tags": normalize_tag_list(request.form.get("transcript_tags", "")),
     }
 
-    tingwu_status = build_tingwu_status() if auto_process_after_upload else {"is_ready": False}
-    oss_status = build_oss_status() if auto_process_after_upload else {"is_ready": False, "bridge_ready": False}
+    use_background_processing = auto_process_after_upload and TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED
+    tingwu_status = (
+        build_tingwu_status()
+        if auto_process_after_upload and not use_background_processing
+        else {"is_ready": False}
+    )
+    oss_status = (
+        build_oss_status()
+        if auto_process_after_upload and not use_background_processing
+        else {"is_ready": False, "bridge_ready": False}
+    )
     normalized_transcripts: list[dict[str, Any]] = []
     auto_submitted_count = 0
     auto_source_ready_count = 0
     auto_submit_errors: list[str] = []
+    background_pipeline_ids: list[str] = []
 
     TRANSCRIPT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-    for uploaded in uploaded_files:
-        original_name = str(uploaded.filename or "").strip()
-        safe_name = secure_filename(original_name)
-        original_suffix = Path(original_name).suffix.lower()
-        if not safe_name:
-            safe_name = f"meeting-recording{original_suffix or '.bin'}"
-        elif original_suffix and not safe_name.lower().endswith(original_suffix):
-            safe_name = f"{Path(safe_name).stem}{original_suffix}"
+    if direct_upload_items:
+        existing_upload_ids = {
+            str(item.get("direct_upload_id") or "").strip()
+            for item in store.get("transcripts", [])
+            if str(item.get("direct_upload_id") or "").strip()
+        }
+        direct_upload_items = [
+            item
+            for item in direct_upload_items
+            if str(item.get("upload_id") or "").strip() not in existing_upload_ids
+        ]
+        if not direct_upload_items:
+            flash("这些直传文件对应的转录任务已经创建，无需重复上传。", "success")
+            return redirect(next_url)
 
+    upload_items: list[dict[str, Any]] = (
+        [{"mode": "local", "uploaded": uploaded} for uploaded in uploaded_files]
+        if uploaded_files
+        else [{"mode": "direct", "payload": item} for item in direct_upload_items]
+    )
+
+    for upload_item in upload_items:
+        direct_payload = upload_item.get("payload") if upload_item["mode"] == "direct" else None
+        uploaded = upload_item.get("uploaded")
+        original_name = (
+            str(direct_payload.get("original_name") or "").strip()
+            if isinstance(direct_payload, dict)
+            else str(uploaded.filename or "").strip()
+        )
         timestamp = now_iso()
-        stored_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{safe_name}"
+        stored_name = (
+            str(direct_payload.get("stored_name") or "").strip()
+            if isinstance(direct_payload, dict)
+            else build_transcript_stored_name(original_name)
+        )
         target_path = TRANSCRIPT_UPLOADS_DIR / stored_name
-        uploaded.save(target_path)
+        if uploaded is not None:
+            uploaded.save(target_path)
 
         transcript_title = base_title
         if is_batch_upload and transcript_title:
@@ -32008,7 +32600,11 @@ def create_transcript_job():
                 transcript_title = f"{transcript_title} - {title_suffix}"[:160]
 
         transcript_entry = {
-            "id": uuid.uuid4().hex[:10],
+            "id": (
+                str(direct_payload.get("transcript_id") or "").strip()
+                if isinstance(direct_payload, dict)
+                else uuid.uuid4().hex[:10]
+            ),
             "title": transcript_title,
             "meeting_date": resolved_meeting_date or iso_to_date(timestamp) or today_date_iso(),
             "created_at": timestamp,
@@ -32018,6 +32614,23 @@ def create_transcript_job():
             "media_kind": detect_transcript_media_kind(original_name),
             **deepcopy(transcript_base_payload),
         }
+        if isinstance(direct_payload, dict):
+            transcript_entry.update(
+                {
+                    "file_url_hint": "",
+                    "source_bucket_name": str(direct_payload.get("bucket_name") or ""),
+                    "source_object_key": str(direct_payload.get("object_key") or ""),
+                    "source_endpoint": str(direct_payload.get("endpoint") or ""),
+                    "source_region_id": str(direct_payload.get("region_id") or ""),
+                    "direct_upload_id": str(direct_payload.get("upload_id") or ""),
+                    "source_file_size": int(direct_payload.get("file_size") or 0),
+                    "source_file_etag": "",
+                    "local_archive_status": "pending",
+                    "local_archived_at": "",
+                }
+            )
+        elif target_path.exists():
+            transcript_entry["source_file_size"] = target_path.stat().st_size
 
         normalized_transcript = normalize_transcript_entry(transcript_entry)
         if normalized_transcript is None:
@@ -32028,6 +32641,7 @@ def create_transcript_job():
         auto_source_ready = False
         if (
             auto_process_after_upload
+            and not use_background_processing
             and tingwu_status["is_ready"]
             and not normalized_transcript["file_url_hint"]
             and oss_status["is_ready"]
@@ -32042,6 +32656,7 @@ def create_transcript_job():
 
         if (
             auto_process_after_upload
+            and not use_background_processing
             and tingwu_status["is_ready"]
             and (normalized_transcript["file_url_hint"] or normalized_transcript["source_object_key"])
         ):
@@ -32059,6 +32674,8 @@ def create_transcript_job():
             auto_submit_errors.append(f"{original_name or '未命名文件'}: {auto_submit_error}")
 
         normalized_transcripts.append(normalized_transcript)
+        if isinstance(direct_payload, dict) or use_background_processing:
+            background_pipeline_ids.append(normalized_transcript["id"])
 
     if not normalized_transcripts:
         flash("转录任务写入失败，请重试。", "error")
@@ -32072,10 +32689,19 @@ def create_transcript_job():
             touch_transcript_stocks(store, transcript)
         save_stock_store(store)
 
+    for transcript_id in background_pipeline_ids:
+        queue_transcript_background_pipeline(transcript_id)
+
     if len(normalized_transcripts) == 1:
         normalized_transcript = normalized_transcripts[0]
-        if not auto_process_after_upload:
+        if direct_upload_items and auto_process_after_upload:
+            flash("文件已直传 OSS，任务已保存。Mac 正在后台回存音频，完成后会自动提交听悟。", "success")
+        elif direct_upload_items:
+            flash("文件已直传 OSS，任务已保存。Mac 正在后台回存音频；你可以稍后再提交听悟。", "success")
+        elif not auto_process_after_upload:
             flash("会议转录任务已保存到本机。为了让远程访问更稳定，这次没有在上传请求里直接连接 OSS 或听悟；稍后可以手动点“提交到听悟”。", "success")
+        elif use_background_processing:
+            flash("会议转录任务已保存到本机，OSS 上传和听悟提交已转到后台处理。", "success")
         elif auto_submitted_count:
             flash("会议转录任务已保存，并已提交到听悟。后续请用“刷新状态”主动轮询结果。", "success")
         elif auto_submit_errors:
@@ -32088,8 +32714,12 @@ def create_transcript_job():
             flash("会议转录任务已保存。系统还没拿到可用的云端地址，稍后可以直接点“提交到听悟”再试。", "success")
     else:
         flash(f"已批量保存 {len(normalized_transcripts)} 个会议转录任务。", "success")
-        if not auto_process_after_upload:
+        if direct_upload_items:
+            flash("文件已直传 OSS，Mac 正在后台逐个回存；处理失败不会删除云端副本。", "success")
+        elif not auto_process_after_upload:
             flash("这批任务目前只保存在本机，适合 Cloudflare tunnel 或网络不稳时先落地再处理。", "success")
+        elif use_background_processing:
+            flash("这批任务已保存，OSS 上传和听悟提交正在后台执行。", "success")
         elif auto_submitted_count:
             flash(f"其中 {auto_submitted_count} 个任务已自动提交到听悟。", "success")
         elif auto_source_ready_count:
@@ -32108,6 +32738,19 @@ def create_transcript_job():
 def submit_transcript_job(transcript_id: str):
     next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
 
+    if TRANSCRIPT_BACKGROUND_PIPELINE_ENABLED:
+        try:
+            transcript = load_transcript_entry_snapshot(transcript_id)
+            transcript["auto_process_requested"] = True
+            transcript["last_error"] = ""
+            transcript["updated_at"] = now_iso()
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+            queue_transcript_background_pipeline(transcript_id)
+            flash("任务已进入后台队列。页面可以关闭，Mac 会继续完成本地归档、OSS 和听悟提交。", "success")
+        except Exception as exc:
+            flash(f"后台任务启动失败：{exc}", "error")
+        return redirect(next_url)
+
     try:
         transcript = load_transcript_entry_snapshot(transcript_id)
         submit_transcript_job_to_tingwu(transcript)
@@ -32120,6 +32763,23 @@ def submit_transcript_job(transcript_id: str):
             pass
         flash(f"提交到听悟失败：{exc}", "error")
 
+    return redirect(next_url)
+
+
+@app.post("/transcripts/<transcript_id>/retry-pipeline")
+def retry_transcript_pipeline(transcript_id: str):
+    next_url = safe_next_url(request.form.get("next_url"), url_for("transcripts_page"))
+    try:
+        transcript = load_transcript_entry_snapshot(transcript_id)
+        transcript["local_archive_error"] = ""
+        transcript["pdf_archive_error"] = ""
+        transcript["last_error"] = ""
+        transcript["updated_at"] = now_iso()
+        persist_transcript_cloud_snapshot(transcript_id, transcript)
+        started = queue_transcript_background_pipeline(transcript_id)
+        flash("后台归档任务已重新启动。" if started else "后台归档任务已经在运行。", "success")
+    except Exception as exc:
+        flash(f"重新启动后台归档失败：{exc}", "error")
     return redirect(next_url)
 
 
@@ -32236,6 +32896,12 @@ def sync_active_transcripts():
 def download_transcript_source(transcript_id: str):
     store = load_stock_store()
     transcript = get_transcript_entry(store, transcript_id)
+    source_path = transcript_local_path(transcript)
+    if not source_path.exists():
+        if transcript.get("source_bucket_name") and transcript.get("source_object_key"):
+            queue_transcript_background_pipeline(transcript_id)
+            abort(409, description="源文件正在从 OSS 回存到 Mac，请稍后刷新页面再下载。")
+        abort(404, description="Mac 上找不到这份源文件。")
     return send_from_directory(
         TRANSCRIPT_UPLOADS_DIR,
         transcript["stored_name"],
@@ -32391,14 +33057,20 @@ def export_transcript_pdf(transcript_id: str):
     transcript = get_transcript_entry(store, transcript_id)
 
     try:
-        pdf_buffer, download_name = build_transcript_pdf_buffer(transcript)
+        archive_path = transcript_pdf_archive_path(transcript)
+        if not archive_path.exists():
+            archive_path = archive_transcript_pdf(transcript)
+            if archive_path is None:
+                raise RuntimeError("当前转录还没有可归档的正文内容。")
+            persist_transcript_cloud_snapshot(transcript_id, transcript)
+        _, download_name = build_transcript_pdf_buffer(transcript)
     except RuntimeError as exc:
         flash(str(exc), "error")
         next_url = request.args.get("next") or url_for("transcripts_page")
         return redirect(safe_next_url(next_url, url_for("transcripts_page")))
 
     return send_file(
-        pdf_buffer,
+        archive_path,
         mimetype="application/pdf",
         as_attachment=True,
         download_name=download_name,
@@ -33328,6 +34000,32 @@ def raw_report(filename: str):
 @app.get("/favicon.ico")
 def favicon():
     return send_from_directory(app.static_folder, "mindmap-studio-favicon.svg", mimetype="image/svg+xml")
+
+register_expert_portfolio_routes(
+    app,
+    SimpleNamespace(
+        get_expert_portfolio_store_path=lambda: EXPERT_PORTFOLIO_STORE_PATH,
+        write_json_atomic=write_json_atomic,
+        build_navigation_context=build_navigation_context,
+        load_stock_store=load_stock_store,
+        get_stock_store_signature=get_stock_store_signature,
+        get_stock_store_path=lambda: STOCK_STORE_PATH,
+        get_expert_intake_provider_config_path=lambda: EXPERT_INTAKE_PROVIDER_CONFIG_PATH,
+        get_outlook_calendar_config_path=lambda: OUTLOOK_CALENDAR_CONFIG_PATH,
+        get_outlook_calendar_cache_path=lambda: OUTLOOK_CALENDAR_CACHE_PATH,
+        get_expert_interview_link_cache_path=lambda: EXPERT_INTERVIEW_LINK_CACHE_PATH,
+        now_iso=now_iso,
+        safe_next_url=safe_next_url,
+        is_visitor_mode=is_visitor_mode,
+    ),
+)
+
+register_expert_intake_routes(
+    app,
+    SimpleNamespace(
+        get_expert_intake_provider_config_path=lambda: EXPERT_INTAKE_PROVIDER_CONFIG_PATH,
+    ),
+)
 
 register_schedule_routes(
     app,

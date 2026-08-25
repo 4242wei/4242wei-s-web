@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import oss2
-from oss2.exceptions import NoSuchBucket, OssError
+from oss2.exceptions import NoSuchBucket, NoSuchCors, OssError
+from oss2.models import BucketCors, CorsRule
 
 OSS_REGION_ID = "cn-beijing"
 OSS_ENDPOINT_TEMPLATE = "https://oss-{region_id}.aliyuncs.com"
@@ -25,9 +26,13 @@ OSS_SIGNED_URL_EXPIRES = 7 * 24 * 60 * 60
 OSS_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 OSS_PART_SIZE = 8 * 1024 * 1024
 OSS_UPLOAD_RETRIES = 3
+OSS_DOWNLOAD_RETRIES = 3
+OSS_BROWSER_UPLOAD_URL_EXPIRES = 30 * 60
 OSS_CHECKPOINT_DIR = Path(__file__).resolve().parent / "data" / ".oss-checkpoints"
 OSS_STATUS_CACHE_TTL_SECONDS = 300
 OSS_BRIDGE_CACHE_LOCK = threading.RLock()
+OSS_CORS_CACHE_LOCK = threading.RLock()
+OSS_CORS_READY_ORIGINS: set[tuple[str, str]] = set()
 OSS_BRIDGE_CACHE: dict[str, Any] = {
     "key": None,
     "expires_at": 0.0,
@@ -305,6 +310,180 @@ def build_signed_url(*, bucket_name: str, object_key: str, config: OssConfig | N
         "file_url": signed_url,
         "expires_at": expires_at,
     }
+
+
+def normalize_browser_upload_origin(value: str) -> str:
+    origin = str(value or "").strip().rstrip("/")
+    if not re.fullmatch(r"https?://[^/\s]+", origin):
+        raise RuntimeError("浏览器上传来源地址无效。")
+    return origin
+
+
+def ensure_browser_upload_cors(
+    bucket: oss2.Bucket,
+    *,
+    bucket_name: str,
+    origin: str,
+) -> None:
+    normalized_origin = normalize_browser_upload_origin(origin)
+    cache_key = (bucket_name, normalized_origin)
+    with OSS_CORS_CACHE_LOCK:
+        if cache_key in OSS_CORS_READY_ORIGINS:
+            return
+
+    try:
+        current_rules = list(bucket.get_bucket_cors().rules or [])
+    except NoSuchCors:
+        current_rules = []
+    except OssError as exc:
+        if getattr(exc, "status", None) == 404:
+            current_rules = []
+        else:
+            raise RuntimeError(humanize_oss_exception(exc)) from exc
+
+    for rule in current_rules:
+        allowed_origins = set(getattr(rule, "allowed_origins", []) or [])
+        allowed_methods = {str(method).upper() for method in (getattr(rule, "allowed_methods", []) or [])}
+        if normalized_origin in allowed_origins and "PUT" in allowed_methods:
+            with OSS_CORS_CACHE_LOCK:
+                OSS_CORS_READY_ORIGINS.add(cache_key)
+            return
+
+    current_rules.append(
+        CorsRule(
+            allowed_origins=[normalized_origin],
+            allowed_methods=["PUT", "GET", "HEAD"],
+            allowed_headers=["*"],
+            expose_headers=["ETag", "x-oss-request-id"],
+            max_age_seconds=3600,
+        )
+    )
+    try:
+        bucket.put_bucket_cors(BucketCors(rules=current_rules))
+    except OssError as exc:
+        raise RuntimeError(humanize_oss_exception(exc)) from exc
+
+    with OSS_CORS_CACHE_LOCK:
+        OSS_CORS_READY_ORIGINS.add(cache_key)
+
+
+def prepare_browser_upload(
+    *,
+    original_name: str,
+    transcript_id: str,
+    content_type: str | None,
+    origin: str,
+    config: OssConfig | None = None,
+) -> dict[str, Any]:
+    active_config = config or load_oss_config()
+    if not active_config.is_ready:
+        raise RuntimeError("阿里云 OSS 凭证尚未配置完成。")
+
+    bucket_info = ensure_bucket(active_config)
+    bucket = bucket_info["bucket"]
+    ensure_browser_upload_cors(
+        bucket,
+        bucket_name=bucket_info["bucket_name"],
+        origin=origin,
+    )
+
+    object_key = build_object_key(transcript_id=transcript_id, original_name=original_name)
+    resolved_content_type = content_type or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+    headers = {"Content-Type": resolved_content_type}
+    expires = OSS_BROWSER_UPLOAD_URL_EXPIRES
+    upload_url = bucket.sign_url(
+        "PUT",
+        object_key,
+        expires,
+        headers=headers,
+        slash_safe=True,
+    )
+    expires_at = (datetime.utcnow() + timedelta(seconds=expires)).replace(microsecond=0).isoformat() + "Z"
+    return {
+        "bucket_name": bucket_info["bucket_name"],
+        "object_key": object_key,
+        "endpoint": active_config.endpoint,
+        "region_id": active_config.region_id,
+        "upload_url": upload_url,
+        "upload_headers": headers,
+        "expires_at": expires_at,
+    }
+
+
+def inspect_uploaded_object(
+    *,
+    bucket_name: str,
+    object_key: str,
+    config: OssConfig | None = None,
+) -> dict[str, Any]:
+    active_config = config or load_oss_config()
+    if not active_config.is_ready:
+        raise RuntimeError("阿里云 OSS 凭证尚未配置完成。")
+
+    bucket = create_bucket_client(active_config, bucket_name=bucket_name)
+    try:
+        metadata = bucket.get_object_meta(object_key)
+    except OssError as exc:
+        raise RuntimeError(humanize_oss_exception(exc)) from exc
+
+    return {
+        "content_length": int(getattr(metadata, "content_length", 0) or 0),
+        "etag": str(getattr(metadata, "etag", "") or "").strip('"'),
+        "content_type": str(getattr(metadata, "content_type", "") or ""),
+        "last_modified": int(getattr(metadata, "last_modified", 0) or 0),
+    }
+
+
+def download_uploaded_object(
+    *,
+    bucket_name: str,
+    object_key: str,
+    target_path: str | Path,
+    expected_size: int = 0,
+    config: OssConfig | None = None,
+) -> dict[str, Any]:
+    active_config = config or load_oss_config()
+    if not active_config.is_ready:
+        raise RuntimeError("阿里云 OSS 凭证尚未配置完成。")
+
+    destination = Path(target_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = destination.with_name(f".{destination.name}.oss-download.part")
+    checkpoint_store = oss2.ResumableStore(root=str(OSS_CHECKPOINT_DIR))
+    OSS_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    bucket = create_bucket_client(active_config, bucket_name=bucket_name)
+
+    last_exception: BaseException | None = None
+    for attempt in range(1, OSS_DOWNLOAD_RETRIES + 1):
+        try:
+            oss2.resumable_download(
+                bucket,
+                object_key,
+                str(partial_path),
+                store=checkpoint_store,
+                multiget_threshold=OSS_MULTIPART_THRESHOLD,
+                part_size=OSS_PART_SIZE,
+                num_threads=1,
+            )
+            actual_size = partial_path.stat().st_size
+            if expected_size and actual_size != expected_size:
+                raise RuntimeError(
+                    f"OSS 回存文件大小不一致：预期 {expected_size} 字节，实际 {actual_size} 字节。"
+                )
+            os.replace(partial_path, destination)
+            return {
+                "content_length": actual_size,
+                "path": str(destination),
+            }
+        except Exception as exc:
+            last_exception = exc
+            if attempt >= OSS_DOWNLOAD_RETRIES:
+                break
+            time.sleep(attempt)
+
+    if last_exception is not None:
+        raise RuntimeError(humanize_oss_exception(last_exception)) from last_exception
+    raise RuntimeError("从 OSS 回存源文件失败。")
 
 
 def delete_uploaded_object(*, bucket_name: str, object_key: str, config: OssConfig | None = None) -> None:

@@ -2,9 +2,28 @@
   (function () {
     try {
       var savedTheme = window.localStorage.getItem("workspace-theme") || "seaside-blue-hour";
+      var retiredThemes = {
+        "harbor-mist": "sky-confetti",
+        "verdigris-studio": "citrus-bloom",
+        "midnight-ember": "aurora-glass",
+        "spring-moss": "cherry-picnic",
+        "plum-rain": "lavender-soda",
+        "jiangnan-drizzle": "tidal-spark",
+        "westlake-spring": "westlake-snow",
+        "westlake-summer": "westlake-snow",
+        "westlake-autumn": "westlake-snow",
+        "westlake-winter": "westlake-snow"
+      };
+      if (retiredThemes[savedTheme]) {
+        savedTheme = retiredThemes[savedTheme];
+        window.localStorage.setItem("workspace-theme", savedTheme);
+      }
+      var savedMotion = window.localStorage.getItem("workspace-theme-motion") === "off" ? "off" : "on";
       document.documentElement.setAttribute("data-theme", savedTheme);
+      document.documentElement.setAttribute("data-theme-motion", savedMotion);
     } catch (error) {
       document.documentElement.setAttribute("data-theme", "seaside-blue-hour");
+      document.documentElement.setAttribute("data-theme-motion", "on");
     }
   })();
 </script>

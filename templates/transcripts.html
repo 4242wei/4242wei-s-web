@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
   <script src="{{ url_for('static', filename='stock-workspace.js') }}" defer></script>
 <script src="{{ url_for('static', filename='stock-detail-reader.js', v='20260411-reader-dom-stable1') }}" defer></script>
-  <script src="{{ url_for('static', filename='transcript-page.js', v='20260323-categoryfilter3') }}" defer></script>
+  <script src="{{ url_for('static', filename='transcript-page.js', v='20260807-stableupload1') }}" defer></script>
 </head>
 <body>
   <div class="page-shell">
@@ -104,6 +104,7 @@
           <div class="scroll-expander-list transcript-featured-list" data-transcript-completed-list>
             {% for transcript in completed_transcripts %}
               <details
+                id="transcript-{{ transcript.id }}"
                 class="expander scroll-expander-card transcript-content-expander"
                 data-transcript-card
                 data-transcript-id="{{ transcript.id }}"
@@ -200,7 +201,21 @@
                     {% if transcript.has_transcript_content %}
                       <a class="text-link" href="{{ url_for('export_transcript_pdf', transcript_id=transcript.id, next=url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page')) }}">导出 PDF</a>
                     {% endif %}
-                    <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                    {% if transcript.has_local_source %}
+                      <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载 Mac 音频</a>
+                    {% elif transcript.local_archive_status in ['pending', 'downloading'] %}
+                      <span class="section-caption">Mac 音频归档中</span>
+                    {% elif transcript.local_archive_status == 'failed' %}
+                      <span class="section-caption">Mac 音频回存失败</span>
+                    {% else %}
+                      <span class="section-caption">这条历史记录没有 Mac 音频</span>
+                    {% endif %}
+                    {% if transcript.local_archive_status == 'failed' or transcript.pdf_archive_status == 'failed' %}
+                      <form action="{{ url_for('retry_transcript_pipeline', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                        <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
+                        <button class="text-button" type="submit">重试本地归档</button>
+                      </form>
+                    {% endif %}
                     <button
                       class="button button-secondary button-compact"
                       type="button"
@@ -303,6 +318,7 @@
           <div class="record-stack" data-transcript-queue-list>
             {% for transcript in queue_transcripts %}
               <article
+                id="transcript-{{ transcript.id }}"
                 class="record-card transcript-record-card"
                 data-transcript-card
                 data-transcript-id="{{ transcript.id }}"
@@ -412,7 +428,21 @@
                     {% if transcript.has_transcript_content %}
                       <a class="text-link" href="{{ url_for('export_transcript_pdf', transcript_id=transcript.id, next=url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page')) }}">导出 PDF</a>
                     {% endif %}
-                    <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载源文件</a>
+                    {% if transcript.has_local_source %}
+                      <a class="text-link" href="{{ url_for('download_transcript_source', transcript_id=transcript.id) }}">下载 Mac 音频</a>
+                    {% elif transcript.local_archive_status in ['pending', 'downloading'] %}
+                      <span class="section-caption">Mac 音频归档中</span>
+                    {% elif transcript.local_archive_status == 'failed' %}
+                      <span class="section-caption">Mac 音频回存失败</span>
+                    {% else %}
+                      <span class="section-caption">这条历史记录没有 Mac 音频</span>
+                    {% endif %}
+                    {% if transcript.local_archive_status == 'failed' or transcript.pdf_archive_status == 'failed' %}
+                      <form action="{{ url_for('retry_transcript_pipeline', transcript_id=transcript.id) }}" method="post" data-preserve-scroll>
+                        <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
+                        <button class="text-button" type="submit">重试本地归档</button>
+                      </form>
+                    {% endif %}
                     <span class="section-caption">{{ transcript.source_status_detail }}</span>
                 </div>
 
@@ -594,6 +624,8 @@
           data-preserve-scroll
           data-transcript-form
           data-known-stock-symbols="{% for stock in stock_options %}{{ stock.symbol }}{% if not loop.last %};{% endif %}{% endfor %}"
+          data-direct-upload-enabled="{{ 'true' if transcript_direct_upload_enabled else 'false' }}"
+          data-direct-upload-prepare-url="{{ url_for('prepare_transcript_direct_upload') }}"
         >
           <input type="hidden" name="next_url" value="{{ url_for('transcripts_page', symbol=preferred_symbol) if preferred_symbol else url_for('transcripts_page') }}">
 
@@ -833,12 +865,15 @@
               <input
                 name="auto_process_after_upload"
                 type="checkbox"
-                {% if transcript_auto_process_default %}checked{% endif %}
+                {% if transcript_auto_process_default or (transcript_direct_upload_enabled and transcript_background_pipeline_enabled) %}checked{% endif %}
               >
-              <span>保存后立即上传到 OSS 并提交到听悟</span>
+              <span>{% if transcript_direct_upload_enabled %}直传后由 Mac 后台归档并提交听悟{% else %}保存后立即上传到 OSS 并提交到听悟{% endif %}</span>
             </label>
             <button class="button button-primary" type="submit">保存转录任务</button>
-            {% if tingwu_status.is_ready and oss_status.bridge_ready %}
+            <span class="section-caption" data-direct-upload-progress hidden></span>
+            {% if transcript_direct_upload_enabled %}
+              <span class="section-caption">稳定上传已启用：文件直接进入 OSS，任务立即登记；Mac 后台回存音频，转录完成后自动归档 PDF。失败时不会删除 OSS 副本。</span>
+            {% elif tingwu_status.is_ready and oss_status.bridge_ready %}
               <span class="section-caption">当前机器已检测到听悟和 OSS 配置。远程通过 Cloudflare tunnel 使用时，建议先不要勾选上面的自动处理，只把文件稳稳保存到本机；等任务落地后，再手动点“提交到听悟”会更稳。</span>
             {% elif tingwu_status.is_ready and oss_status.error_message %}
               <span class="section-caption">听悟配置已经就绪，但 OSS 自动上传暂时不可用。远程场景下更建议先保存本地任务，后面再补 FileUrl 或单独处理接入状态。</span>
@@ -860,4 +895,3 @@
   </div>
 </body>
 </html>
-

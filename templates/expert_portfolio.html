@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>专家组合管理</title>
+  {% include "_theme_bootstrap.html" %}
+  <link rel="stylesheet" href="{{ static_asset_url('style.css') }}">
+  <script src="{{ static_asset_url('expert-portfolio.js') }}" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    {% include "_masthead.html" %}
+
+    <section class="stock-hero panel expert-portfolio-hero">
+      <div class="stock-hero-copy">
+        <p class="eyebrow">专家组合</p>
+        <h2>专家组合管理</h2>
+        <p class="story-dek">按行业、规模与地区长期跟踪专家，并把每次访谈和语音转录勾稽在同一档案中。</p>
+        <div class="story-actions">
+          <button class="button button-primary" type="button" data-dialog-open="expert-portfolio-add-dialog" {% if is_visitor_mode %}disabled{% endif %}>新增专家</button>
+          <a class="button button-secondary" href="{{ url_for('export_expert_portfolio_interview_quota') }}">导出访谈表格</a>
+          <button class="button button-secondary" type="button" data-dialog-open="expert-portfolio-quota-dialog">已访谈信息</button>
+          <a class="button button-secondary" href="{{ url_for('export_expert_portfolio_json') }}">导出 JSON</a>
+          <button class="button button-ghost" type="button" data-dialog-open="expert-portfolio-json-dialog" {% if is_visitor_mode %}disabled{% endif %}>导入 JSON</button>
+        </div>
+        {% if is_visitor_mode %}
+          <p class="section-caption">访客模式仅开放查看、筛选与导出，编辑和导入功能已隐藏。</p>
+        {% endif %}
+      </div>
+
+      <div class="expert-portfolio-calendar-launch">
+        <button class="expert-portfolio-calendar-button" type="button" data-dialog-open="expert-portfolio-calendar-dialog">
+          <span class="expert-portfolio-calendar-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v3M17 3v3M4.5 9h15M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>
+          </span>
+          <span class="expert-portfolio-calendar-button-copy">
+            <strong>访谈日程</strong>
+            <small data-calendar-button-summary>查看本周安排</small>
+          </span>
+        </button>
+        <button class="expert-portfolio-calendar-button expert-portfolio-ai-intake-button" type="button" data-dialog-open="expert-intake-dialog" {% if is_visitor_mode %}disabled{% endif %}>
+          <span class="expert-portfolio-calendar-icon" aria-hidden="true">AI</span>
+          <span class="expert-portfolio-calendar-button-copy">
+            <strong>AI填写</strong>
+            <small>粘贴资料，自动识别</small>
+          </span>
+        </button>
+      </div>
+
+      <aside class="stock-hero-aside expert-portfolio-hero-stats">
+        <article class="mini-fact"><span class="mini-label">专家总数</span><strong data-portfolio-stat="total">{{ portfolio_stats.total }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">访谈记录</span><strong data-portfolio-stat="interviews">{{ portfolio_stats.interviews }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">已安排</span><strong data-portfolio-stat="scheduled">{{ portfolio_stats.scheduled }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">已完成</span><strong data-portfolio-stat="completed">{{ portfolio_stats.completed }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">覆盖行业</span><strong data-portfolio-stat="industries">{{ portfolio_stats.industries }}</strong></article>
+        <article class="mini-fact"><span class="mini-label">覆盖地区</span><strong data-portfolio-stat="regions">{{ portfolio_stats.regions }}</strong></article>
+      </aside>
+    </section>
+
+    <section class="expert-portfolio-toolbar panel" aria-label="专家组合工具栏">
+      <label class="expert-portfolio-search">
+        <span class="sr-only">搜索专家</span>
+        <input type="search" placeholder="搜索姓名、公司、职位、供应商或关键词…" data-portfolio-search autocomplete="off">
+      </label>
+      <div class="expert-portfolio-toolbar-meta">
+        <span>当前显示 <strong data-portfolio-visible-count>{{ portfolio_stats.total }}</strong> 位</span>
+        <button class="button button-ghost button-compact" type="button" data-portfolio-clear>清除筛选</button>
+        <button class="button button-secondary button-compact" type="button" data-dialog-open="expert-portfolio-category-dialog" {% if is_visitor_mode %}disabled{% endif %}>管理分类</button>
+      </div>
+    </section>
+
+    <main class="expert-portfolio-layout" data-expert-portfolio-root data-readonly="{{ 'true' if is_visitor_mode else 'false' }}">
+      <aside class="panel expert-portfolio-filters" aria-label="专家筛选">
+        <section class="expert-portfolio-filter-group">
+          <div class="expert-portfolio-filter-head"><span>视图</span></div>
+          <button class="expert-portfolio-filter is-active" type="button" data-filter-kind="all" data-filter-value="">
+            <span>全部专家</span><strong>{{ portfolio_stats.total }}</strong>
+          </button>
+          <button class="expert-portfolio-filter" type="button" data-filter-kind="needs-review" data-filter-value="1">
+            <span>资料待核对</span><strong>{{ portfolio_stats.needs_review }}</strong>
+          </button>
+          <button class="expert-portfolio-filter" type="button" data-filter-kind="multiple-interviews" data-filter-value="1">
+            <span>多次访谈</span><strong>{{ portfolio_stats.multiple_interviews }}</strong>
+          </button>
+        </section>
+
+        <section class="expert-portfolio-filter-group">
+          <div class="expert-portfolio-filter-head"><span>行业</span></div>
+          {% for industry, count in portfolio_industry_counts %}
+            <button class="expert-portfolio-filter" type="button" data-filter-kind="industry" data-filter-value="{{ industry|lower }}">
+              <span>{{ industry }}</span><strong>{{ count }}</strong>
+            </button>
+          {% else %}
+            <p class="section-caption">暂无行业数据。</p>
+          {% endfor %}
+        </section>
+
+        <section class="expert-portfolio-filter-group">
+          <div class="expert-portfolio-filter-head"><span>地区</span></div>
+          {% for region, count in portfolio_region_counts %}
+            <button class="expert-portfolio-filter" type="button" data-filter-kind="region" data-filter-value="{{ region|lower }}">
+              <span>{{ region }}</span><strong>{{ count }}</strong>
+            </button>
+          {% endfor %}
+        </section>
+
+        <section class="expert-portfolio-filter-group">
+          <div class="expert-portfolio-filter-head"><span>企业规模</span></div>
+          {% for scale, count in portfolio_scale_counts %}
+            <button class="expert-portfolio-filter" type="button" data-filter-kind="scale" data-filter-value="{{ scale|lower }}">
+              <span>{{ scale }}</span><strong>{{ count }}</strong>
+            </button>
+          {% endfor %}
+        </section>
+
+        <section class="expert-portfolio-filter-group">
+          <div class="expert-portfolio-filter-head"><span>推进状态</span></div>
+          {% for option in portfolio_status_options %}
+            {% set count = portfolio_status_counts.get(option.value, 0) %}
+            {% if count or option.value == 'not-reviewed' %}
+              <button class="expert-portfolio-filter" type="button" data-filter-kind="status" data-filter-value="{{ option.value }}">
+                <span>{{ option.label }}</span><strong>{{ count }}</strong>
+              </button>
+            {% endif %}
+          {% endfor %}
+        </section>
+
+      </aside>
+
+      <section class="panel expert-portfolio-table-panel">
+        <div class="section-header expert-portfolio-table-head">
+          <div>
+            <p class="eyebrow">专家名册</p>
+            <h3>候选与访谈组合</h3>
+            <p class="section-caption">点击表头排序；点击专家行打开完整档案。</p>
+          </div>
+          <span class="summary-count">{{ portfolio_stats.total }}</span>
+        </div>
+
+        <div class="expert-portfolio-table-scroll">
+          <table class="expert-portfolio-table">
+            <thead>
+              <tr>
+                <th class="expert-portfolio-sequence-column"><button type="button" data-sort-key="record-id">序号</button></th>
+                <th><button type="button" data-sort-key="name">姓名</button></th>
+                <th><button type="button" data-sort-key="employer">当前机构</button></th>
+                <th><button type="button" data-sort-key="industry">行业</button></th>
+                <th><button type="button" data-sort-key="scale">规模</button></th>
+                <th><button type="button" data-sort-key="region">地区</button></th>
+                <th><button type="button" data-sort-key="interviews">访谈记录</button></th>
+                <th><button type="button" data-sort-key="status">状态</button></th>
+                <th><button type="button" data-sort-key="title">职位</button></th>
+              </tr>
+            </thead>
+            <tbody data-portfolio-table-body>
+              {% for expert in portfolio_experts %}
+                <tr
+                  class="expert-portfolio-row"
+                  tabindex="0"
+                  data-expert-id="{{ expert.id }}"
+                  data-search="{{ ([expert.name, expert.current_title, expert.current_employer, expert.main_company, expert.category, expert.industry, expert.company_scale, expert.region, expert.description, expert.notes, expert.expert_comment, expert.research_feedback, expert.future_tracking] + expert.vendors)|join(' ')|lower }}"
+                  data-vendors="|{{ expert.vendors|join('|')|lower }}|"
+                  data-status="{{ expert.status }}"
+                  data-category="{{ expert.category|lower }}"
+                  data-industry="{{ expert.industry|lower }}"
+                  data-region="{{ expert.region|lower }}"
+                  data-scale="{{ expert.company_scale|lower }}"
+                  data-duplicate="{{ '1' if expert.is_duplicate else '0' }}"
+                  data-needs-review="{{ '1' if expert.needs_review else '0' }}"
+                  data-multiple-interviews="{{ '1' if expert.has_multiple_interviews else '0' }}"
+                  data-sort-name="{{ expert.name|lower }}"
+                  data-sort-record-id="{{ expert.source_record_id or loop.index }}"
+                  data-sort-title="{{ expert.current_title|lower }}"
+                  data-sort-employer="{{ expert.current_employer|lower }}"
+                  data-sort-industry="{{ expert.industry|lower }}"
+                  data-sort-scale="{{ expert.company_scale|lower }}"
+                  data-sort-region="{{ expert.region|lower }}"
+                  data-sort-interviews="{{ '%03d'|format(expert.interview_count) }}"
+                  data-sort-status="{{ expert.status }}"
+                >
+                  <td class="expert-portfolio-sequence-cell"><span class="expert-portfolio-sequence">{{ expert.source_record_id or ('#' ~ loop.index) }}</span></td>
+                  <td>
+                    <button class="expert-portfolio-name" type="button" data-expert-open="{{ expert.id }}">{{ expert.name }}</button>
+                    {% if expert.needs_review %}<span class="expert-portfolio-overlap">待核对</span>{% endif %}
+                  </td>
+                  <td>{{ expert.current_employer or '待补充' }}</td>
+                  <td><span class="expert-portfolio-vendor">{{ expert.industry or '待补充' }}</span></td>
+                  <td>{{ expert.company_scale or '待补充' }}</td>
+                  <td>{{ expert.region or '待补充' }}</td>
+                  <td><button class="expert-portfolio-interview-link" type="button" data-interviews-open="{{ expert.id }}" aria-label="查看 {{ expert.name }} 的访谈记录">{{ expert.interview_count }} 次{% if expert.last_interview_label %}<small>{{ expert.last_interview_label }}</small>{% endif %}</button></td>
+                  <td>
+                    <select class="expert-portfolio-status is-{{ expert.status_tone }}" data-inline-field="status" aria-label="{{ expert.name }}的状态" {% if is_visitor_mode %}disabled{% endif %}>
+                      {% for option in portfolio_status_options %}
+                        <option value="{{ option.value }}" {% if option.value == expert.status %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                  <td><span class="expert-portfolio-clamp">{{ expert.current_title or '待补充' }}</span></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div class="expert-portfolio-empty" data-portfolio-empty {% if portfolio_stats.total %}hidden{% endif %}>
+            <strong>当前没有匹配的专家</strong>
+            <span>可以清除筛选，或新增一位专家。</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog class="expert-portfolio-dialog expert-intake-dialog" id="expert-intake-dialog">
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">独立工作模块</p><h3>专家智能录入</h3></div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-intake-body">
+        <section class="expert-intake-source">
+          <div class="expert-intake-source-head">
+            <div><strong>粘贴原始专家信息</strong><p>模型只负责生成预览；确认前不会修改专家库。</p></div>
+            <span class="status-pill is-pending" data-intake-provider-status>正在读取接口配置…</span>
+          </div>
+          <label class="form-field"><span class="field-label">模型接口</span><select data-intake-provider><option value="">正在加载…</option></select></label>
+          <div class="expert-intake-thinking-controls">
+            <label class="expert-intake-thinking-option">
+              <input type="checkbox" data-intake-thinking checked>
+              <span><strong>思考模式</strong><small>默认开启；关闭后识别更快，复杂文本建议开启。</small></span>
+            </label>
+            <label class="form-field expert-intake-reasoning-field"><span class="field-label">思考强度</span><select data-intake-reasoning><option value="low" selected>低</option><option value="high">高</option><option value="max">最大</option></select></label>
+          </div>
+          <label class="form-field"><span class="field-label">专家原始资料</span><textarea rows="10" maxlength="40000" data-intake-source placeholder="可粘贴一位或多位专家的姓名、职位、公司、履历、地区、费率、可约时间和评论等原始信息。"></textarea></label>
+          <div class="expert-intake-source-actions">
+            <span data-intake-char-count>0 / 40,000</span>
+            <button class="button button-primary" type="button" data-intake-parse>识别并生成预览</button>
+          </div>
+        </section>
+        <section class="expert-intake-preview" data-intake-preview hidden>
+          <div class="expert-intake-preview-head">
+            <div><p class="eyebrow">人工确认区</p><h4 data-intake-preview-title>识别结果</h4></div>
+            <span class="status-pill is-warning">尚未写入</span>
+          </div>
+          <div class="expert-intake-warnings" data-intake-warnings></div>
+          <div class="expert-intake-cards" data-intake-cards></div>
+        </section>
+      </div>
+      <footer class="expert-portfolio-dialog-actions expert-intake-actions">
+        <span>解析失败不会影响现有专家资料。</span>
+        <div><button class="button button-ghost" type="button" data-dialog-close>关闭</button><button class="button button-primary" type="button" data-intake-import disabled>确认写入专家库</button></div>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-calendar-dialog" id="expert-portfolio-calendar-dialog" data-interview-calendar>
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head expert-portfolio-calendar-head">
+        <div><p class="eyebrow">访谈计划</p><h3>访谈日程</h3></div>
+        <div class="expert-portfolio-calendar-nav" aria-label="切换日历周次">
+          <button class="icon-button" type="button" data-calendar-previous aria-label="上一周">‹</button>
+          <button class="button button-ghost button-compact" type="button" data-calendar-current>本周</button>
+          <button class="icon-button" type="button" data-calendar-next aria-label="下一周">›</button>
+          <strong data-calendar-range></strong>
+        </div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-portfolio-calendar-body">
+        <div class="expert-portfolio-calendar-meta">
+          <span>北京时间 · 07:00–24:00</span>
+          <div class="expert-portfolio-calendar-meta-actions">
+            <button class="button button-ghost button-compact expert-calendar-sync-toggle" type="button" data-calendar-sync-toggle aria-expanded="false">
+              Outlook {{ '已连接' if portfolio_calendar_sync.configured else '未连接' }}
+            </button>
+            <strong data-calendar-summary></strong>
+          </div>
+        </div>
+        <section class="expert-calendar-sync-panel" data-calendar-sync-panel hidden>
+          <div class="expert-calendar-sync-status">
+            <div>
+              <strong>Outlook 日历 · 只读</strong>
+              <small data-calendar-sync-status>{{ portfolio_calendar_sync.message or ('等待同步' if portfolio_calendar_sync.configured else '尚未连接') }}</small>
+            </div>
+            <span class="status-pill is-{{ 'success' if portfolio_calendar_sync.status == 'ready' else ('warning' if portfolio_calendar_sync.status == 'error' else 'pending') }}">
+              {{ portfolio_calendar_sync.event_count }} 条 · {{ portfolio_calendar_sync.source_host or '未配置' }}
+            </span>
+          </div>
+          {% if not is_visitor_mode %}
+            <div class="expert-calendar-sync-controls">
+              <form data-calendar-sync-configure autocomplete="off">
+                <label class="form-field">
+                  <span class="field-label">Outlook 发布的 ICS 地址</span>
+                  <input type="password" name="ics_url" inputmode="url" autocomplete="new-password" placeholder="https://outlook…/calendar.ics" required>
+                </label>
+                <button class="button button-primary button-compact" type="submit">保存并测试</button>
+              </form>
+              <form data-calendar-sync-import enctype="multipart/form-data">
+                <label class="button button-ghost button-compact expert-calendar-file-button">
+                  导入 .ics
+                  <input type="file" name="calendar_file" accept="text/calendar,.ics" required>
+                </label>
+                <button class="button button-secondary button-compact" type="submit">读取文件</button>
+              </form>
+              <button class="button button-ghost button-compact" type="button" data-calendar-sync-refresh {% if not portfolio_calendar_sync.configured %}disabled{% endif %}>立即同步</button>
+              <button class="button button-ghost button-compact" type="button" data-link-scan-refresh>核对转录关联</button>
+            </div>
+          {% endif %}
+          <p>只读取日历事件；不访问邮箱、联系人、参会者或附件。订阅地址保存后不再回显。</p>
+          <p data-link-scan-status>
+            转录关联：{{ portfolio_link_scan.linked_count or 0 }} 条已连接{% if portfolio_link_scan.suggestion_count %}，{{ portfolio_link_scan.suggestion_count }} 条待核对{% endif %}{% if portfolio_link_scan.duplicate_count %}，{{ portfolio_link_scan.duplicate_count }} 条疑似重复{% endif %}。
+          </p>
+        </section>
+        <div class="expert-portfolio-calendar-scroll">
+          <div class="expert-portfolio-calendar-week" data-calendar-week role="grid" aria-label="每周访谈日程"></div>
+        </div>
+        <p class="expert-portfolio-calendar-empty" data-calendar-empty hidden>本周暂无访谈安排。可在专家档案的“访谈时间线”中新增。</p>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-quota-dialog" id="expert-portfolio-quota-dialog">
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">访谈进度</p><h3>已访谈信息</h3></div>
+        <div class="expert-portfolio-quota-head-actions">
+          <button
+            class="button button-ghost button-compact expert-portfolio-quota-fullscreen"
+            type="button"
+            data-quota-fullscreen
+            aria-pressed="false"
+            title="展开为全屏浮窗"
+          ><span aria-hidden="true">⛶</span><span data-quota-fullscreen-label>全屏</span></button>
+          <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+        </div>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-portfolio-quota-body" data-quota-scroll-region>
+        <div class="expert-portfolio-quota-kpis" aria-label="访谈配额概览">
+          <article><span>已完成</span><strong>{{ portfolio_quota_stats.completed }}</strong></article>
+          <article><span>已排期待访</span><strong>{{ portfolio_quota_stats.scheduled }}</strong></article>
+          <article><span>合计</span><strong>{{ portfolio_quota_stats.total }}</strong></article>
+        </div>
+        <div class="expert-portfolio-quota-legend" aria-label="状态图例">
+          <span><i class="is-completed" aria-hidden="true"></i>已完成访谈</span>
+          <span><i class="is-scheduled" aria-hidden="true"></i>已排期待访</span>
+        </div>
+        {% if portfolio_quota_groups %}
+          {% set quota_region_count = portfolio_quota_groups[0].regions|length %}
+          <div class="expert-portfolio-quota-matrix" style="--quota-table-min-width: {{ 160 + quota_region_count * 200 }}px">
+          {% for group in portfolio_quota_groups %}
+            <section class="expert-portfolio-quota-group">
+              <header><h4>{{ group.scale }}</h4></header>
+              <div class="expert-portfolio-quota-table-scroll">
+                <table class="expert-portfolio-quota-table">
+                <colgroup>
+                  <col class="expert-portfolio-quota-axis-column">
+                  {% for region in group.regions %}<col class="expert-portfolio-quota-region-column">{% endfor %}
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>行业 / 地区</th>
+                    {% for region in group.regions %}<th>{{ region }}</th>{% endfor %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in group.rows %}
+                    <tr>
+                      <th>{{ row.industry }}</th>
+                      {% for cell in row.cells %}
+                        <td>
+                          <div class="expert-portfolio-quota-companies">
+                            {% for item in cell.records %}
+                              <button
+                                class="expert-portfolio-quota-company is-{{ item.quota_status }}"
+                                type="button"
+                                data-quota-expert-open="{{ item.expert_id }}"
+                                title="点击查看访谈记录"
+                              >
+                                <i aria-hidden="true"></i>
+                                <span>{{ item.company }}{% if item.interview_count == 1 %}（{{ item.interview_dates[0] }}）{% elif item.interview_count == 2 %}（{{ item.interview_dates|join('；') }}）{% elif item.interview_count > 2 %}（共 {{ item.interview_count }} 次）{% endif %}</span>
+                              </button>
+                            {% endfor %}
+                          </div>
+                        </td>
+                      {% endfor %}
+                    </tr>
+                  {% endfor %}
+                </tbody>
+                </table>
+              </div>
+            </section>
+          {% endfor %}
+          </div>
+        {% else %}
+          <div class="expert-portfolio-quota-empty">
+            <strong>暂无访谈进度</strong>
+            <span>已完成或已排期待访的记录会显示在这里。</span>
+          </div>
+        {% endif %}
+      </div>
+      <footer class="expert-portfolio-dialog-actions">
+        <button class="button button-ghost" type="button" data-dialog-close>关闭</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog" id="expert-portfolio-add-dialog">
+    <form class="expert-portfolio-dialog-shell" action="{{ url_for('create_expert_portfolio_entry') }}" method="post">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">新增专家</p><h3>建立专家档案</h3></div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-portfolio-form-grid">
+        <label class="form-field"><span class="field-label">专家姓名 *</span><input name="name" required></label>
+        <label class="form-field"><span class="field-label">专家网络</span><input name="vendors" placeholder="GLG, Third Bridge"></label>
+        <label class="form-field"><span class="field-label">供应商编号</span><input name="vendor_index" placeholder="GLG: 1, Third Bridge: #1.1"></label>
+        <label class="form-field"><span class="field-label">当前职位</span><input name="current_title"></label>
+        <label class="form-field"><span class="field-label">当前机构</span><input name="current_employer"></label>
+        <label class="form-field"><span class="field-label">重点公司</span><input name="main_company" placeholder="留空时自动判断"></label>
+        <label class="form-field"><span class="field-label">研究分类</span><select name="category">{% for category in portfolio_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select></label>
+        <label class="form-field"><span class="field-label">行业</span><input name="industry" placeholder="例如：金融、电信、软件"></label>
+        <label class="form-field"><span class="field-label">企业规模</span><input name="company_scale" placeholder="例如：超大型、大型、中型"></label>
+        <label class="form-field"><span class="field-label">地区</span><input name="region" placeholder="例如：欧洲-英国、美国"></label>
+        <label class="form-field"><span class="field-label">来源编号</span><input name="source_record_id" placeholder="例如：#8"></label>
+        <label class="form-field"><span class="field-label">推进状态</span><select name="status">{% for option in portfolio_status_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></label>
+        <label class="form-field"><span class="field-label">录入日期</span><input name="date_added" type="date"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">背景与能力</span><textarea name="description" rows="5"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">职业履历</span><textarea name="job_history" rows="5" placeholder="每行：职位 | 公司 | 时间"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">跟进备注</span><textarea name="notes" rows="4"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">专家评论</span><textarea name="expert_comment" rows="4"></textarea></label>
+        <label class="form-field"><span class="field-label">资料核对状态</span><select name="data_quality_status"><option value="source-recorded">按来源记录</option><option value="verified">已核实</option><option value="needs-review">待核对</option></select></label>
+        <label class="form-field"><span class="field-label">数据来源</span><input name="source_label"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">待核对说明</span><textarea name="data_quality_notes" rows="2"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">来源邮件</span><input name="source_emails" placeholder="多个文件名用逗号分隔"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">重合说明</span><textarea name="duplicate_note" rows="2"></textarea></label>
+      </div>
+      <footer class="expert-portfolio-dialog-actions">
+        <button class="button button-ghost" type="button" data-dialog-close>取消</button>
+        <button class="button button-primary" type="submit">加入专家组合</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-detail-dialog" id="expert-portfolio-detail-dialog">
+    <form class="expert-portfolio-dialog-shell" method="post" data-expert-detail-form>
+      <input type="hidden" name="next_url" value="{{ page_return_url }}">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">专家档案</p><h3 data-expert-detail-title>专家详情</h3></div>
+        <div class="expert-portfolio-detail-head-actions">
+          <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+        </div>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-portfolio-form-grid">
+        <label class="form-field"><span class="field-label">专家姓名 *</span><input name="name" required></label>
+        <label class="form-field"><span class="field-label">专家网络</span><input name="vendors"></label>
+        <label class="form-field"><span class="field-label">供应商编号</span><input name="vendor_index"></label>
+        <label class="form-field"><span class="field-label">当前职位</span><input name="current_title"></label>
+        <label class="form-field"><span class="field-label">当前机构</span><input name="current_employer"></label>
+        <label class="form-field"><span class="field-label">重点公司</span><input name="main_company"></label>
+        <label class="form-field"><span class="field-label">研究分类</span><select name="category">{% for category in portfolio_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select></label>
+        <label class="form-field"><span class="field-label">行业</span><input name="industry"></label>
+        <label class="form-field"><span class="field-label">企业规模</span><input name="company_scale"></label>
+        <label class="form-field"><span class="field-label">地区</span><input name="region"></label>
+        <label class="form-field"><span class="field-label">来源编号</span><input name="source_record_id"></label>
+        <label class="form-field"><span class="field-label">推进状态</span><select name="status">{% for option in portfolio_status_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></label>
+        <label class="form-field"><span class="field-label">录入日期</span><input name="date_added" type="date"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">背景与能力</span><textarea name="description" rows="6"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">职业履历</span><textarea name="job_history" rows="6" placeholder="每行：职位 | 公司 | 时间"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">跟进备注</span><textarea name="notes" rows="4"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">专家评论</span><textarea name="expert_comment" rows="4"></textarea></label>
+        <label class="form-field"><span class="field-label">资料核对状态</span><select name="data_quality_status"><option value="source-recorded">按来源记录</option><option value="verified">已核实</option><option value="needs-review">待核对</option></select></label>
+        <label class="form-field"><span class="field-label">数据来源</span><input name="source_label"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">待核对说明</span><textarea name="data_quality_notes" rows="2"></textarea></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">来源邮件</span><input name="source_emails"></label>
+        <label class="form-field expert-portfolio-span-2"><span class="field-label">重合说明</span><textarea name="duplicate_note" rows="2"></textarea></label>
+      </div>
+      <footer class="expert-portfolio-dialog-actions expert-portfolio-dialog-actions-split">
+        <button class="danger-button" type="button" data-expert-delete>删除专家</button>
+        <div>
+          <button class="button button-ghost" type="button" data-dialog-close>取消</button>
+          <button class="button button-primary" type="submit">保存档案</button>
+        </div>
+      </footer>
+    </form>
+    <form method="post" data-expert-delete-form hidden></form>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-interviews-dialog" id="expert-portfolio-interviews-dialog" data-expert-interviews-dialog>
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head">
+        <div class="expert-portfolio-interview-dialog-title">
+          <p class="eyebrow">独立访谈档案</p>
+          <h3 data-interview-dialog-title>访谈记录</h3>
+          <p class="section-caption" data-interview-dialog-subtitle>选择专家后查看历次访谈。</p>
+        </div>
+        <div class="expert-portfolio-detail-head-actions">
+          <button class="button button-ghost button-compact expert-portfolio-detail-back" type="button" data-interview-dialog-back hidden>← 返回日程</button>
+          <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+        </div>
+      </header>
+      <div class="expert-portfolio-dialog-body">
+        <section class="expert-portfolio-interviews">
+          <div class="expert-portfolio-interviews-head">
+            <div><p class="eyebrow">历次记录</p><h4>按时间归档</h4></div>
+            <span class="summary-count" data-interview-count>0</span>
+          </div>
+          <div class="expert-portfolio-interview-list" data-interview-list></div>
+          {% if not is_visitor_mode %}
+            <details class="expert-portfolio-interview-create-fold">
+              <summary><strong>新增访谈记录</strong><span>填写本次访谈信息并关联语音转录</span></summary>
+              <div class="expert-portfolio-interview-composer" data-interview-composer>
+                <div class="form-field expert-interview-datetime-field" data-interview-datetime="occurred_at">
+                  <span class="field-label">访谈时间</span>
+                  <div class="expert-interview-datetime-parts">
+                    <input type="date" data-interview-date-part="occurred_at" aria-label="访谈日期">
+                    <input type="text" inputmode="numeric" maxlength="5" list="expert-interview-time-options" data-interview-time-part="occurred_at" aria-label="访谈开始时间" placeholder="22:00">
+                  </div>
+                  <input type="hidden" data-interview-field="occurred_at">
+                </div>
+                <div class="form-field expert-interview-datetime-field" data-interview-datetime="ended_at">
+                  <span class="field-label">结束时间</span>
+                  <div class="expert-interview-datetime-parts">
+                    <input type="date" data-interview-date-part="ended_at" aria-label="结束日期">
+                    <input type="text" inputmode="numeric" maxlength="5" list="expert-interview-time-options" data-interview-time-part="ended_at" aria-label="访谈结束时间" placeholder="23:00">
+                  </div>
+                  <input type="hidden" data-interview-field="ended_at">
+                </div>
+                <div class="expert-interview-duration-actions expert-portfolio-span-2" data-interview-duration-actions>
+                  <span>按开始时间快速设置结束：</span>
+                  <button type="button" data-interview-duration="30">+30 分钟</button>
+                  <button type="button" data-interview-duration="60">+1 小时</button>
+                  <button type="button" data-interview-duration="90">+1.5 小时</button>
+                </div>
+                <label class="form-field"><span class="field-label">原始时间说明</span><input data-interview-field="display_time" placeholder="例如：2026-08-07 18:00–21:00 北京时间"></label>
+                <label class="form-field"><span class="field-label">访谈主题</span><input data-interview-field="title" value="Token economics 专家访谈"></label>
+                <label class="form-field"><span class="field-label">访谈人</span><input data-interview-field="interviewer" placeholder="例如：Wei、Patrick"></label>
+                <label class="form-field"><span class="field-label">访谈状态</span><select data-interview-field="status">{% for option in portfolio_interview_status_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></label>
+                <label class="form-field"><span class="field-label">配额统计</span><select data-interview-field="quota_status">{% for option in portfolio_quota_status_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></label>
+                <label class="form-field expert-portfolio-span-2"><span class="field-label">关联语音转录</span><select data-interview-field="transcript_id"><option value="">暂不关联</option>{% for transcript in portfolio_transcript_options %}<option value="{{ transcript.id }}">{{ transcript.label }}</option>{% endfor %}</select></label>
+                <label class="form-field expert-portfolio-span-2"><span class="field-label">访谈备注</span><textarea rows="3" data-interview-field="notes"></textarea></label>
+                <label class="form-field expert-portfolio-span-2"><span class="field-label">调研反馈</span><textarea rows="3" data-interview-field="research_feedback"></textarea></label>
+                <label class="form-field expert-portfolio-span-2"><span class="field-label">未来跟踪信息</span><textarea rows="3" data-interview-field="future_tracking"></textarea></label>
+                <label class="form-field"><span class="field-label">转录核对状态</span><select data-interview-field="transcription_quality"><option value="needs-review">需与音频核对</option><option value="reviewed">已核对</option><option value="not-applicable">无转录</option></select></label>
+                <label class="form-field"><span class="field-label">来源</span><input data-interview-field="source_label"></label>
+                <label class="form-field expert-portfolio-span-2"><span class="field-label">转录误差说明</span><textarea rows="2" data-interview-field="transcription_notes" placeholder="记录人名、公司名、数字等需回听确认的位置"></textarea></label>
+                <div class="expert-portfolio-interview-composer-actions expert-portfolio-span-2"><span class="expert-interview-draft-status" data-interview-draft-status>草稿仅保存在当前浏览器</span><button class="button button-primary" type="button" data-interview-create>保存访谈记录</button></div>
+              </div>
+            </details>
+          {% endif %}
+        </section>
+      </div>
+      <footer class="expert-portfolio-dialog-actions">
+        <span class="section-caption">专家档案与访谈记录分别维护，删除访谈不会影响专家资料。</span>
+        <button class="button button-ghost" type="button" data-dialog-close>关闭</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <datalist id="expert-interview-time-options">
+    {% for hour in range(0, 24) %}<option value="{{ '%02d'|format(hour) }}:00"></option><option value="{{ '%02d'|format(hour) }}:30"></option>{% endfor %}
+  </datalist>
+
+  <dialog class="expert-portfolio-dialog expert-interview-summary-dialog" id="expert-interview-summary-dialog" data-interview-summary-dialog>
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head">
+        <div class="expert-portfolio-interview-dialog-title">
+          <p class="eyebrow">DeepSeek · 访谈提炼</p>
+          <h3 data-summary-dialog-title>访谈摘要</h3>
+          <p class="section-caption" data-summary-dialog-subtitle>逐项结论只基于关联转录生成。</p>
+        </div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body expert-interview-summary-body">
+        <section class="expert-interview-summary-state" data-summary-state>
+          <span class="expert-interview-summary-spinner" aria-hidden="true"></span>
+          <div><strong data-summary-state-title>正在读取摘要</strong><p data-summary-state-message>请稍候。</p></div>
+        </section>
+        <article class="expert-interview-summary-content" data-summary-content hidden>
+          <section class="expert-interview-summary-overview">
+            <p class="eyebrow">总体摘要</p>
+            <p data-summary-overview></p>
+          </section>
+          <section>
+            <div class="expert-interview-summary-section-head"><p class="eyebrow">逐项结论</p><span class="summary-count" data-summary-count>0</span></div>
+            <div class="expert-interview-summary-conclusions" data-summary-conclusions></div>
+          </section>
+          <section data-summary-followups-section hidden>
+            <p class="eyebrow">后续核实</p>
+            <ul class="expert-interview-summary-followups" data-summary-followups></ul>
+          </section>
+        </article>
+      </div>
+      <footer class="expert-portfolio-dialog-actions expert-interview-summary-actions">
+        <span class="section-caption" data-summary-meta>尚未生成</span>
+        <div>
+          <button class="button button-ghost button-compact" type="button" data-summary-refresh>刷新状态</button>
+          <button class="button button-primary button-compact" type="button" data-summary-generate hidden>生成摘要</button>
+          <button class="button button-ghost button-compact" type="button" data-dialog-close>关闭</button>
+        </div>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-small-dialog" id="expert-portfolio-category-dialog">
+    <div class="expert-portfolio-dialog-shell">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">分类设置</p><h3>管理研究分类</h3></div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body">
+        <div class="expert-portfolio-category-list">
+          {% for category in portfolio_categories %}
+            <form action="{{ url_for('update_expert_portfolio_categories') }}" method="post" class="expert-portfolio-category-row">
+              <input type="hidden" name="old_name" value="{{ category }}">
+              <input name="new_name" value="{{ category }}" aria-label="分类名称">
+              <button class="button button-secondary button-compact" name="action" value="rename" type="submit">改名</button>
+              {% if category != '未分类' %}<button class="button button-ghost button-compact" name="action" value="delete" type="submit" data-confirm-category-delete>删除</button>{% endif %}
+            </form>
+          {% endfor %}
+        </div>
+        <form action="{{ url_for('update_expert_portfolio_categories') }}" method="post" class="expert-portfolio-category-add">
+          <input name="new_name" placeholder="新增分类名称" required>
+          <button class="button button-primary button-compact" name="action" value="add" type="submit">新增分类</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="expert-portfolio-dialog expert-portfolio-small-dialog" id="expert-portfolio-json-dialog">
+    <form class="expert-portfolio-dialog-shell" action="{{ url_for('import_expert_portfolio_json') }}" method="post" enctype="multipart/form-data">
+      <header class="expert-portfolio-dialog-head">
+        <div><p class="eyebrow">数据迁移</p><h3>导入专家组合 JSON</h3></div>
+        <button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button>
+      </header>
+      <div class="expert-portfolio-dialog-body">
+        <label class="form-field"><span class="field-label">JSON 文件</span><input type="file" name="portfolio_json" accept="application/json,.json" required></label>
+        <label class="form-field"><span class="field-label">导入方式</span><select name="mode"><option value="merge">按姓名合并（推荐）</option><option value="replace">替换当前全部数据</option></select></label>
+        <p class="field-help">“替换”会覆盖当前专家组合，请先导出一份备份。</p>
+      </div>
+      <footer class="expert-portfolio-dialog-actions"><button class="button button-ghost" type="button" data-dialog-close>取消</button><button class="button button-primary" type="submit">开始导入</button></footer>
+    </form>
+  </dialog>
+
+  <div class="expert-portfolio-toast" data-portfolio-toast hidden>已保存</div>
+  <script type="application/json" data-expert-portfolio-bootstrap>{{ {"experts": portfolio_experts, "transcripts": portfolio_transcript_options, "calendarSync": portfolio_calendar_sync, "readonly": is_visitor_mode} | tojson }}</script>
+</body>
+</html>
